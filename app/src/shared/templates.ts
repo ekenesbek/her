@@ -11,12 +11,12 @@ export type Template = {
 export const TEMPLATES: Template[] = [
   {
     id: "gmail-taxi-operator",
-    emoji: "🎯",
+    emoji: "",
     name: "Gmail + Taxi оператор",
     tagline: "Находит письма и готовит Яндекс Такси до подтверждения",
     draft: {
       name: "Gmail + Taxi оператор",
-      emoji: "🎯",
+      emoji: "",
       description: "Операционный агент: Gmail, Яндекс Такси, результат или понятный блокер.",
       model: "claude-sonnet-4-6",
       systemPrompt:
@@ -26,12 +26,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "personal-assistant",
-    emoji: "🧠",
+    emoji: "",
     name: "Персональный ассистент",
     tagline: "Универсал: почта, календарь, контакты, ресёрч, бронирования",
     draft: {
       name: "Персональный ассистент",
-      emoji: "🧠",
+      emoji: "",
       description: "Помощник для любых задач через браузер и веб.",
       model: "claude-sonnet-4-6",
       systemPrompt:
@@ -41,12 +41,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "mailbox",
-    emoji: "✉️",
+    emoji: "",
     name: "Почтовый агент",
     tagline: "Триаж Gmail, черновики ответов, поиск нужного письма",
     draft: {
       name: "Почтовый агент",
-      emoji: "✉️",
+      emoji: "",
       description: "Читает Gmail, сортирует письма, пишет черновики ответов.",
       model: "claude-sonnet-4-6",
       systemPrompt:
@@ -56,12 +56,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "researcher",
-    emoji: "🔬",
+    emoji: "",
     name: "Ресёрчер",
     tagline: "Глубокий поиск по теме, выжимка с источниками",
     draft: {
       name: "Ресёрчер",
-      emoji: "🔬",
+      emoji: "",
       description: "Делает глубокий ресёрч и сохраняет выжимки с цитатами.",
       model: "claude-opus-4-7",
       systemPrompt:
@@ -71,12 +71,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "web-mcp",
-    emoji: "🕸️",
+    emoji: "",
     name: "Web MCP",
     tagline: "Обходит сайт, строит граф страниц и копит память по домену",
     draft: {
       name: "Web MCP",
-      emoji: "🕸️",
+      emoji: "",
       description: "Картограф сайта: страницы, граф, layout, заметки и цель прохода.",
       model: "claude-sonnet-4-6",
       systemPrompt:
@@ -86,12 +86,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "coder",
-    emoji: "🛠️",
+    emoji: "",
     name: "Кодовый агент",
     tagline: "Читает код, запускает команды, вносит правки локально",
     draft: {
       name: "Кодовый агент",
-      emoji: "🛠️",
+      emoji: "",
       description: "Инженерный агент на Codex для работы с локальным кодом.",
       model: "gpt-5.3-codex",
       systemPrompt:
@@ -101,12 +101,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "shopper",
-    emoji: "🛒",
+    emoji: "",
     name: "Шоппер",
     tagline: "Сравнить цены, найти лучшее предложение, добавить в корзину",
     draft: {
       name: "Шоппер",
-      emoji: "🛒",
+      emoji: "",
       description: "Ищет и сравнивает товары. Покупки — только с подтверждения.",
       model: "claude-sonnet-4-6",
       systemPrompt:
@@ -116,12 +116,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "calendar",
-    emoji: "📅",
+    emoji: "",
     name: "Календарный агент",
     tagline: "Планирование встреч, поиск окон, приглашения",
     draft: {
       name: "Календарный агент",
-      emoji: "📅",
+      emoji: "",
       description: "Управляет Google Calendar: встречи, свободные окна, приглашения.",
       model: "claude-haiku-4-5-20251001",
       systemPrompt:
@@ -131,12 +131,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "google-contacts",
-    emoji: "👥",
+    emoji: "",
     name: "Google Contacts",
     tagline: "Поиск людей, обновление карточек и подготовка новых контактов",
     draft: {
       name: "Google Contacts",
-      emoji: "👥",
+      emoji: "",
       description: "Работает с Google Contacts через твою Chrome-сессию.",
       model: "claude-sonnet-4-6",
       systemPrompt:
@@ -146,12 +146,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "apple-contacts",
-    emoji: "🍎",
+    emoji: "",
     name: "Apple Contacts",
     tagline: "Поиск и подготовка правок в контактах iCloud",
     draft: {
       name: "Apple Contacts",
-      emoji: "🍎",
+      emoji: "",
       description: "Работает с Apple/iCloud Contacts через твою Chrome-сессию.",
       model: "claude-sonnet-4-6",
       systemPrompt:
@@ -161,12 +161,12 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: "blank",
-    emoji: "✨",
+    emoji: "",
     name: "С нуля",
     tagline: "Пустой шаблон — опиши своего агента сам",
     draft: {
       name: "Мой агент",
-      emoji: "✨",
+      emoji: "",
       description: "",
       model: "claude-sonnet-4-6",
       systemPrompt: "",

@@ -57,7 +57,7 @@ export default function BrowserSettingsForm({
   return (
     <div className="flex-1 px-6 py-10 max-w-3xl w-full mx-auto">
       <div className="flex items-center gap-3 mb-6">
-        <Link href="/dashboard" className="btn btn-ghost text-sm">← Агенты</Link>
+        <Link href="/" className="btn btn-ghost text-sm">← Назад</Link>
       </div>
 
       <div className="space-y-6">

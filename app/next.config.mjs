@@ -9,6 +9,7 @@ const nextConfig = {
     root: __dirname,
   },
   serverExternalPackages: ["better-sqlite3", "@simplewebauthn/server"],
+  devIndicators: false,
 };
 
 export default nextConfig;

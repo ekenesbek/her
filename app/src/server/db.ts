@@ -189,7 +189,7 @@ function cleanupExpiredRecords(db: Database.Database) {
   ).run(now, now);
 }
 
-function getDb(): Database.Database {
+export function getDb(): Database.Database {
   if (_db) return _db;
 
   const db = new Database(dbPath);
@@ -343,6 +343,123 @@ function getDb(): Database.Database {
       FOREIGN KEY (task_run_id) REFERENCES task_runs(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_task_artifacts_run ON task_artifacts(task_run_id, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS service_registry (
+      user_id TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'unknown',
+      logged_in INTEGER NOT NULL DEFAULT 0,
+      has_mcp INTEGER NOT NULL DEFAULT 0,
+      mcp_slug TEXT,
+      auto_provisioned INTEGER NOT NULL DEFAULT 0,
+      first_seen INTEGER NOT NULL,
+      last_seen INTEGER NOT NULL,
+      visit_count INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (user_id, origin),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_service_registry_user ON service_registry(user_id, last_seen DESC);
+
+    CREATE TABLE IF NOT EXISTS site_knowledge (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      content_md TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'recording',
+      confidence REAL NOT NULL DEFAULT 0.5,
+      superseded_by TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_knowledge_user_origin ON site_knowledge(user_id, origin, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS knowledge_pages (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content_md TEXT NOT NULL DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 0.5,
+      superseded_by TEXT,
+      sources TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_pages_user ON knowledge_pages(user_id, type, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS knowledge_edges (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      from_page TEXT NOT NULL,
+      to_page TEXT NOT NULL,
+      relation TEXT NOT NULL,
+      weight REAL NOT NULL DEFAULT 1.0,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (from_page) REFERENCES knowledge_pages(id) ON DELETE CASCADE,
+      FOREIGN KEY (to_page) REFERENCES knowledge_pages(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_edges_from ON knowledge_edges(user_id, from_page);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_edges_to ON knowledge_edges(user_id, to_page);
+
+    CREATE TABLE IF NOT EXISTS user_policies (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      action TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      rationale TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_policies_unique ON user_policies(user_id, scope, action);
+
+    CREATE TABLE IF NOT EXISTS agent_actions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      task_run_id TEXT,
+      tool TEXT NOT NULL,
+      origin TEXT,
+      args_hash TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_actions_user ON agent_actions(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS encrypted_credentials (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      username TEXT,
+      ciphertext BLOB NOT NULL,
+      iv BLOB NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'password',
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_encrypted_credentials_user ON encrypted_credentials(user_id, origin);
+
+    CREATE TABLE IF NOT EXISTS user_mcp_connections (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      origin TEXT,
+      connection_url TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_user_mcp_connections_slug ON user_mcp_connections(user_id, slug);
   `);
 
   ensureAgentsOwnerColumn(db);
@@ -1526,4 +1643,31 @@ export function clearMessages(agentId: string, userId: string): void {
   const db = getDb();
   db.prepare("DELETE FROM chat_messages WHERE agent_id = ?").run(agentId);
   db.prepare("DELETE FROM task_runs WHERE agent_id = ? AND user_id = ?").run(agentId, userId);
+}
+
+export function truncateMessagesFrom(
+  agentId: string,
+  userId: string,
+  messageId: string,
+): boolean {
+  if (!getAgent(agentId, userId)) return false;
+
+  const db = getDb();
+  const anchor = db
+    .prepare(
+      "SELECT created_at, rowid FROM chat_messages WHERE id = ? AND agent_id = ?",
+    )
+    .get(messageId, agentId) as { created_at: number; rowid: number } | undefined;
+
+  if (!anchor) return false;
+
+  const info = db
+    .prepare(
+      `DELETE FROM chat_messages
+       WHERE agent_id = ?
+         AND (created_at > ? OR (created_at = ? AND rowid >= ?))`,
+    )
+    .run(agentId, anchor.created_at, anchor.created_at, anchor.rowid);
+
+  return info.changes > 0;
 }

@@ -230,12 +230,12 @@ export function getModelProvider(model: AgentModel): AgentProvider {
   return MODEL_LABELS[model].provider;
 }
 
-export const CAPABILITY_LABELS: Record<Capability, { label: string; hint: string; icon: string }> = {
-  web_search: { label: "Веб-поиск", hint: "Искать в интернете", icon: "🔍" },
-  web_fetch: { label: "Открывать URL", hint: "Читать веб-страницы", icon: "🌐" },
-  chrome_browser: { label: "Chrome с сессиями", hint: "Твой браузер, твои логины", icon: "🧭" },
-  credential_broker: { label: "Парольный брокер", hint: "Запрашивать approve на saved credentials", icon: "🔐" },
-  file_read: { label: "Чтение файлов", hint: "Читать локальные файлы", icon: "📄" },
-  file_write: { label: "Запись файлов", hint: "Сохранять результаты на диск", icon: "💾" },
-  shell: { label: "Shell", hint: "Запускать команды в терминале", icon: "⚡" },
+export const CAPABILITY_LABELS: Record<Capability, { label: string; hint: string }> = {
+  web_search: { label: "Веб-поиск", hint: "Искать в интернете" },
+  web_fetch: { label: "Открывать URL", hint: "Читать веб-страницы" },
+  chrome_browser: { label: "Chrome с сессиями", hint: "Твой браузер, твои логины" },
+  credential_broker: { label: "Парольный брокер", hint: "Запрашивать approve на saved credentials" },
+  file_read: { label: "Чтение файлов", hint: "Читать локальные файлы" },
+  file_write: { label: "Запись файлов", hint: "Сохранять результаты на диск" },
+  shell: { label: "Shell", hint: "Запускать команды в терминале" },
 };

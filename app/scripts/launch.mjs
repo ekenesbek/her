@@ -11,6 +11,7 @@ import {
   readBridgeDoctor,
   run,
 } from "./browser-runtime.mjs";
+import { ensureManagedChrome, managedChromeStatus } from "./managed-chrome.mjs";
 
 console.log("Launching Meta app");
 
@@ -29,16 +30,34 @@ ensureEnvLocal(CHROME_MCP_URL);
 if (!commandExists("mcp-chrome-bridge")) {
   console.log("Browser bridge is missing. Running browser setup...");
   await run("node", ["scripts/browser-setup.mjs"], { cwd: APP_ROOT });
-} else {
-  const doctor = readBridgeDoctor({ fix: true });
-  const ping = await pingChromeMcp(CHROME_MCP_URL);
+}
 
-  if (!doctor.ok || !ping.ok) {
-    console.log("Browser runtime is not fully connected yet.");
-    console.log("Run pnpm browser:setup, or open Chrome MCP and click Connect, then rerun pnpm browser:doctor.");
+const doctor = readBridgeDoctor({ fix: true });
+if (!doctor.ok) {
+  console.log("Browser bridge doctor reports issues. Run: pnpm browser:doctor");
+}
+
+const preStatus = managedChromeStatus();
+if (!preStatus.running) {
+  console.log("Starting managed Chrome profile...");
+}
+try {
+  const result = await ensureManagedChrome({ wait: true });
+  if (result.mcp?.ok) {
+    console.log(
+      result.started
+        ? `Managed Chrome started (pid ${result.pid}); MCP endpoint ready.`
+        : "Managed Chrome already running; MCP endpoint ready.",
+    );
   } else {
-    console.log("Browser runtime is ready.");
+    console.log(
+      `Managed Chrome is running (pid ${result.pid}) but MCP endpoint did not respond: ${result.mcp?.status ?? result.mcp?.body}`,
+    );
+    console.log("Check the Chrome MCP extension; run: pnpm browser:doctor");
   }
+} catch (err) {
+  console.log(`Could not start managed Chrome: ${err instanceof Error ? err.message : err}`);
+  console.log("Run: pnpm browser:setup");
 }
 
 console.log("");

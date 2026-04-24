@@ -16,6 +16,7 @@ import {
   getTaskRunSnapshot,
   recordDecisionMemorySignal,
   listMessages,
+  truncateMessagesFrom,
   updateMessage,
   updateTaskRunStatus,
 } from "@/server/db";
@@ -26,6 +27,10 @@ import {
   createWebMcpRecordingState,
   recordWebMcpToolResult,
 } from "@/server/web-mcp/recording";
+import {
+  buildIdentityRuntimeContext,
+  extractAndPersistMemoryNotes,
+} from "@/server/identity/storage";
 import type {
   Agent,
   BrowserConnection,
@@ -37,6 +42,7 @@ import type {
   TaskRunStatus,
   DecisionMemory,
   ToolTraceEntry,
+  User,
   UserRuntimeMetadata,
 } from "@/shared/types";
 import { getModelProvider } from "@/shared/types";
@@ -106,11 +112,15 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const conversation = history
     .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
     .join("\n\n");
+  const priorConversation = history
+    .slice(0, -1)
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n\n");
   const browserConnection = resolveBrowserConnection(getBrowserSettings(user.id));
   const provider = getModelProvider(agent.model);
   const runtimeContext = buildRuntimeContext(
     agent,
-    user.id,
+    user,
     browserConnection,
     userRuntimeMetadata,
     decisionMemory,
@@ -183,6 +193,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         send,
       });
 
+      const abortSignal = req.signal;
+
       let result: AgentRunResult = { content: "", toolTrace: [] };
       try {
         taskTrace.sendSnapshot();
@@ -195,11 +207,13 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         if (provider === "codex") {
           result = await streamCodexReply({
             agent,
-            conversation,
+            priorConversation,
+            latestUserMessage: message,
             runtimeContext,
             browserConnection,
             taskTrace,
             send,
+            abortSignal,
           });
         } else {
           result = await streamClaudeReply({
@@ -209,10 +223,13 @@ export async function POST(req: NextRequest, ctx: Ctx) {
             browserConnection,
             taskTrace,
             send,
+            abortSignal,
           });
         }
 
-        if (shouldRetryBrowserAutonomyHandoff(result, agent, browserConnection, message)) {
+        if (abortSignal.aborted) {
+          taskTrace.setStatus("cancelled", "Задача остановлена пользователем", {}, Date.now());
+        } else if (shouldRetryBrowserAutonomyHandoff(result, agent, browserConnection, message)) {
           taskTrace.addEvent({
             taskRunId: taskTrace.taskRunId,
             userId: taskTrace.userId,
@@ -228,11 +245,13 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           const retryResult = provider === "codex"
             ? await streamCodexReply({
                 agent,
-                conversation: retryConversation,
+                priorConversation: [conversation, `Assistant: ${result.content}`].join("\n\n"),
+                latestUserMessage: BROWSER_AUTONOMY_RETRY_INSTRUCTION,
                 runtimeContext,
                 browserConnection,
                 taskTrace,
                 send,
+                abortSignal,
               })
             : await streamClaudeReply({
                 agent,
@@ -241,6 +260,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
                 browserConnection,
                 taskTrace,
                 send,
+                abortSignal,
               });
 
           result = {
@@ -249,9 +269,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           };
         }
 
-        taskTrace.setStatus("done", "Задача завершена", {
-          toolCalls: result.toolTrace.length,
-        }, Date.now());
+        if (!abortSignal.aborted) {
+          taskTrace.setStatus("done", "Задача завершена", {
+            toolCalls: result.toolTrace.length,
+          }, Date.now());
+        }
       } catch (err) {
         const failure = normalizeAgentRunFailure(err, result);
         const errMsg = failure.message;
@@ -609,6 +631,7 @@ async function streamClaudeReply({
   browserConnection,
   taskTrace,
   send,
+  abortSignal,
 }: {
   agent: Agent;
   conversation: string;
@@ -616,6 +639,7 @@ async function streamClaudeReply({
   browserConnection: BrowserConnection;
   taskTrace: TaskTraceRuntime;
   send: (event: string, data: unknown) => void;
+  abortSignal?: AbortSignal;
 }) {
   const tools = capabilitiesToTools(agent.capabilities);
   let full = "";
@@ -673,6 +697,7 @@ async function streamClaudeReply({
 
   try {
     for await (const msg of q) {
+      if (abortSignal?.aborted) break;
       if (msg.type === "assistant") {
         const content = msg.message?.content;
         if (Array.isArray(content)) {
@@ -776,20 +801,24 @@ async function streamClaudeReply({
 
 async function streamCodexReply({
   agent,
-  conversation,
+  priorConversation,
+  latestUserMessage,
   runtimeContext,
   browserConnection,
   taskTrace,
   send,
+  abortSignal,
 }: {
   agent: Agent;
-  conversation: string;
+  priorConversation: string;
+  latestUserMessage: string;
   runtimeContext: string;
   browserConnection: BrowserConnection;
   taskTrace: TaskTraceRuntime;
   send: (event: string, data: unknown) => void;
+  abortSignal?: AbortSignal;
 }): Promise<AgentRunResult> {
-  const args = buildCodexArgs(agent, conversation, runtimeContext, browserConnection);
+  const args = buildCodexArgs(agent, priorConversation, latestUserMessage, runtimeContext, browserConnection);
   taskTrace.setStatus("running", "Агент начал выполнение", {
     provider: "codex",
     browserConnected: agent.capabilities.includes("chrome_browser") && Boolean(browserConnection.chromeMcpUrl),
@@ -800,6 +829,18 @@ async function streamCodexReply({
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
+
+  const onAbort = () => {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+  };
+  if (abortSignal) {
+    if (abortSignal.aborted) onAbort();
+    else abortSignal.addEventListener("abort", onAbort, { once: true });
+  }
 
   let stdoutBuffer = "";
   let stderrBuffer = "";
@@ -1011,7 +1052,13 @@ async function streamCodexReply({
       child.on("close", resolve);
     });
   } catch (err) {
+    abortSignal?.removeEventListener("abort", onAbort);
     throw new AgentRunError(formatUnknownError(err), { content: finalMessage, toolTrace });
+  }
+  abortSignal?.removeEventListener("abort", onAbort);
+
+  if (abortSignal?.aborted) {
+    return { content: finalMessage, toolTrace };
   }
 
   if (stdoutBuffer.trim()) {
@@ -1131,6 +1178,8 @@ function shouldRetryBrowserAutonomyHandoff(
   const content = result.content.replace(/\s+/g, " ").trim();
   if (!content) return false;
 
+  if (isMetaOrClarifyingQuestion(userMessage)) return false;
+
   if (BROWSER_HANDOFF_PATTERNS.some((pattern) => pattern.test(content))) return true;
 
   return isBrowserGroundedTask(userMessage) && !result.toolTrace.some(isBrowserToolTraceEntry);
@@ -1169,17 +1218,42 @@ const BROWSER_GROUNDED_TASK_PATTERNS = [
   /\b(?:current|latest|today|now|check|find|compare|choose|options|price|availability|eta)\b/i,
 ];
 
+const META_QUESTION_PATTERNS = [
+  /\bкак(ая|ую|ой|ие)\s+модел/i,
+  /\bкто\s+ты\b/i,
+  /\bкак\s+тебя\s+зовут\b/i,
+  /\bтво[ёе]?\s+имя\b/i,
+  /\bрасскажи\s+о\s+себе\b/i,
+  /\bчто\s+ты\s+зна(ешь|ете)\b/i,
+  /\bпочему\b/i,
+  /\bзачем\b/i,
+  /\bwho\s+are\s+you\b/i,
+  /\bwhat'?s?\s+your\s+(name|model)\b/i,
+  /\b(which|what)\s+model\b/i,
+  /\babout\s+(yourself|me|you)\b/i,
+  /\bdo\s+(u|you)\s+know\b/i,
+  /\bwhy\b/i,
+];
+
+function isMetaOrClarifyingQuestion(message: string) {
+  const normalized = message.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized) return false;
+  return META_QUESTION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+const BROWSER_AUTONOMY_RETRY_INSTRUCTION = [
+  "Продолжи ту же задачу сейчас.",
+  "Предыдущий ответ попросил меня открыть или переключить браузерную вкладку, но Chrome MCP уже подключён.",
+  "Сам найди существующую вкладку, переключись на неё или открой нужный сайт через browser tools.",
+  "Если это задача выбора, планирования, поиска или сравнения, сам собери доступные варианты в браузере, сравни их по критериям, которые видны в источнике, и дай рекомендацию.",
+  "Если реально блокирует логин, MFA, капча, неоднозначный выбор или финальное подтверждение, кратко назови этот блокер; иначе верни проверенный результат.",
+].join(" ");
+
 function buildBrowserAutonomyRetryConversation(conversation: string, invalidAnswer: string) {
   return [
     conversation,
     `Assistant: ${invalidAnswer}`,
-    [
-      "User: Продолжи ту же задачу сейчас.",
-      "Предыдущий ответ попросил меня открыть или переключить браузерную вкладку, но Chrome MCP уже подключён.",
-      "Сам найди существующую вкладку, переключись на неё или открой нужный сайт через browser tools.",
-      "Если это задача выбора, планирования, поиска или сравнения, сам собери доступные варианты в браузере, сравни их по критериям, которые видны в источнике, и дай рекомендацию.",
-      "Если реально блокирует логин, MFA, капча, неоднозначный выбор или финальное подтверждение, кратко назови этот блокер; иначе верни проверенный результат.",
-    ].join(" "),
+    `User: ${BROWSER_AUTONOMY_RETRY_INSTRUCTION}`,
   ].join("\n\n");
 }
 
@@ -1391,7 +1465,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function buildCodexArgs(
   agent: Agent,
-  conversation: string,
+  priorConversation: string,
+  latestUserMessage: string,
   runtimeContext: string,
   browserConnection: BrowserConnection,
 ) {
@@ -1421,7 +1496,7 @@ function buildCodexArgs(
     agent.model,
   ];
 
-  args.push(buildCodexPrompt(agent, conversation, runtimeContext));
+  args.push(buildCodexPrompt(agent, priorConversation, latestUserMessage, runtimeContext));
   return args;
 }
 
@@ -1445,17 +1520,25 @@ function isSseMcpUrl(url: string) {
   }
 }
 
-function buildCodexPrompt(agent: Agent, conversation: string, runtimeContext: string) {
+function buildCodexPrompt(
+  agent: Agent,
+  priorConversation: string,
+  latestUserMessage: string,
+  runtimeContext: string,
+) {
   const capabilities = agent.capabilities.length > 0 ? agent.capabilities.join(", ") : "none";
 
   return [
     `You are the agent "${agent.name}".`,
+    `You are running on model: ${agent.model}.`,
     agent.systemPrompt.trim() ? `System instructions:\n${agent.systemPrompt.trim()}` : null,
     runtimeContext.trim() ? `Runtime context:\n${runtimeContext.trim()}` : null,
     `Enabled capabilities: ${capabilities}.`,
-    "Conversation so far:",
-    conversation,
-    "Respond to the latest user message. Keep the answer user-facing and concise.",
+    priorConversation.trim()
+      ? `History (context only — do NOT re-execute prior tasks; treat completed tasks as done):\n${priorConversation.trim()}`
+      : null,
+    `Latest user message (respond to THIS message only):\n${latestUserMessage.trim()}`,
+    "If the latest message is a meta or clarifying question (about you, your model, your prior answer, app settings, why something happened), answer it directly without using browser tools. Only run a new browser task if the latest message itself asks for one. Keep the answer user-facing and concise.",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -1486,17 +1569,24 @@ function extractCodexError(codexError: string | null, stderr: string) {
 
 function buildRuntimeContext(
   agent: Agent,
-  userId: string,
+  user: User,
   browserConnection: BrowserConnection,
   userRuntimeMetadata: UserRuntimeMetadata,
   decisionMemory: DecisionMemory,
   provider: "claude" | "codex",
 ) {
+  const userId = user.id;
   const lines: string[] = [
     "Always return a final user-visible task outcome.",
     "If the task is blocked, failed, or ambiguous, still answer with: what was verified, what the blocker is, and the exact next step needed from the user.",
     "Do not leave the user with only an internal error or a tool trace.",
   ];
+
+  try {
+    lines.push(buildIdentityRuntimeContext(user, agent));
+  } catch (error) {
+    console.warn("identity: failed to build runtime context", error);
+  }
 
   const userContext = buildUserRuntimeContext(userRuntimeMetadata);
   if (userContext) {
@@ -1570,6 +1660,13 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
   if (!user) return unauthorizedJson();
 
   const { id } = await ctx.params;
+  const fromMessageId = req.nextUrl.searchParams.get("fromMessageId");
+  if (fromMessageId) {
+    const ok = truncateMessagesFrom(id, user.id, fromMessageId);
+    if (!ok) return Response.json({ error: "message_not_found" }, { status: 404 });
+    return new Response(null, { status: 204 });
+  }
+
   const { clearMessages } = await import("@/server/db");
   clearMessages(id, user.id);
   return new Response(null, { status: 204 });

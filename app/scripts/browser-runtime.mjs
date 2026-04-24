@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -15,6 +15,19 @@ export const COMMON_EXTENSION_PATHS = [
   process.env.CHROME_MCP_EXTENSION_PATH,
   path.join(os.homedir(), "ChromeMCP", "extension"),
 ].filter(Boolean);
+
+export const META_HOME = process.env.META_HOME || path.join(os.homedir(), ".meta");
+export const MANAGED_CHROME_PROFILE = path.join(META_HOME, "chrome-profile");
+export const MANAGED_CHROME_PID_FILE = path.join(META_HOME, "chrome.pid");
+export const MANAGED_CHROME_BIN =
+  process.env.MANAGED_CHROME_BIN ||
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+export const MANAGED_CHROME_DEBUG_PORT = Number(process.env.MANAGED_CHROME_DEBUG_PORT || 9222);
+
+export function ensureMetaHome() {
+  if (!existsSync(META_HOME)) mkdirSync(META_HOME, { recursive: true });
+  if (!existsSync(MANAGED_CHROME_PROFILE)) mkdirSync(MANAGED_CHROME_PROFILE, { recursive: true });
+}
 
 export function commandExists(command) {
   const result = spawnSync("sh", ["-lc", `command -v ${command}`], {

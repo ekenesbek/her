@@ -17,7 +17,7 @@ const emailSchema = z.string().trim().email().max(320).transform((value) => valu
 
 export const agentDraftSchema = z.object({
   name: z.string().min(1).max(100),
-  emoji: z.string().min(1).max(8),
+  emoji: z.string().max(1_000_000),
   description: z.string().max(500),
   model: modelSchema,
   systemPrompt: z.string().max(10000),

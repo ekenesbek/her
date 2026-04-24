@@ -3,6 +3,7 @@ import {
   CHROME_MCP_URL,
   commandExists,
   ensureEnvLocal,
+  ensureMetaHome,
   findChromeMcpExtensionPath,
   pingChromeMcp,
   readBridgeDoctor,
@@ -42,15 +43,11 @@ if (extensionPath) {
 } else {
   console.log("Chrome MCP extension folder was not found.");
   console.log("Set CHROME_MCP_EXTENSION_PATH or install the Chrome MCP extension before using browser agents.");
-}
-
-const ping = await pingChromeMcp(CHROME_MCP_URL);
-if (!ping.ok) {
-  console.log("");
-  console.log(`Chrome MCP endpoint is not connected yet: ${ping.url} -> ${ping.status ?? ping.body}`);
-  console.log("Open Chrome, click Connect in the Chrome MCP extension, then run: pnpm browser:doctor");
   process.exit(1);
 }
 
+ensureMetaHome();
+console.log("Managed Chrome profile directory is ready at ~/.meta/chrome-profile.");
+console.log("Start it with: pnpm browser:start");
 console.log("");
 console.log("Browser runtime is configured.");

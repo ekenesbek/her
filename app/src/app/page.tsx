@@ -8,5 +8,5 @@ export default async function Home() {
 
   const agents = listAgents(user.id);
   if (agents.length === 0) redirect("/onboarding");
-  redirect("/dashboard");
+  redirect(`/chat/${agents[0].id}`);
 }
