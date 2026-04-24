@@ -1,10 +1,10 @@
 import { generateRegistrationOptions } from "@simplewebauthn/server";
 import { NextRequest } from "next/server";
 import { randomUUID } from "node:crypto";
-import { getPasskeyConfigFromRequest, getUserFromRequest } from "@/lib/auth";
-import { createAuthChallenge, getUserByEmail, listWebAuthnCredentialsForUser } from "@/lib/db";
-import { toAuthenticatorTransports } from "@/lib/passkeys";
-import { passkeyRegistrationStartSchema } from "@/lib/validation";
+import { getPasskeyConfigFromRequest, getUserFromRequest } from "@/server/auth";
+import { createAuthChallenge, getUserByEmail, listWebAuthnCredentialsForUser } from "@/server/db";
+import { toAuthenticatorTransports } from "@/server/passkeys";
+import { passkeyRegistrationStartSchema } from "@/shared/validation";
 
 export const runtime = "nodejs";
 

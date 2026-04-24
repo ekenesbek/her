@@ -1,10 +1,10 @@
 import type { AuthenticatorTransportFuture } from "@simplewebauthn/server";
 import { generateAuthenticationOptions } from "@simplewebauthn/server";
 import { NextRequest } from "next/server";
-import { getPasskeyConfigFromRequest } from "@/lib/auth";
-import { createAuthChallenge, getUserByEmail, listWebAuthnCredentialsForUser } from "@/lib/db";
-import { toAuthenticatorTransports } from "@/lib/passkeys";
-import { passkeyAuthenticationStartSchema } from "@/lib/validation";
+import { getPasskeyConfigFromRequest } from "@/server/auth";
+import { createAuthChallenge, getUserByEmail, listWebAuthnCredentialsForUser } from "@/server/db";
+import { toAuthenticatorTransports } from "@/server/passkeys";
+import { passkeyAuthenticationStartSchema } from "@/shared/validation";
 
 export const runtime = "nodejs";
 

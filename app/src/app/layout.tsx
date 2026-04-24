@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
-import { getCurrentUser } from "@/lib/auth";
-import LogoutButton from "./logout-button";
+import { getCurrentUser } from "@/server/auth";
+import LocationCapture from "@/ui/shell/location-capture";
+import LogoutButton from "@/ui/shell/logout-button";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
@@ -28,7 +29,9 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
             {user ? (
               <>
                 <Link href="/dashboard" className="hover:text-[var(--fg)]">Агенты</Link>
+                <Link href="/settings/browser" className="hover:text-[var(--fg)]">Browser</Link>
                 <Link href="/web-mcp" className="hover:text-[var(--fg)]">Web MCP</Link>
+                <LocationCapture />
                 <Link href="/onboarding" className="btn btn-primary !py-1.5 !px-3 text-xs">+ Новый</Link>
                 <span className="hidden md:block text-xs text-[var(--fg-dim)]">{user.email}</span>
                 <LogoutButton />

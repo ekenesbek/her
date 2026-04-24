@@ -1,5 +1,5 @@
-import { getCurrentUser } from "@/lib/auth";
-import { listAgents } from "@/lib/db";
+import { getCurrentUser } from "@/server/auth";
+import { listAgents } from "@/server/db";
 import { redirect } from "next/navigation";
 
 export default async function Home() {

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "launch": "node scripts/launch.mjs",
+    "browser:setup": "node scripts/browser-setup.mjs",
+    "browser:doctor": "node scripts/browser-doctor.mjs",
     "dev": "next dev --webpack",
     "dev:turbopack": "next dev",
     "build": "next build",

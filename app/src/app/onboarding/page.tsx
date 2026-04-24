@@ -1,6 +1,6 @@
-import { requireUser } from "@/lib/auth";
-import OnboardingWizard from "./wizard";
-import { TEMPLATES } from "@/lib/templates";
+import { requireUser } from "@/server/auth";
+import OnboardingWizard from "@/ui/onboarding/onboarding-wizard";
+import { TEMPLATES } from "@/shared/templates";
 
 export default async function OnboardingPage() {
   await requireUser();

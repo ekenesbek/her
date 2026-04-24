@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth";
-import PasskeyAuth from "./passkey-auth";
+import { getCurrentUser } from "@/server/auth";
+import PasskeyAuth from "@/ui/auth/passkey-auth";
 
 export const dynamic = "force-dynamic";
 

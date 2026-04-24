@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { requireUser } from "@/lib/auth";
-import { listAgents } from "@/lib/db";
-import { CAPABILITY_LABELS, MODEL_LABELS } from "@/lib/types";
+import { requireUser } from "@/server/auth";
+import { listAgents } from "@/server/db";
+import { CAPABILITY_LABELS, MODEL_LABELS } from "@/shared/types";
 
 export const dynamic = "force-dynamic";
 

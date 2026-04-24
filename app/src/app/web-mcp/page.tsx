@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { requireUser } from "@/lib/auth";
-import { listWebSites } from "@/lib/web-mcp/storage";
-import CreateSiteForm from "./create-site-form";
+import { requireUser } from "@/server/auth";
+import { listWebSites } from "@/server/web-mcp/storage";
+import CreateSiteForm from "@/ui/web-mcp/create-site-form";
 
 export const dynamic = "force-dynamic";
 

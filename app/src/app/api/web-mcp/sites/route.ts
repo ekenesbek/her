@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
-import { getUserFromRequest, unauthorizedJson } from "@/lib/auth";
-import { upsertWebSiteWorkspace, listWebSites } from "@/lib/web-mcp/storage";
-import { webSiteCreateSchema } from "@/lib/validation";
+import { getUserFromRequest, unauthorizedJson } from "@/server/auth";
+import { upsertWebSiteWorkspace, listWebSites } from "@/server/web-mcp/storage";
+import { webSiteCreateSchema } from "@/shared/validation";
 
 export const runtime = "nodejs";
 

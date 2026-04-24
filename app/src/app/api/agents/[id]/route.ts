@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
-import { getUserFromRequest, unauthorizedJson } from "@/lib/auth";
-import { deleteAgent, getAgent, updateAgent } from "@/lib/db";
-import { agentPatchSchema } from "@/lib/validation";
+import { getUserFromRequest, unauthorizedJson } from "@/server/auth";
+import { deleteAgent, getAgent, updateAgent } from "@/server/db";
+import { agentPatchSchema } from "@/shared/validation";
 
 type Ctx = { params: Promise<{ id: string }> };
 

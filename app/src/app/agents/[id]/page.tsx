@@ -1,7 +1,7 @@
-import { requireUser } from "@/lib/auth";
-import { getAgent } from "@/lib/db";
+import { requireUser } from "@/server/auth";
+import { getAgent } from "@/server/db";
 import { notFound } from "next/navigation";
-import AgentEditor from "./editor";
+import AgentEditor from "@/ui/agents/agent-editor";
 
 export const dynamic = "force-dynamic";
 

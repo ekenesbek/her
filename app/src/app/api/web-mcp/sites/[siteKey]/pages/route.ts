@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
-import { getUserFromRequest, unauthorizedJson } from "@/lib/auth";
-import { recordWebPageSnapshot } from "@/lib/web-mcp/storage";
-import { webPageSnapshotSchema } from "@/lib/validation";
+import { getUserFromRequest, unauthorizedJson } from "@/server/auth";
+import { recordWebPageSnapshot } from "@/server/web-mcp/storage";
+import { webPageSnapshotSchema } from "@/shared/validation";
 
 export const runtime = "nodejs";
 

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
-import { requireUser } from "@/lib/auth";
-import { getWebSiteDetail } from "@/lib/web-mcp/storage";
+import { requireUser } from "@/server/auth";
+import { getWebSiteDetail } from "@/server/web-mcp/storage";
 
 export const dynamic = "force-dynamic";
 

@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
-import { getUserFromRequest, unauthorizedJson } from "@/lib/auth";
-import { createAgent, listAgents } from "@/lib/db";
-import { agentDraftSchema } from "@/lib/validation";
+import { getUserFromRequest, unauthorizedJson } from "@/server/auth";
+import { createAgent, listAgents } from "@/server/db";
+import { agentDraftSchema } from "@/shared/validation";
 
 export async function GET(req: NextRequest) {
   const user = getUserFromRequest(req);

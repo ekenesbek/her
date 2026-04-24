@@ -1,15 +1,15 @@
 import type { RegistrationResponseJSON } from "@simplewebauthn/server";
 import { verifyRegistrationResponse } from "@simplewebauthn/server";
 import { NextRequest } from "next/server";
-import { createSessionJsonResponse, getPasskeyConfigFromRequest } from "@/lib/auth";
+import { createSessionJsonResponse, getPasskeyConfigFromRequest } from "@/server/auth";
 import {
   consumeAuthChallenge,
   createUser,
   getUserByEmail,
   getUserById,
   saveWebAuthnCredential,
-} from "@/lib/db";
-import { passkeyFinishSchema } from "@/lib/validation";
+} from "@/server/db";
+import { passkeyFinishSchema } from "@/shared/validation";
 
 export const runtime = "nodejs";
 

@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
-import { getUserFromRequest, unauthorizedJson } from "@/lib/auth";
-import { appendWebSiteNote } from "@/lib/web-mcp/storage";
-import { webNoteSchema } from "@/lib/validation";
+import { getUserFromRequest, unauthorizedJson } from "@/server/auth";
+import { appendWebSiteNote } from "@/server/web-mcp/storage";
+import { webNoteSchema } from "@/shared/validation";
 
 export const runtime = "nodejs";
 

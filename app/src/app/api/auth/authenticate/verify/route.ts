@@ -1,15 +1,15 @@
 import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { verifyAuthenticationResponse } from "@simplewebauthn/server";
 import { NextRequest } from "next/server";
-import { createSessionJsonResponse, getPasskeyConfigFromRequest } from "@/lib/auth";
+import { createSessionJsonResponse, getPasskeyConfigFromRequest } from "@/server/auth";
 import {
   consumeAuthChallenge,
   getUserById,
   getWebAuthnCredential,
   updateWebAuthnCredentialUsage,
-} from "@/lib/db";
-import { toAuthenticatorTransports } from "@/lib/passkeys";
-import { passkeyFinishSchema } from "@/lib/validation";
+} from "@/server/db";
+import { toAuthenticatorTransports } from "@/server/passkeys";
+import { passkeyFinishSchema } from "@/shared/validation";
 
 export const runtime = "nodejs";
 

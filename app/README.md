@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Meta App
+
+## Project Notes
+
+- Future memory references: [docs/memory-landscape.md](docs/memory-landscape.md)
+- Web MCP product focus: [docs/web-mcp-focus.md](docs/web-mcp-focus.md)
+- Credential broker: [docs/credential-broker.md](docs/credential-broker.md)
 
 ## Getting Started
 
-First, run the development server:
+Product launch with browser runtime checks:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm launch
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Plain Next.js dev server without setup checks:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+pnpm dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Browser setup and diagnostics:
 
-## Learn More
+```bash
+pnpm browser:setup
+pnpm browser:doctor
+```
 
-To learn more about Next.js, take a look at the following resources:
+`pnpm launch` starts Next.js with `CHROME_MCP_URL=http://127.0.0.1:12306/mcp`. `browser:setup` registers the Chrome native messaging host and writes `.env.local` if needed.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Open [http://localhost:3000](http://localhost:3000) after launch.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Browser Agents
 
-## Deploy on Vercel
+Agents with `chrome_browser` use the live Chrome MCP endpoint. Claude and Codex receive that endpoint from the app at runtime.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Codex also receives `mcp_servers.chrome.default_tools_approval_mode="approve"` so MCP browser calls do not fail as `user cancelled MCP tool call` in headless execution.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Safety rule: agents may navigate, search, fill drafts, and read pages, but must stop before irreversible actions such as send, archive, delete, purchase, or taxi order confirmation.
+
+## Testing
+
+```bash
+pnpm lint
+pnpm build
+```
