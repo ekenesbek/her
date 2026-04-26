@@ -5,6 +5,7 @@ import { z } from "zod";
 import { getUserFromRequest, unauthorizedJson } from "@/server/auth";
 import { resolveBrowserConnection } from "@/server/browser";
 import {
+  addTaskRunTokenUsage,
   appendMessage,
   appendTaskEvent,
   createCredentialRequest,
@@ -42,6 +43,7 @@ import type {
   TaskEvent,
   TaskRunSnapshot,
   TaskRunStatus,
+  TokenUsage,
   DecisionMemory,
   ToolTraceEntry,
   User,
@@ -476,6 +478,12 @@ function createTaskTraceRuntime({
     return event;
   };
 
+  const addTokenUsage = (usage: Partial<TokenUsage>) => {
+    const updated = addTaskRunTokenUsage({ id: taskRunId, userId, usage });
+    if (updated) sendTask({ type: "snapshot", taskRun: updated });
+    return updated;
+  };
+
   return {
     taskRunId,
     userId,
@@ -484,6 +492,7 @@ function createTaskTraceRuntime({
     setStatus,
     persistArtifacts,
     recordWebMcp,
+    addTokenUsage,
   };
 }
 
@@ -950,6 +959,7 @@ async function streamClaudeReply({
   const tools = capabilitiesToTools(agent.capabilities);
   let full = "";
   const toolTrace: ToolTraceEntry[] = [];
+  const reportTokenUsage = createTokenUsageReporter(taskTrace);
 
   const hasBrowserMcp = agent.capabilities.includes("chrome_browser") && Boolean(browserConnection.chromeMcpUrl);
   taskTrace.setStatus("running", "Агент начал выполнение", {
@@ -1004,6 +1014,7 @@ async function streamClaudeReply({
   try {
     for await (const msg of q) {
       if (abortSignal?.aborted) break;
+      reportTokenUsage(msg);
       if (msg.type === "assistant") {
         const content = msg.message?.content;
         if (Array.isArray(content)) {
@@ -1153,6 +1164,7 @@ async function streamCodexReply({
   let finalMessage = "";
   let codexError: string | null = null;
   const toolTrace: ToolTraceEntry[] = [];
+  const reportTokenUsage = createTokenUsageReporter(taskTrace);
 
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
@@ -1172,6 +1184,7 @@ async function streamCodexReply({
       }
 
       if (!event || typeof event !== "object") continue;
+      reportTokenUsage(event);
       const payload = event as {
         type?: string;
         message?: string;
@@ -1373,6 +1386,7 @@ async function streamCodexReply({
         type?: string;
         item?: { type?: string; text?: string };
       };
+      reportTokenUsage(payload);
       if (payload.type === "item.completed" && payload.item?.type === "agent_message" && payload.item.text) {
         finalMessage = payload.item.text;
       }
@@ -1401,6 +1415,179 @@ function buildCodexMcpToolName(server?: string, tool?: string) {
 
 function shortToolName(name: string) {
   return name.replace(/^mcp__chrome__/, "").replace(/^mcp__[^_]+__/, "");
+}
+
+function createTokenUsageReporter(taskTrace: TaskTraceRuntime) {
+  let lastUsage = emptyTokenUsage();
+
+  return (value: unknown) => {
+    const current = extractTokenUsage(value);
+    if (!current) return;
+
+    const delta = subtractTokenUsage(current, lastUsage);
+    lastUsage = maxTokenUsage(lastUsage, current);
+    if (!hasTokenUsage(delta)) return;
+
+    taskTrace.addTokenUsage(delta);
+  };
+}
+
+function extractTokenUsage(value: unknown): TokenUsage | null {
+  if (!isRecord(value)) return null;
+
+  const candidates = [
+    readTokenUsageObject(value),
+    isRecord(value.usage) ? readTokenUsageObject(value.usage) : null,
+    isRecord(value.apiUsage) ? readTokenUsageObject(value.apiUsage) : null,
+    isRecord(value.response) && isRecord(value.response.usage) ? readTokenUsageObject(value.response.usage) : null,
+    isRecord(value.item) && isRecord(value.item.usage) ? readTokenUsageObject(value.item.usage) : null,
+    isRecord(value.modelUsage) ? readModelUsage(value.modelUsage) : null,
+  ].filter((candidate): candidate is TokenUsage => Boolean(candidate));
+
+  if (candidates.length === 0) return null;
+
+  const best = candidates.reduce((winner, candidate) =>
+    candidate.totalTokens > winner.totalTokens ? candidate : winner,
+  );
+
+  const costUsd = [
+    getNumberFromRecord(value, "total_cost_usd"),
+    getNumberFromRecord(value, "totalCostUsd"),
+    getNumberFromRecord(value, "cost_usd"),
+    getNumberFromRecord(value, "costUSD"),
+    ...candidates.map((candidate) => candidate.costUsd),
+  ]
+    .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost) && cost > 0)
+    .sort((a, b) => b - a)[0];
+
+  return costUsd !== undefined ? { ...best, costUsd } : best;
+}
+
+function readModelUsage(value: Record<string, unknown>): TokenUsage | null {
+  const usage = emptyTokenUsage();
+  for (const child of Object.values(value)) {
+    if (!isRecord(child)) continue;
+    const childUsage = readTokenUsageObject(child);
+    if (!childUsage) continue;
+    usage.inputTokens += childUsage.inputTokens;
+    usage.outputTokens += childUsage.outputTokens;
+    usage.cacheCreationInputTokens += childUsage.cacheCreationInputTokens;
+    usage.cacheReadInputTokens += childUsage.cacheReadInputTokens;
+    usage.totalTokens += childUsage.totalTokens;
+    usage.costUsd = (usage.costUsd ?? 0) + (childUsage.costUsd ?? 0);
+  }
+
+  return hasTokenUsage(usage) ? usage : null;
+}
+
+function readTokenUsageObject(value: Record<string, unknown>): TokenUsage | null {
+  const inputTokens =
+    getNumberFromRecord(value, "input_tokens") ??
+    getNumberFromRecord(value, "inputTokens") ??
+    getNumberFromRecord(value, "prompt_tokens") ??
+    getNumberFromRecord(value, "promptTokens") ??
+    0;
+  const outputTokens =
+    getNumberFromRecord(value, "output_tokens") ??
+    getNumberFromRecord(value, "outputTokens") ??
+    getNumberFromRecord(value, "completion_tokens") ??
+    getNumberFromRecord(value, "completionTokens") ??
+    0;
+  const cacheCreationInputTokens =
+    getNumberFromRecord(value, "cache_creation_input_tokens") ??
+    getNumberFromRecord(value, "cacheCreationInputTokens") ??
+    0;
+  const cacheReadInputTokens =
+    getNumberFromRecord(value, "cache_read_input_tokens") ??
+    getNumberFromRecord(value, "cacheReadInputTokens") ??
+    getCachedInputTokens(value) ??
+    0;
+  const summedTotal = inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens;
+  const totalTokens = Math.max(
+    getNumberFromRecord(value, "total_tokens") ?? getNumberFromRecord(value, "totalTokens") ?? 0,
+    summedTotal,
+  );
+  const costUsd =
+    getNumberFromRecord(value, "cost_usd") ??
+    getNumberFromRecord(value, "costUSD") ??
+    getNumberFromRecord(value, "total_cost_usd") ??
+    getNumberFromRecord(value, "totalCostUsd");
+  const usage: TokenUsage = {
+    inputTokens: sanitizeTokenCount(inputTokens),
+    outputTokens: sanitizeTokenCount(outputTokens),
+    cacheCreationInputTokens: sanitizeTokenCount(cacheCreationInputTokens),
+    cacheReadInputTokens: sanitizeTokenCount(cacheReadInputTokens),
+    totalTokens: sanitizeTokenCount(totalTokens),
+    ...(costUsd !== undefined && costUsd > 0 ? { costUsd } : {}),
+  };
+
+  return hasTokenUsage(usage) ? usage : null;
+}
+
+function getCachedInputTokens(value: Record<string, unknown>) {
+  const details = value.input_tokens_details ?? value.inputTokensDetails ?? value.prompt_tokens_details;
+  if (!isRecord(details)) return undefined;
+  return getNumberFromRecord(details, "cached_tokens") ?? getNumberFromRecord(details, "cachedTokens");
+}
+
+function emptyTokenUsage(): TokenUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    totalTokens: 0,
+  };
+}
+
+function subtractTokenUsage(current: TokenUsage, previous: TokenUsage): TokenUsage {
+  return {
+    inputTokens: Math.max(0, current.inputTokens - previous.inputTokens),
+    outputTokens: Math.max(0, current.outputTokens - previous.outputTokens),
+    cacheCreationInputTokens: Math.max(0, current.cacheCreationInputTokens - previous.cacheCreationInputTokens),
+    cacheReadInputTokens: Math.max(0, current.cacheReadInputTokens - previous.cacheReadInputTokens),
+    totalTokens: Math.max(0, current.totalTokens - previous.totalTokens),
+    ...(
+      current.costUsd !== undefined
+        ? { costUsd: Math.max(0, current.costUsd - (previous.costUsd ?? 0)) }
+        : {}
+    ),
+  };
+}
+
+function maxTokenUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    inputTokens: Math.max(a.inputTokens, b.inputTokens),
+    outputTokens: Math.max(a.outputTokens, b.outputTokens),
+    cacheCreationInputTokens: Math.max(a.cacheCreationInputTokens, b.cacheCreationInputTokens),
+    cacheReadInputTokens: Math.max(a.cacheReadInputTokens, b.cacheReadInputTokens),
+    totalTokens: Math.max(a.totalTokens, b.totalTokens),
+    ...(
+      a.costUsd !== undefined || b.costUsd !== undefined
+        ? { costUsd: Math.max(a.costUsd ?? 0, b.costUsd ?? 0) }
+        : {}
+    ),
+  };
+}
+
+function hasTokenUsage(usage: TokenUsage) {
+  return (
+    usage.inputTokens > 0 ||
+    usage.outputTokens > 0 ||
+    usage.cacheCreationInputTokens > 0 ||
+    usage.cacheReadInputTokens > 0 ||
+    usage.totalTokens > 0 ||
+    Boolean(usage.costUsd && usage.costUsd > 0)
+  );
+}
+
+function sanitizeTokenCount(value: number) {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function getNumberFromRecord(value: Record<string, unknown>, key: string) {
+  const child = value[key];
+  return typeof child === "number" && Number.isFinite(child) ? child : undefined;
 }
 
 function buildTaskTitle(input: string) {

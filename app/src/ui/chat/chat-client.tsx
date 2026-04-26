@@ -757,6 +757,9 @@ function TaskCard({ lang, taskRun, now }: { lang: Lang; taskRun: TaskRunSnapshot
   const visibleEvents = taskRun.events.slice(-5);
   const hiddenEvents = taskRun.events.slice(0, taskRun.events.length - visibleEvents.length);
   const screenshots = taskRun.artifacts.slice(-3);
+  const tokenUsageLabel = formatTokenUsageLabel(lang, taskRun.tokenUsage);
+  const tokenUsageTitle = formatTokenUsageTitle(lang, taskRun.tokenUsage);
+  const costLabel = formatCostUsd(taskRun.tokenUsage?.costUsd);
 
   return (
     <div
@@ -774,8 +777,20 @@ function TaskCard({ lang, taskRun, now }: { lang: Lang; taskRun: TaskRunSnapshot
         <span style={{ color: running ? "var(--accent)" : "var(--fg-muted)" }}>
           {taskStatusLabel(lang, taskRun.status).toUpperCase()}
         </span>
-        <span className="ml-auto" style={{ color: "var(--fg-dim)" }}>
-          {formatDuration(elapsedMs)}
+        <span className="ml-auto flex items-center gap-1.5 whitespace-nowrap" style={{ color: "var(--fg-dim)" }}>
+          <span>{formatDuration(elapsedMs)}</span>
+          {tokenUsageLabel && (
+            <>
+              <span>·</span>
+              <span title={tokenUsageTitle}>{tokenUsageLabel}</span>
+            </>
+          )}
+          {costLabel && (
+            <>
+              <span>·</span>
+              <span>{costLabel}</span>
+            </>
+          )}
         </span>
       </div>
 
@@ -1473,6 +1488,48 @@ function formatDuration(ms: number) {
   if (minutes > 0) return `${minutes}:${String(restSeconds).padStart(2, "0")}`;
   if (seconds > 0) return `0:${String(seconds).padStart(2, "0")}`;
   return `${safeMs}ms`;
+}
+
+function formatTokenUsageLabel(lang: Lang, usage?: TaskRunSnapshot["tokenUsage"]) {
+  if (!usage || usage.totalTokens <= 0) return null;
+  return t(lang, "chat.task.tokens", { n: formatCompactNumber(usage.totalTokens) });
+}
+
+function formatTokenUsageTitle(lang: Lang, usage?: TaskRunSnapshot["tokenUsage"]) {
+  if (!usage) return undefined;
+
+  const lines = [
+    usage.inputTokens > 0 ? `input: ${formatFullNumber(lang, usage.inputTokens)}` : null,
+    usage.outputTokens > 0 ? `output: ${formatFullNumber(lang, usage.outputTokens)}` : null,
+    usage.cacheCreationInputTokens > 0
+      ? `cache write: ${formatFullNumber(lang, usage.cacheCreationInputTokens)}`
+      : null,
+    usage.cacheReadInputTokens > 0 ? `cache read: ${formatFullNumber(lang, usage.cacheReadInputTokens)}` : null,
+    usage.totalTokens > 0 ? `total: ${formatFullNumber(lang, usage.totalTokens)}` : null,
+  ].filter(Boolean);
+
+  return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
+function formatCostUsd(value?: number) {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return null;
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  if (value < 1) return `$${value.toFixed(3)}`;
+  return `$${value.toFixed(2)}`;
+}
+
+function formatCompactNumber(value: number) {
+  if (value >= 1_000_000) return `${trimFixed(value / 1_000_000, value >= 10_000_000 ? 1 : 2)}M`;
+  if (value >= 1_000) return `${trimFixed(value / 1_000, value >= 10_000 ? 0 : 1)}k`;
+  return String(value);
+}
+
+function formatFullNumber(lang: Lang, value: number) {
+  return value.toLocaleString(lang === "ru" ? "ru-RU" : "en-US");
+}
+
+function trimFixed(value: number, digits: number) {
+  return value.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
 }
 
 function shortToolName(name: string) {

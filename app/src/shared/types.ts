@@ -52,6 +52,15 @@ export type ToolTraceEntry = {
   completedAt?: number;
 };
 
+export type TokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  totalTokens: number;
+  costUsd?: number;
+};
+
 export type TaskRunStatus =
   | "created"
   | "planning"
@@ -108,6 +117,7 @@ export type TaskRunSnapshot = {
   startedAt: number;
   completedAt?: number;
   durationMs?: number;
+  tokenUsage?: TokenUsage;
   events: TaskEvent[];
   artifacts: TaskArtifact[];
 };

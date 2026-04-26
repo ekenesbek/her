@@ -19,6 +19,7 @@ import type {
   TaskEventKind,
   TaskRunSnapshot,
   TaskRunStatus,
+  TokenUsage,
   DecisionMemory,
   DecisionMemorySignal,
   ToolTraceEntry,
@@ -67,6 +68,12 @@ type TaskRunRow = {
   browser_source: "user" | "env" | "none";
   started_at: number;
   completed_at: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+  total_tokens: number;
+  cost_usd: number | null;
 };
 
 type TaskEventRow = {
@@ -177,6 +184,25 @@ function ensureChatMessagesMetadataColumn(db: Database.Database) {
   const columns = db.prepare("PRAGMA table_info(chat_messages)").all() as Array<{ name: string }>;
   if (!columns.some((column) => column.name === "metadata")) {
     db.exec("ALTER TABLE chat_messages ADD COLUMN metadata TEXT");
+  }
+}
+
+function ensureTaskRunUsageColumns(db: Database.Database) {
+  const columns = db.prepare("PRAGMA table_info(task_runs)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  const migrations = [
+    ["input_tokens", "INTEGER NOT NULL DEFAULT 0"],
+    ["output_tokens", "INTEGER NOT NULL DEFAULT 0"],
+    ["cache_creation_input_tokens", "INTEGER NOT NULL DEFAULT 0"],
+    ["cache_read_input_tokens", "INTEGER NOT NULL DEFAULT 0"],
+    ["total_tokens", "INTEGER NOT NULL DEFAULT 0"],
+    ["cost_usd", "REAL"],
+  ] as const;
+
+  for (const [name, definition] of migrations) {
+    if (!names.has(name)) {
+      db.exec(`ALTER TABLE task_runs ADD COLUMN ${name} ${definition}`);
+    }
   }
 }
 
@@ -310,6 +336,12 @@ export function getDb(): Database.Database {
       browser_source TEXT NOT NULL,
       started_at INTEGER NOT NULL,
       completed_at INTEGER,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_usd REAL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
     );
@@ -464,6 +496,7 @@ export function getDb(): Database.Database {
 
   ensureAgentsOwnerColumn(db);
   ensureChatMessagesMetadataColumn(db);
+  ensureTaskRunUsageColumns(db);
   cleanupExpiredRecords(db);
   _db = db;
   return db;
@@ -750,6 +783,8 @@ function rowToTaskRunSnapshot(
   events: TaskEvent[],
   artifacts: TaskArtifact[],
 ): TaskRunSnapshot {
+  const tokenUsage = rowToTokenUsage(row);
+
   return {
     id: row.id,
     agentId: row.agent_id,
@@ -760,8 +795,56 @@ function rowToTaskRunSnapshot(
     browserSource: row.browser_source,
     startedAt: row.started_at,
     ...(row.completed_at ? { completedAt: row.completed_at, durationMs: row.completed_at - row.started_at } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
     events,
     artifacts,
+  };
+}
+
+function rowToTokenUsage(row: TaskRunRow): TokenUsage | null {
+  const inputTokens = sanitizeStoredTokenCount(row.input_tokens);
+  const outputTokens = sanitizeStoredTokenCount(row.output_tokens);
+  const cacheCreationInputTokens = sanitizeStoredTokenCount(row.cache_creation_input_tokens);
+  const cacheReadInputTokens = sanitizeStoredTokenCount(row.cache_read_input_tokens);
+  const summedTotal = inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens;
+  const totalTokens = Math.max(sanitizeStoredTokenCount(row.total_tokens), summedTotal);
+  const costUsd = typeof row.cost_usd === "number" && Number.isFinite(row.cost_usd) && row.cost_usd > 0
+    ? row.cost_usd
+    : undefined;
+
+  if (totalTokens <= 0 && costUsd === undefined) return null;
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+    totalTokens,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+}
+
+function sanitizeStoredTokenCount(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function sanitizeTokenUsageDelta(usage: Partial<TokenUsage>) {
+  const inputTokens = sanitizeStoredTokenCount(usage.inputTokens);
+  const outputTokens = sanitizeStoredTokenCount(usage.outputTokens);
+  const cacheCreationInputTokens = sanitizeStoredTokenCount(usage.cacheCreationInputTokens);
+  const cacheReadInputTokens = sanitizeStoredTokenCount(usage.cacheReadInputTokens);
+  const totalTokens = sanitizeStoredTokenCount(usage.totalTokens);
+  const costUsd = typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) && usage.costUsd > 0
+    ? usage.costUsd
+    : undefined;
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+    totalTokens,
+    ...(costUsd !== undefined ? { costUsd } : {}),
   };
 }
 
@@ -1369,9 +1452,10 @@ export function createTaskRun({
 
   db.prepare(
     `INSERT INTO task_runs (
-      id, user_id, agent_id, title, input, status, provider, browser_source, started_at, completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, userId, agentId, title, input, "created", provider, browserSource, startedAt, null);
+      id, user_id, agent_id, title, input, status, provider, browser_source, started_at, completed_at,
+      input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, total_tokens, cost_usd
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, userId, agentId, title, input, "created", provider, browserSource, startedAt, null, 0, 0, 0, 0, 0, null);
 
   return rowToTaskRunSnapshot(
     {
@@ -1385,10 +1469,65 @@ export function createTaskRun({
       browser_source: browserSource,
       started_at: startedAt,
       completed_at: null,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      total_tokens: 0,
+      cost_usd: null,
     },
     [],
     [],
   );
+}
+
+export function addTaskRunTokenUsage({
+  id,
+  userId,
+  usage,
+}: {
+  id: string;
+  userId: string;
+  usage: Partial<TokenUsage>;
+}): TaskRunSnapshot | null {
+  const current = getTaskRunRow(id, userId);
+  if (!current) return null;
+
+  const delta = sanitizeTokenUsageDelta(usage);
+  if (
+    delta.inputTokens <= 0 &&
+    delta.outputTokens <= 0 &&
+    delta.cacheCreationInputTokens <= 0 &&
+    delta.cacheReadInputTokens <= 0 &&
+    delta.totalTokens <= 0 &&
+    delta.costUsd === undefined
+  ) {
+    return getTaskRunSnapshot(id, userId);
+  }
+
+  const db = getDb();
+  db.prepare(
+    `UPDATE task_runs
+     SET input_tokens = input_tokens + ?,
+         output_tokens = output_tokens + ?,
+         cache_creation_input_tokens = cache_creation_input_tokens + ?,
+         cache_read_input_tokens = cache_read_input_tokens + ?,
+         total_tokens = total_tokens + ?,
+         cost_usd = CASE WHEN ? > 0 THEN COALESCE(cost_usd, 0) + ? ELSE cost_usd END
+     WHERE id = ? AND user_id = ?`,
+  ).run(
+    delta.inputTokens,
+    delta.outputTokens,
+    delta.cacheCreationInputTokens,
+    delta.cacheReadInputTokens,
+    delta.totalTokens,
+    delta.costUsd ?? 0,
+    delta.costUsd ?? 0,
+    id,
+    userId,
+  );
+
+  return getTaskRunSnapshot(id, userId);
 }
 
 export function updateTaskRunStatus({

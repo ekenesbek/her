@@ -203,6 +203,7 @@ export const STRINGS = {
   "chat.task.showAll": { en: "show all {n} steps", ru: "все {n} шагов" },
   "chat.task.previous": { en: "{n} previous steps", ru: "{n} шагов раньше" },
   "chat.task.waiting": { en: "waiting for you", ru: "ждёт тебя" },
+  "chat.task.tokens": { en: "{n} tokens", ru: "{n} токенов" },
   "chat.toolCalls": { en: "{n} tool call", ru: "{n} вызов" },
   "chat.toolCalls_plural": { en: "{n} tool calls", ru: "{n} вызовов" },
   "chat.status.created": { en: "created", ru: "создано" },
