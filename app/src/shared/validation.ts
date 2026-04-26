@@ -44,7 +44,7 @@ export const passkeyFinishSchema = z.object({
   response: z.record(z.string(), z.unknown()),
 });
 
-const webNoteKindSchema = z.enum(["general", "goal", "plan", "finding", "run"]);
+const webNoteKindSchema = z.enum(["general", "goal", "plan", "finding", "run", "memory"]);
 const webGoalStateSchema = z.enum(["seed", "queued", "visited", "blocked", "done"]);
 
 export const webSiteCreateSchema = z.object({

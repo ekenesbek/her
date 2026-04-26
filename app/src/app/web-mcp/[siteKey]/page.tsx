@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/server/auth";
 import { getWebSiteDetail } from "@/server/web-mcp/storage";
@@ -15,10 +16,19 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
   const detail = getWebSiteDetail(user.id, siteKey);
   if (!detail) notFound();
 
-  const { site, pages, edges, notes } = detail;
+  const { site, siteMemory, pages, edges, notes } = detail;
 
   return (
     <div className="flex-1 px-6 py-10 max-w-6xl w-full mx-auto space-y-8">
+      <nav className="flex items-center justify-between gap-3">
+        <Link href="/web-mcp" className="btn btn-ghost text-sm">
+          ← Все сайты
+        </Link>
+        <Link href="/" className="btn btn-secondary text-sm">
+          В чат
+        </Link>
+      </nav>
+
       <section className="card p-6">
         <div className="flex items-start justify-between gap-6">
           <div className="min-w-0">
@@ -50,6 +60,15 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
               {site.siteDir}
             </code>
           </div>
+          <div>
+            <div className="text-xs text-[var(--fg-muted)] mb-1">Site memory</div>
+            <code className="text-xs bg-[var(--bg-softer)] border border-[var(--border)] rounded-lg px-3 py-2 inline-block break-all">
+              {site.memoryFile}
+            </code>
+            <pre className="mt-3 max-h-72 overflow-y-auto text-xs leading-relaxed whitespace-pre-wrap font-mono text-[var(--fg-muted)] bg-[var(--bg-softer)] border border-[var(--border)] rounded-lg p-3">
+              {siteMemory}
+            </pre>
+          </div>
         </div>
       </section>
 
@@ -71,6 +90,9 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
                       <div className="min-w-0">
                         <div className="font-medium truncate">{page.title || page.pathname}</div>
                         <div className="text-xs text-[var(--fg-muted)] mt-1 break-all">{page.url}</div>
+                        <div className="text-[11px] text-[var(--fg-dim)] mt-1 break-all">
+                          canonical: {page.canonicalUrl}
+                        </div>
                       </div>
                       <span className="text-[10px] uppercase tracking-wide text-[var(--fg-dim)]">
                         {page.goalState}
@@ -87,8 +109,10 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
                       </div>
                     )}
                     <div className="flex flex-wrap gap-2 mt-4 text-[11px] text-[var(--fg-muted)]">
+                      <span className="chip chip-active">{page.pageKind}</span>
+                      <span className="chip">{page.observationCount} observations</span>
                       <span className="chip">{page.linkCount} links</span>
-                      <span className="chip">{page.host}</span>
+                      <span className="chip">{page.siteFamilyHost}</span>
                       <span className="chip">{formatDate(page.visitedAt)}</span>
                     </div>
                     <div className="text-[11px] text-[var(--fg-dim)] mt-3 font-mono break-all">

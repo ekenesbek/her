@@ -1,6 +1,6 @@
 export type WebGoalState = "seed" | "queued" | "visited" | "blocked" | "done";
 
-export type WebNoteKind = "general" | "goal" | "plan" | "finding" | "run";
+export type WebNoteKind = "general" | "goal" | "plan" | "finding" | "run" | "memory";
 
 export type WebPageLink = {
   url: string;
@@ -10,15 +10,21 @@ export type WebPageLink = {
 
 export type WebPageSummary = {
   url: string;
+  canonicalUrl: string;
+  pageKey: string;
+  pageKind: string;
   title: string;
   host: string;
+  siteFamilyHost: string;
   pathname: string;
   statusCode: number | null;
   summary: string;
   plan: string;
   sourceUrl: string | null;
   goalState: WebGoalState;
+  firstVisitedAt: number;
   visitedAt: number;
+  observationCount: number;
   artifactDir: string;
   snapshotFile: string;
   layoutFile: string | null;
@@ -66,11 +72,13 @@ export type WebSiteWorkspace = {
   siteDir: string;
   pagesDir: string;
   notesDir: string;
+  memoryFile: string;
   graphFile: string;
 };
 
 export type WebSiteDetail = {
   site: WebSiteWorkspace;
+  siteMemory: string;
   pages: WebPageSummary[];
   edges: WebEdge[];
   notes: WebNote[];

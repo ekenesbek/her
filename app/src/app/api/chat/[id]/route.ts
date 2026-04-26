@@ -28,9 +28,11 @@ import {
   recordWebMcpToolResult,
 } from "@/server/web-mcp/recording";
 import {
+  appendUserMemoryNote,
   buildIdentityRuntimeContext,
   extractAndPersistMemoryNotes,
 } from "@/server/identity/storage";
+import { extractAndPersistWebMemoryNotes } from "@/server/web-mcp/storage";
 import type {
   Agent,
   BrowserConnection,
@@ -269,6 +271,38 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           };
         }
 
+        if (!abortSignal.aborted && shouldRunCredentialBrokerFallback(result, agent, browserConnection)) {
+          const credentialRequest = inferCredentialFallbackRequest({
+            agent,
+            browserConnection,
+            taskTrace,
+            userMessage: message,
+            result,
+          });
+
+          if (credentialRequest) {
+            const retryResult = await runCredentialBrokerFallback({
+              agent,
+              provider,
+              conversation,
+              runtimeContext,
+              browserConnection,
+              taskTrace,
+              send,
+              abortSignal,
+              request: credentialRequest,
+              blockedContent: result.content,
+            });
+
+            if (retryResult) {
+              result = {
+                content: retryResult.content,
+                toolTrace: [...result.toolTrace, ...retryResult.toolTrace],
+              };
+            }
+          }
+        }
+
         if (!abortSignal.aborted) {
           taskTrace.setStatus("done", "Задача завершена", {
             toolCalls: result.toolTrace.length,
@@ -293,6 +327,42 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         send("done", {});
       } finally {
         if (result.content) {
+          const persisted = extractAndPersistMemoryNotes(user, agent, result.content);
+          const webMemory = extractAndPersistWebMemoryNotes(user.id, persisted.cleanedContent);
+          for (const note of webMemory.commonNotes) {
+            try {
+              appendUserMemoryNote(user, `[Web MCP common] ${note}`);
+            } catch (error) {
+              console.warn("identity: failed to mirror Web MCP common memory", error);
+            }
+          }
+          const memoryUpdated =
+            persisted.selfNotes.length > 0 ||
+            persisted.userNotes.length > 0 ||
+            webMemory.commonNotes.length > 0 ||
+            webMemory.siteNotes.length > 0;
+          const cleanedContent = memoryUpdated && !webMemory.cleanedContent.trim()
+            ? "Запомнил."
+            : webMemory.cleanedContent;
+          const contentChanged = cleanedContent !== result.content;
+          if (contentChanged) {
+            send("replace", { text: cleanedContent });
+          }
+          if (memoryUpdated) {
+            taskTrace.addEvent({
+              taskRunId: taskTrace.taskRunId,
+              userId: taskTrace.userId,
+              kind: "message",
+              title: "Memory updated",
+              details: {
+                selfNotes: persisted.selfNotes.length,
+                userNotes: persisted.userNotes.length,
+                webCommonNotes: webMemory.commonNotes.length,
+                webSiteNotes: webMemory.siteNotes.length,
+              },
+            });
+          }
+          result = { ...result, content: cleanedContent || result.content };
           updateMessage(id, user.id, assistantMessage.id, "assistant", result.content, {
             toolTrace: result.toolTrace,
             taskRunId: taskRun.id,
@@ -448,7 +518,7 @@ function createCredentialBrokerMcpServer({
             .describe("The credential action requested from the user."),
         },
         async (args) => {
-          if (!hasCredentialBroker(agent, browserConnection, "claude")) {
+          if (!hasClaudeCredentialBroker(agent, browserConnection)) {
             return credentialToolError("Credential broker is not enabled for this agent/session.");
           }
 
@@ -551,14 +621,16 @@ function createCredentialBrokerMcpServer({
 function hasCredentialBroker(
   agent: Agent,
   browserConnection: BrowserConnection,
-  provider: "claude" | "codex",
 ) {
   return (
-    provider === "claude" &&
     agent.capabilities.includes("chrome_browser") &&
     agent.capabilities.includes("credential_broker") &&
     Boolean(browserConnection.chromeMcpUrl)
   );
+}
+
+function hasClaudeCredentialBroker(agent: Agent, browserConnection: BrowserConnection) {
+  return hasCredentialBroker(agent, browserConnection);
 }
 
 function credentialRequestForClient(request: CredentialRequest) {
@@ -595,6 +667,235 @@ async function waitForCredentialDecision(requestId: string, userId: string, expi
   return expireCredentialRequest(requestId, userId);
 }
 
+type CredentialFallbackRequest = {
+  origin: string;
+  currentUrl: string | null;
+  accountHint: string | null;
+  reason: string;
+  requestedAction: CredentialRequest["requestedAction"];
+};
+
+async function runCredentialBrokerFallback({
+  agent,
+  provider,
+  conversation,
+  runtimeContext,
+  browserConnection,
+  taskTrace,
+  send,
+  abortSignal,
+  request,
+  blockedContent,
+}: {
+  agent: Agent;
+  provider: "claude" | "codex";
+  conversation: string;
+  runtimeContext: string;
+  browserConnection: BrowserConnection;
+  taskTrace: TaskTraceRuntime;
+  send: (event: string, data: unknown) => void;
+  abortSignal?: AbortSignal;
+  request: CredentialFallbackRequest;
+  blockedContent: string;
+}): Promise<AgentRunResult | null> {
+  const saved = createCredentialRequest({
+    userId: taskTrace.userId,
+    taskRunId: taskTrace.taskRunId,
+    agentId: agent.id,
+    origin: request.origin,
+    currentUrl: request.currentUrl,
+    accountHint: request.accountHint,
+    reason: request.reason,
+    requestedAction: request.requestedAction,
+  });
+
+  taskTrace.setStatus("waiting_for_user", "Ждёт разрешения на credential", {
+    credentialRequest: credentialRequestForClient(saved),
+    fallback: "host_detected_credential_blocker",
+  });
+
+  taskTrace.addEvent({
+    taskRunId: taskTrace.taskRunId,
+    userId: taskTrace.userId,
+    kind: "message",
+    title: `Credential approval: ${saved.origin}`,
+    status: "waiting_for_user",
+    details: {
+      credentialRequest: credentialRequestForClient(saved),
+      fallback: "host_detected_credential_blocker",
+    },
+  });
+  taskTrace.sendSnapshot();
+
+  const resolved = await waitForCredentialDecision(saved.id, taskTrace.userId, saved.expiresAt);
+  if (!resolved || resolved.status === "expired") {
+    taskTrace.setStatus("running", "Credential approval истёк", {
+      credentialRequest: resolved ? credentialRequestForClient(resolved) : credentialRequestForClient(saved),
+    });
+    return null;
+  }
+
+  if (resolved.status === "denied") {
+    taskTrace.setStatus("running", "Credential approval отклонён", {
+      credentialRequest: credentialRequestForClient(resolved),
+    });
+    return null;
+  }
+
+  taskTrace.setStatus("running", "Credential approval получен", {
+    credentialRequest: credentialRequestForClient(resolved),
+  });
+  taskTrace.addEvent({
+    taskRunId: taskTrace.taskRunId,
+    userId: taskTrace.userId,
+    kind: "message",
+    title: `Credential approved: ${resolved.origin}`,
+    details: {
+      credentialRequest: credentialRequestForClient(resolved),
+      secretAvailableToModel: false,
+      fallback: "host_detected_credential_blocker",
+    },
+  });
+  taskTrace.sendSnapshot();
+  send("replace", { text: "" });
+
+  const retryInstruction = buildCredentialBrokerFallbackRetryInstruction(resolved);
+  return provider === "codex"
+    ? streamCodexReply({
+        agent,
+        priorConversation: [conversation, `Assistant: ${blockedContent}`].filter(Boolean).join("\n\n"),
+        latestUserMessage: retryInstruction,
+        runtimeContext,
+        browserConnection,
+        taskTrace,
+        send,
+        abortSignal,
+      })
+    : streamClaudeReply({
+        agent,
+        conversation: [conversation, `Assistant: ${blockedContent}`, `User: ${retryInstruction}`].join("\n\n"),
+        runtimeContext,
+        browserConnection,
+        taskTrace,
+        send,
+        abortSignal,
+      });
+}
+
+function shouldRunCredentialBrokerFallback(
+  result: AgentRunResult,
+  agent: Agent,
+  browserConnection: BrowserConnection,
+) {
+  if (!hasCredentialBroker(agent, browserConnection)) return false;
+  if (result.toolTrace.some((entry) => entry.name === "mcp__meta_credentials__request_credential_approval")) {
+    return false;
+  }
+
+  const content = result.content.replace(/\s+/g, " ").trim();
+  if (!content) return false;
+
+  return CREDENTIAL_BLOCKER_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+function inferCredentialFallbackRequest({
+  userMessage,
+  result,
+}: {
+  agent: Agent;
+  browserConnection: BrowserConnection;
+  taskTrace: TaskTraceRuntime;
+  userMessage: string;
+  result: AgentRunResult;
+}): CredentialFallbackRequest | null {
+  const text = [userMessage, result.content].join("\n");
+  const currentUrl = inferCredentialCurrentUrl(text);
+  const origin = currentUrl ? normalizeCredentialOrigin(currentUrl) : inferCredentialOriginFromText(text);
+  if (!origin) return null;
+
+  const requestedAction: CredentialRequest["requestedAction"] = /passkey|webauthn|touch\s*id|face\s*id/i.test(text)
+    ? "use_passkey"
+    : /session|cookie|already\s+logged|reuse/i.test(text)
+      ? "reuse_session"
+      : "fill_password";
+
+  return {
+    origin,
+    currentUrl: currentUrl ? normalizeCredentialUrl(currentUrl) : null,
+    accountHint: inferAccountHint(text),
+    reason: buildCredentialFallbackReason(text),
+    requestedAction,
+  };
+}
+
+function buildCredentialBrokerFallbackRetryInstruction(request: CredentialRequest) {
+  return [
+    "Продолжи ту же задачу сейчас.",
+    `Пользователь одобрил credential use через broker для ${request.origin}.`,
+    request.currentUrl ? `Текущая страница: ${request.currentUrl}.` : null,
+    `Запрошенное действие: ${request.requestedAction}.`,
+    "Plaintext пароль, passkey private material, cookies и auth headers тебе не доступны.",
+    "Вернись к открытой странице в браузере и попробуй browser-native saved-password/passkey flow: сфокусируй нужное поле, используй доступный UI Chrome/OS autofill или passkey user-presence prompt, если он появился.",
+    "Не проси пользователя вставлять пароль в чат. Если OS prompt, Touch ID, MFA, captcha или отсутствие сохранённого credential всё ещё блокирует продолжение, назови ровно этот блокер.",
+    "Если credential применился, продолжи исходную задачу и остановись перед необратимым финальным действием.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+const CREDENTIAL_BLOCKER_PATTERNS = [
+  /нуж[её]н\s+(?:ваш\s+)?(?:ввод\s+)?парол/i,
+  /введите\s+парол/i,
+  /поле\s+[`"“”']?password/i,
+  /password\s+(?:field|required|needed|prompt|confirm)/i,
+  /confirm\s+access/i,
+  /sudo[-\s]?confirm/i,
+  /passkey|touch\s*id|face\s*id|security\s+key|webauthn/i,
+  /заблокирован[ао]?\s+(?:логин|парол|passkey|mfa|2fa)/i,
+];
+
+function inferCredentialCurrentUrl(text: string) {
+  const matches = text.match(/https?:\/\/[^\s`"'<>)]*/gi) ?? [];
+  const candidate =
+    matches.find((url) => /github\.com|gitlab\.com|google\.com|slack\.com|notion\.so|figma\.com|linear\.app/i.test(url)) ??
+    matches[0];
+  if (!candidate) return null;
+
+  try {
+    const url = new URL(candidate.replace(/[.,;:!?]+$/g, ""));
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function inferCredentialOriginFromText(text: string) {
+  if (/github/i.test(text)) return "https://github.com";
+  if (/gitlab/i.test(text)) return "https://gitlab.com";
+  if (/slack/i.test(text)) return "https://slack.com";
+  if (/notion/i.test(text)) return "https://www.notion.so";
+  if (/figma/i.test(text)) return "https://www.figma.com";
+  if (/linear/i.test(text)) return "https://linear.app";
+  return null;
+}
+
+function inferAccountHint(text: string) {
+  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+  return email ? cleanCredentialText(email, 320) : null;
+}
+
+function buildCredentialFallbackReason(text: string) {
+  const compact = text.replace(/\s+/g, " ").trim();
+  const blocker = CREDENTIAL_BLOCKER_PATTERNS.find((pattern) => pattern.test(compact));
+  const summary = compact.length > 280 ? `${compact.slice(0, 277)}...` : compact;
+  return cleanCredentialText(
+    blocker
+      ? `Agent reached a credential gate while executing the user's task. Visible context: ${summary}`
+      : "Agent requested credential approval to continue the user's browser task.",
+    1000,
+  ) ?? "Agent requested credential approval to continue the user's browser task.";
+}
+
 function normalizeCredentialOrigin(value: string) {
   try {
     return new URL(value).origin;
@@ -608,6 +909,11 @@ function normalizeCredentialUrl(value: string | undefined) {
   try {
     const url = new URL(value);
     url.hash = "";
+    for (const key of [...url.searchParams.keys()]) {
+      if (/code|token|secret|password|auth|session|state/i.test(key)) {
+        url.searchParams.delete(key);
+      }
+    }
     return url.toString();
   } catch {
     return null;
@@ -660,9 +966,9 @@ async function streamClaudeReply({
       allowedTools: tools,
       ...(hasBrowserMcp
         ? {
-      mcpServers: {
+                mcpServers: {
               chrome: buildClaudeChromeMcpServer(browserConnection.chromeMcpUrl!),
-              ...(hasCredentialBroker(agent, browserConnection, "claude")
+              ...(hasClaudeCredentialBroker(agent, browserConnection)
                 ? {
                     meta_credentials: createCredentialBrokerMcpServer({
                       agent,
@@ -679,7 +985,7 @@ async function streamClaudeReply({
           return { behavior: "allow" as const, updatedInput: input };
         }
 
-        if (hasCredentialBroker(agent, browserConnection, "claude") && toolName === "mcp__meta_credentials__request_credential_approval") {
+        if (hasClaudeCredentialBroker(agent, browserConnection) && toolName === "mcp__meta_credentials__request_credential_approval") {
           return { behavior: "allow" as const, updatedInput: input };
         }
 
@@ -1196,11 +1502,17 @@ function isBrowserToolTraceEntry(entry: ToolTraceEntry) {
 
 const BROWSER_HANDOFF_PATTERNS = [
   /открой(?:те)?\s+(?:вкладку|страницу|сайт|браузер|chrome)/i,
+  /открой(?:те)?\s+https?:\/\//i,
   /перейд(?:и|ите)\s+(?:на|в)\s+(?:вкладку|страницу|сайт|браузер|chrome)/i,
+  /перейд(?:и|ите)\s+на\s+https?:\/\//i,
   /нужн[ао]\s+(?:самостоятельно\s+)?открыть\s+(?:вкладку|страницу|сайт|браузер|chrome)/i,
+  /(?:созда(?:й|йте)|сгенериру(?:й|йте)|получи(?:те)?|выда(?:й|йте)).*(?:token|токен|pat|api\s*key|ключ\s+api)/i,
+  /(?:не\s+могу|нет\s+доступа).*(?:создать|сгенерировать|выдать|получить).*(?:token|токен|pat|github|api\s*key|ключ\s+api)/i,
+  /(?:personal access token|fine[-\s]?grained token|github\.com\/settings\/personal-access-tokens)/i,
   /если\s+нужно[,\s]+(?:я\s+)?(?:проверю|посмотрю|сравню|найду|могу\s+проверить|могу\s+посмотреть|могу\s+сравнить|могу\s+найти)/i,
   /оставь(?:те)?\s+chrome\s+открытым/i,
   /open\s+(?:the\s+)?(?:tab|page|site|browser|chrome)/i,
+  /open\s+https?:\/\//i,
   /switch\s+to\s+(?:the\s+)?(?:tab|page|browser|chrome)/i,
 ];
 
@@ -1214,6 +1526,10 @@ function isBrowserGroundedTask(message: string) {
 const BROWSER_GROUNDED_TASK_PATTERNS = [
   /(?:сейчас|сегодня|завтра|актуальн|текущ|в\s+реальном\s+времени)/i,
   /(?:проверь|посмотри|найди|открой|сравни|подбери|выбери|оцени)/i,
+  /(?:интегрир|подключи|подключить|сконнект|авторизу|залогин|логин|connect|integrate|authorize|oauth)/i,
+  /(?:github|gitlab|slack|notion|figma|linear).*(?:интегр|подключ|connect|integrate|oauth|токен|token|pat|api\s*key|ключ\s+api)/i,
+  /(?:токен|token|pat|api\s*key|ключ\s+api|personal access|fine[-\s]?grained)/i,
+  /(?:создай|создать|сгенерируй|сгенерировать|выдай|получи|получить|issue|generate|create).*(?:токен|token|pat|api\s*key|ключ)/i,
   /(?:сколько|когда|где|какой|какая|какие|лучший|лучше|варианты|цена|стоимость|доступн|свободн|наличи)/i,
   /\b(?:current|latest|today|now|check|find|compare|choose|options|price|availability|eta)\b/i,
 ];
@@ -1245,6 +1561,7 @@ const BROWSER_AUTONOMY_RETRY_INSTRUCTION = [
   "Продолжи ту же задачу сейчас.",
   "Предыдущий ответ попросил меня открыть или переключить браузерную вкладку, но Chrome MCP уже подключён.",
   "Сам найди существующую вкладку, переключись на неё или открой нужный сайт через browser tools.",
+  "Если задача про интеграцию аккаунта, OAuth, GitHub, API key, PAT или token, открой нужные настройки сервиса сам и веди flow через браузер; не отвечай инструкциями, что пользователь должен сам открыть страницу, пока нет реального блокера.",
   "Если это задача выбора, планирования, поиска или сравнения, сам собери доступные варианты в браузере, сравни их по критериям, которые видны в источнике, и дай рекомендацию.",
   "Если реально блокирует логин, MFA, капча, неоднозначный выбор или финальное подтверждение, кратко назови этот блокер; иначе верни проверенный результат.",
 ].join(" ");
@@ -1273,7 +1590,8 @@ function redactSensitiveValue(value: unknown, depth = 0): unknown {
   if (depth > 4) return "[truncated]";
 
   if (typeof value === "string") {
-    return value.length > 500 ? `${value.slice(0, 500)}...` : value;
+    const redacted = redactSecretPatterns(value);
+    return redacted.length > 500 ? `${redacted.slice(0, 500)}...` : redacted;
   }
 
   if (typeof value !== "object" || value === null) return value;
@@ -1290,7 +1608,16 @@ function redactSensitiveValue(value: unknown, depth = 0): unknown {
 }
 
 function shouldRedactKey(key: string) {
-  return /password|passwd|token|secret|api[_-]?key|cookie|authorization|card|cvv|data/i.test(key);
+  return /password|passwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key|cookie|authorization|card|cvv|data/i.test(key);
+}
+
+function redactSecretPatterns(value: string) {
+  return value
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[redacted:github_pat]")
+    .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "[redacted:github_token]")
+    .replace(/\bglpat-[A-Za-z0-9_-]{20,}\b/g, "[redacted:gitlab_token]")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g, "[redacted:slack_token]")
+    .replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[redacted:api_key]");
 }
 
 function normalizeUserRuntimeMetadata(
@@ -1380,6 +1707,12 @@ function buildUserRuntimeContext(metadata: UserRuntimeMetadata) {
         ]
           .filter(Boolean)
           .join("; "),
+      );
+      lines.push(
+        "Exact browser location is high-priority context for this turn. Silently use it whenever physical place, city, distance, availability, local search, local services, delivery, weather, scheduling around travel, routing, ETA, taxi, or maps could affect the answer.",
+        "Do not ask for the user's current city or current location when exact browser location is present. If the location materially affects the answer, you may briefly mention that you used the shared current location.",
+        "For routing, ETA, taxi, delivery pickup, or maps tasks, this exact browser location is the user's current origin/pickup point unless the latest user message explicitly gives another origin.",
+        "Do not reuse a previous route origin from browser tabs, history, Web MCP, or memory when exact browser location is present. You may reuse known home/work addresses only as destinations when they match the user's latest wording.",
       );
     } else {
       const locationParts = [
@@ -1612,9 +1945,16 @@ function buildRuntimeContext(
         "For any task that involves choosing, planning, comparing, scheduling, purchasing, booking, routing, or other decisions, first gather the practical options available through the relevant browser surface instead of asking generic preference questions.",
         "Compare options using the dimensions exposed by the source and implied by the user goal, such as time, cost, availability, quality, risk, convenience, constraints, and reversibility. Then give a concise recommendation plus the best alternatives.",
         "Infer preferences from the user's accepted choices, rejected options, corrections, constraints, and repeated decisions. Treat those signals as weak memory: use them to rank future options, but adapt when current evidence or the user's latest wording points elsewhere.",
-        ...(hasCredentialBroker(agent, browserConnection, provider)
+        "Account integration, OAuth, API key, PAT, and token provisioning requests are browser-grounded tasks. Treat the user's latest request as permission to navigate the normal account UI and prepare the integration flow in the logged-in browser; do not refuse solely because the page lives in account settings.",
+        "For token/API-key provisioning, prefer OAuth or a GitHub App-style install flow when the target integration supports it. If the user explicitly asks for a token, choose the narrowest scopes, selected repositories/resources, and short expiration that satisfy the stated task.",
+        "Before clicking a final security-sensitive action that creates, reveals, grants, or installs a token/app, stop and ask for explicit confirmation with the service, destination/integration, selected resources, scopes, and expiration. Do not bypass login, MFA, passkey user presence, captcha, or GitHub confirmation prompts.",
+        "After a token is generated, treat the raw value as a secret. Do not paste raw tokens into chat, memory, task titles, or trace. If a target integration form is open in the browser, paste the token directly there and verify the connection. Otherwise tell the user the token is visible on the service page and should be copied into the secure destination.",
+        "For GitHub specifically, open the relevant OAuth/GitHub App install page when available; otherwise use https://github.com/settings/personal-access-tokens/new for fine-grained PATs. Do not answer that you cannot create a GitHub token merely because PATs are created in the user's profile.",
+        ...(hasCredentialBroker(agent, browserConnection)
           ? [
-              "Credential broker is available as the meta_credentials MCP tool request_credential_approval.",
+              provider === "claude"
+                ? "Credential broker is available as the meta_credentials MCP tool request_credential_approval."
+                : "Credential broker is available through the app runtime. If a password, passkey, saved credential, or session-confirmation gate blocks the task, report the origin/current URL and exact credential action needed; the runtime can request user approval and retry.",
               "When login is blocked by a saved password, passkey, or credential choice, request broker approval instead of asking the user to paste a password into chat.",
               "The credential broker may pause the task for UI approval. It never returns plaintext secrets to you. After approval, continue through the live browser session. If OS autofill, passkey user presence, MFA, captcha, or a missing saved credential still blocks progress, report that exact blocker.",
             ]

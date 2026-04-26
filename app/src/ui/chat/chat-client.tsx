@@ -15,7 +15,7 @@ import type {
   UserRuntimeLocation,
   UserRuntimeMetadata,
 } from "@/shared/types";
-import { readStoredExactLocation } from "@/client/location";
+import { readRuntimeExactLocation, refreshSharedExactLocation } from "@/client/location";
 import { MODEL_LABELS } from "@/shared/types";
 import { useLang, t, type Lang } from "@/client/i18n";
 
@@ -73,6 +73,20 @@ export default function ChatClient({
     const interval = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(interval);
   }, [stream.streaming]);
+
+  useEffect(() => {
+    const refreshLocation = () => {
+      if (document.visibilityState === "visible") void refreshSharedExactLocation();
+    };
+
+    refreshLocation();
+    window.addEventListener("focus", refreshLocation);
+    document.addEventListener("visibilitychange", refreshLocation);
+    return () => {
+      window.removeEventListener("focus", refreshLocation);
+      document.removeEventListener("visibilitychange", refreshLocation);
+    };
+  }, []);
 
   useEffect(() => {
     if (stream.streaming || !messages.some((message) => isActiveTaskRun(message.taskRun))) return;
@@ -168,10 +182,11 @@ export default function ChatClient({
     let aborted = false;
 
     try {
+      const runtimeLocation = readRuntimeExactLocation();
       const res = await fetch(`/api/chat/${agent.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, runtimeMetadata: collectUserRuntimeMetadata(readStoredExactLocation()) }),
+        body: JSON.stringify({ message: text, runtimeMetadata: collectUserRuntimeMetadata(runtimeLocation) }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -316,6 +331,7 @@ export default function ChatClient({
         </Link>
 
         <NavItem icon={<ChatIcon />} label={t(lang, "chat.nav.talk")} active />
+        <NavItem icon={<WebMcpIcon />} label={t(lang, "chat.nav.webMcp")} href="/web-mcp" />
         <NavItem icon={<LockIcon />} label={t(lang, "chat.nav.vault")} href="#" muted />
         <NavItem icon={<LayersIcon />} label={t(lang, "chat.nav.tasks")} href="#" muted />
 
@@ -333,6 +349,17 @@ export default function ChatClient({
             </div>
             <div className="label-mono mt-1" style={{ fontSize: 9 }}>
               {chromeSrc}
+            </div>
+          </Link>
+          <Link
+            href="/settings/location"
+            className="rounded-lg px-2.5 py-2 border border-[var(--border)] hover:border-[var(--border-strong)]"
+          >
+            <div className="label-mono" style={{ fontSize: 9 }}>
+              Location
+            </div>
+            <div className="label-mono mt-1" style={{ fontSize: 9 }}>
+              sharing mode
             </div>
           </Link>
           <NavItem
@@ -1210,6 +1237,16 @@ function LayersIcon() {
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 3l9 5-9 5-9-5 9-5z" />
       <path d="M3 13l9 5 9-5" />
+    </svg>
+  );
+}
+function WebMcpIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3a13.5 13.5 0 010 18" />
+      <path d="M12 3a13.5 13.5 0 000 18" />
     </svg>
   );
 }

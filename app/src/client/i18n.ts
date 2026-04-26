@@ -176,6 +176,7 @@ export const STRINGS = {
 
   // chat
   "chat.nav.talk": { en: "Talk", ru: "Диалог" },
+  "chat.nav.webMcp": { en: "Web MCP", ru: "Web MCP" },
   "chat.nav.memory": { en: "Memory", ru: "Память" },
   "chat.nav.vault": { en: "Vault", ru: "Хранилище" },
   "chat.nav.tasks": { en: "Tasks", ru: "Задачи" },

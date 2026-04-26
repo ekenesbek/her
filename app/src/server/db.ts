@@ -590,13 +590,22 @@ function sanitizeToolValueForStorage(
 }
 
 function sanitizeStoredString(value: string) {
-  const cleaned = value.replace(/\u0000/g, "");
+  const cleaned = redactSecretPatterns(value.replace(/\u0000/g, ""));
   if (cleaned.length <= MAX_STORED_TOOL_STRING_LENGTH) return cleaned;
   return `${cleaned.slice(0, MAX_STORED_TOOL_STRING_LENGTH)}...[truncated ${cleaned.length - MAX_STORED_TOOL_STRING_LENGTH} chars]`;
 }
 
 function shouldRedactStorageKey(key: string) {
-  return /password|passwd|token|secret|api[_-]?key|cookie|authorization|card|cvv/i.test(key);
+  return /password|passwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key|cookie|authorization|card|cvv/i.test(key);
+}
+
+function redactSecretPatterns(value: string) {
+  return value
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[redacted:github_pat]")
+    .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "[redacted:github_token]")
+    .replace(/\bglpat-[A-Za-z0-9_-]{20,}\b/g, "[redacted:gitlab_token]")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g, "[redacted:slack_token]")
+    .replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[redacted:api_key]");
 }
 
 function isImageBlock(value: Record<string, unknown>) {
