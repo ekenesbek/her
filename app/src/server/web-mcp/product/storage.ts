@@ -7,17 +7,21 @@ import {
   getSiteKeyFromUrl as buildSiteKeyFromUrl,
   normalizeUrl,
   sanitizeHost,
+  shortHash,
   slugifySegment,
 } from "../core/url";
 import type {
+  WebActionKind,
   WebEdge,
   WebGoalState,
   WebNote,
   WebNoteKind,
   WebNoteSummary,
+  WebPageAction,
   WebPageLink,
   WebPageSnapshot,
   WebPageSummary,
+  WebSiteCategory,
   WebSiteDetail,
   WebSiteWorkspace,
 } from "../core/types";
@@ -28,6 +32,8 @@ type StoredSiteMeta = {
   seedUrl: string;
   primaryHost: string;
   goal: string;
+  category: WebSiteCategory;
+  tags: string[];
   createdAt: number;
   updatedAt: number;
   lastVisitAt: number | null;
@@ -42,9 +48,36 @@ type StoredNoteIndex = {
   notes: WebNoteSummary[];
 };
 
+type WebPageActionInput = Partial<WebPageAction> & {
+  href?: string | null;
+  targetUrl?: string | null;
+};
+
 const DATA_ROOT = path.join(process.cwd(), ".data");
 const WEB_MCP_ROOT = path.join(DATA_ROOT, "web-mcp");
 const MAX_INJECTED_MEMORY_BYTES = 6_000;
+const MAX_PAGE_ACTIONS = 160;
+const WEB_SITE_CATEGORIES = new Set<WebSiteCategory>([
+  "unknown",
+  "taxi",
+  "maps",
+  "delivery",
+  "mail",
+  "calendar",
+  "contacts",
+  "chat",
+  "docs",
+  "project",
+  "code",
+  "finance",
+  "social",
+  "media",
+  "search",
+  "shopping",
+  "travel",
+  "weather",
+  "local_services",
+]);
 
 function ensureDir(dir: string) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -67,7 +100,8 @@ function ensureWebMcpRoot() {
         "- `users/<userId>/sites/<siteKey>/memory.md` — устойчивая память конкретного сайта",
         "- `pages/<host>/<path>/snapshot.json` — снимок страницы",
         "- `pages/<host>/<path>/layout.md` — текстовый макет/структура страницы",
-        "- `graph.json` — индекс страниц и ребер графа",
+        "- `snapshot.json.actions` — semantic actions: кнопки, ссылки, поля, табы и формы",
+        "- `graph.json` — индекс страниц и action-aware ребер flow-графа",
         "- `notes/*.md` и `notes/index.json` — заметки, планы, итоги",
       ].join("\n"),
     );
@@ -209,6 +243,7 @@ function normalizePageSummary(page: WebPageSummary): WebPageSummary {
   const stored = page as Partial<WebPageSummary>;
   const firstVisitedAt = stored.firstVisitedAt ?? page.visitedAt;
   const observationCount = Math.max(1, stored.observationCount ?? 1);
+  const actionCount = Math.max(0, stored.actionCount ?? 0);
 
   return {
     ...page,
@@ -216,8 +251,11 @@ function normalizePageSummary(page: WebPageSummary): WebPageSummary {
     pageKey: stored.pageKey ?? identity.pageKey,
     pageKind: stored.pageKind ?? identity.pageKind,
     siteFamilyHost: stored.siteFamilyHost ?? identity.siteFamilyHost,
+    milestoneGoal: stored.milestoneGoal ?? "",
+    flowPlan: stored.flowPlan ?? "",
     firstVisitedAt,
     observationCount,
+    actionCount,
   };
 }
 
@@ -253,9 +291,11 @@ function getEdgeKey(edge: WebEdge) {
   try {
     const from = getPageIdentity(edge.fromUrl).pageKey;
     const to = getPageIdentity(edge.toUrl).pageKey;
-    return `${from}=>${to}`;
+    const action = edge.actionId ?? edge.actionLabel ?? edge.text ?? "";
+    return `${from}=>${to}=>${action}`;
   } catch {
-    return `${edge.fromUrl}=>${edge.toUrl}`;
+    const action = edge.actionId ?? edge.actionLabel ?? edge.text ?? "";
+    return `${edge.fromUrl}=>${edge.toUrl}=>${action}`;
   }
 }
 
@@ -277,7 +317,36 @@ function toWorkspace(userId: string, meta: StoredSiteMeta, graph: StoredGraph, n
 function readSiteMeta(userId: string, siteKey: string): StoredSiteMeta | null {
   const filePath = getSiteFile(userId, siteKey);
   if (!fs.existsSync(filePath)) return null;
-  return readJsonFile<StoredSiteMeta | null>(filePath, null);
+  const raw = readJsonFile<Partial<StoredSiteMeta> | null>(filePath, null);
+  if (!raw?.siteKey || !raw.seedUrl || !raw.primaryHost) return null;
+  return normalizeSiteMeta({
+    ...raw,
+    siteKey: raw.siteKey,
+    seedUrl: raw.seedUrl,
+    primaryHost: raw.primaryHost,
+  });
+}
+
+function normalizeSiteMeta(raw: Partial<StoredSiteMeta> & Pick<StoredSiteMeta, "siteKey" | "seedUrl" | "primaryHost">): StoredSiteMeta {
+  const inferred = classifyWebSite({
+    url: raw.seedUrl,
+    host: raw.primaryHost,
+    goal: raw.goal ?? "",
+    label: raw.label ?? raw.primaryHost,
+  });
+
+  return {
+    siteKey: raw.siteKey,
+    label: raw.label?.trim() || raw.primaryHost,
+    seedUrl: raw.seedUrl,
+    primaryHost: raw.primaryHost,
+    goal: raw.goal?.trim() || "Построить карту сайта, пройти ключевые страницы и накопить память по структуре.",
+    category: normalizeWebSiteCategory(raw.category) ?? inferred.category,
+    tags: normalizeWebSiteTags(raw.tags, inferred.tags),
+    createdAt: typeof raw.createdAt === "number" ? raw.createdAt : Date.now(),
+    updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : Date.now(),
+    lastVisitAt: typeof raw.lastVisitAt === "number" ? raw.lastVisitAt : null,
+  };
 }
 
 function readGraph(userId: string, siteKey: string) {
@@ -363,6 +432,199 @@ function truncateText(value: string, maxLength: number) {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
 }
 
+function classifyWebSite({
+  url,
+  host,
+  goal,
+  label,
+}: {
+  url: string;
+  host: string;
+  goal: string;
+  label: string;
+}): { category: WebSiteCategory; tags: string[] } {
+  const haystack = `${host} ${url} ${goal} ${label}`.toLowerCase();
+  const rules: Array<{ category: WebSiteCategory; tags: string[]; patterns: RegExp[] }> = [
+    { category: "taxi", tags: ["mobility", "ride_hailing"], patterns: [/taxi|uber|bolt|gett|lyft|yango|яндекс\s*(go|такси)|такси/i] },
+    { category: "maps", tags: ["navigation", "local"], patterns: [/maps|map|route|routing|yandex\.ru\/maps|google\.[^/]+\/maps|карты|маршрут/i] },
+    { category: "delivery", tags: ["commerce", "local"], patterns: [/delivery|doordash|ubereats|wolt|glovo|deliveroo|еда|доставка/i] },
+    { category: "mail", tags: ["account", "communication"], patterns: [/gmail|mail|inbox|почт/i] },
+    { category: "calendar", tags: ["scheduling"], patterns: [/calendar|календар/i] },
+    { category: "contacts", tags: ["people"], patterns: [/contacts|адресн|контакт/i] },
+    { category: "chat", tags: ["communication"], patterns: [/slack|telegram|discord|whatsapp|chat|чат|сообщени/i] },
+    { category: "docs", tags: ["knowledge", "files"], patterns: [/docs|drive|notion|figma|miro|document|документ|файл/i] },
+    { category: "project", tags: ["work"], patterns: [/linear|jira|asana|trello|project|задач/i] },
+    { category: "code", tags: ["developer"], patterns: [/github|gitlab|bitbucket|repo|code|pull request|репозитор/i] },
+    { category: "finance", tags: ["money"], patterns: [/bank|finance|billing|stripe|wise|revolut|банк|сч[её]т|оплат/i] },
+    { category: "shopping", tags: ["commerce"], patterns: [/shop|store|cart|checkout|amazon|ozon|wildberries|market|магазин|корзин/i] },
+    { category: "travel", tags: ["booking"], patterns: [/booking|airbnb|hotel|flight|travel|trip|avia|отель|билет/i] },
+    { category: "weather", tags: ["local"], patterns: [/weather|forecast|погод|прогноз/i] },
+    { category: "search", tags: ["discovery"], patterns: [/google\.com|bing\.com|duckduckgo|search|поиск/i] },
+    { category: "media", tags: ["content"], patterns: [/youtube|spotify|netflix|media|video|music|видео|музык/i] },
+    { category: "social", tags: ["social"], patterns: [/facebook|instagram|x\.com|twitter|linkedin|social|соц/i] },
+    { category: "local_services", tags: ["local"], patterns: [/restaurant|clinic|salon|service|local|ресторан|клиник|сервис/i] },
+  ];
+
+  for (const rule of rules) {
+    if (rule.patterns.some((pattern) => pattern.test(haystack))) {
+      return { category: rule.category, tags: normalizeWebSiteTags(rule.tags, []) };
+    }
+  }
+
+  return { category: "unknown", tags: [] };
+}
+
+function normalizeWebSiteCategory(value: unknown): WebSiteCategory | null {
+  return typeof value === "string" && WEB_SITE_CATEGORIES.has(value as WebSiteCategory)
+    ? value as WebSiteCategory
+    : null;
+}
+
+function normalizeWebSiteTags(value: unknown, fallback: string[]) {
+  const source = Array.isArray(value) && value.length > 0 ? value : fallback;
+  return [...new Set(
+    source
+      .map((tag) => typeof tag === "string" ? tag.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") : "")
+      .filter(Boolean),
+  )].slice(0, 20);
+}
+
+function normalizePageActions({
+  baseUrl,
+  links,
+  actions,
+  existingActions,
+  now,
+}: {
+  baseUrl: URL;
+  links: WebPageLink[];
+  actions: WebPageActionInput[];
+  existingActions: WebPageAction[];
+  now: number;
+}) {
+  const actionMap = new Map<string, WebPageAction>();
+
+  for (const action of existingActions) {
+    actionMap.set(action.id, action);
+  }
+
+  const incoming = [
+    ...links.map((link): WebPageActionInput => ({
+      kind: "link",
+      label: link.text || link.url,
+      text: link.text,
+      href: link.url,
+      targetUrl: link.url,
+      source: "link",
+      confidence: 0.75,
+    })),
+    ...actions,
+  ];
+
+  for (const rawAction of incoming) {
+    const normalized = normalizePageAction(rawAction, baseUrl, now);
+    if (!normalized) continue;
+
+    const current = actionMap.get(normalized.id);
+    if (!current) {
+      actionMap.set(normalized.id, normalized);
+      continue;
+    }
+
+    actionMap.set(normalized.id, {
+      ...current,
+      ...normalized,
+      discoveredAt: Math.min(current.discoveredAt, normalized.discoveredAt),
+      lastObservedAt: now,
+      observationCount: current.observationCount + 1,
+      confidence: Math.max(current.confidence, normalized.confidence),
+    });
+  }
+
+  return [...actionMap.values()]
+    .sort((a, b) => b.lastObservedAt - a.lastObservedAt)
+    .slice(0, MAX_PAGE_ACTIONS);
+}
+
+function normalizePageAction(rawAction: WebPageActionInput, baseUrl: URL, now: number): WebPageAction | null {
+  const href = cleanOptionalString(rawAction.href);
+  const targetUrl = normalizeActionTarget(rawAction.targetUrl ?? href, baseUrl);
+  const text = cleanOptionalString(rawAction.text) ?? "";
+  const label = cleanOptionalString(rawAction.label) ?? (text || targetUrl || href || "");
+  if (!label) return null;
+
+  const kind = normalizeActionKind(rawAction.kind, href, targetUrl);
+  const role = cleanOptionalString(rawAction.role) ?? null;
+  const ref = cleanOptionalString(rawAction.ref) ?? null;
+  const semanticKey = cleanOptionalString(rawAction.semanticKey) ?? buildActionSemanticKey(kind, label, targetUrl);
+  const id = cleanOptionalString(rawAction.id) ?? `${kind}-${shortHash([semanticKey, targetUrl, ref].filter(Boolean).join("|"))}`;
+  const confidence = typeof rawAction.confidence === "number" && Number.isFinite(rawAction.confidence)
+    ? Math.max(0, Math.min(1, rawAction.confidence))
+    : inferActionConfidence(kind, targetUrl, ref);
+
+  return {
+    id,
+    kind,
+    label: truncateText(label, 180),
+    role,
+    text: truncateText(text, 240),
+    href: href ?? null,
+    targetUrl,
+    ref,
+    semanticKey,
+    source: cleanOptionalString(rawAction.source) ?? "recording",
+    confidence,
+    discoveredAt: rawAction.discoveredAt ?? now,
+    lastObservedAt: now,
+    observationCount: Math.max(1, rawAction.observationCount ?? 1),
+  };
+}
+
+function cleanOptionalString(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const cleaned = normalizeMarkdownLine(value);
+  return cleaned || undefined;
+}
+
+function normalizeActionTarget(value: string | null | undefined, baseUrl: URL) {
+  if (!value) return null;
+  try {
+    const url = new URL(value, baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    return normalizeUrl(url.toString()).toString();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeActionKind(
+  kind: WebActionKind | undefined,
+  href: string | undefined,
+  targetUrl: string | null,
+): WebActionKind {
+  if (kind) return kind;
+  if (href || targetUrl) return "link";
+  return "unknown";
+}
+
+function buildActionSemanticKey(kind: WebActionKind, label: string, targetUrl: string | null) {
+  const target = targetUrl ? getPageIdentity(targetUrl).pageKey : "";
+  return `${kind}:${normalizeMarkdownLine(label).toLowerCase()}:${target}`;
+}
+
+function inferActionConfidence(kind: WebActionKind, targetUrl: string | null, ref: string | null) {
+  if (kind === "link" && targetUrl) return 0.82;
+  if (ref) return 0.72;
+  return 0.55;
+}
+
+function readExistingPageActions(siteDir: string, page?: WebPageSummary) {
+  if (!page?.snapshotFile) return [];
+  const snapshot = readJsonFile<WebPageSnapshot | null>(path.join(siteDir, page.snapshotFile), null);
+  return Array.isArray(snapshot?.actions) ? snapshot.actions : [];
+}
+
 export function listWebSites(userId: string): WebSiteWorkspace[] {
   const sitesRoot = getUserSitesRoot(userId);
   ensureDir(sitesRoot);
@@ -384,19 +646,41 @@ export function listWebSites(userId: string): WebSiteWorkspace[] {
 
 export function upsertWebSiteWorkspace(
   userId: string,
-  { url, label, goal }: { url: string; label?: string; goal?: string },
+  {
+    url,
+    label,
+    goal,
+    category,
+    tags,
+  }: {
+    url: string;
+    label?: string;
+    goal?: string;
+    category?: WebSiteCategory;
+    tags?: string[];
+  },
 ) {
   const normalizedUrl = normalizeUrl(url);
   const siteFamilyHost = getSiteFamilyHost(normalizedUrl.hostname);
   const siteKey = getSiteKeyFromUrl(normalizedUrl.toString());
   const now = Date.now();
   const current = readSiteMeta(userId, siteKey);
+  const inferred = classifyWebSite({
+    url: normalizedUrl.toString(),
+    host: siteFamilyHost,
+    goal: goal ?? current?.goal ?? "",
+    label: label ?? current?.label ?? siteFamilyHost,
+  });
+  const resolvedCategory = normalizeWebSiteCategory(category) ?? current?.category ?? inferred.category;
+  const resolvedTags = normalizeWebSiteTags(tags, current?.tags?.length ? current.tags : inferred.tags);
 
   const next: StoredSiteMeta = current
     ? {
         ...current,
         label: label?.trim() || current.label,
         goal: goal?.trim() || current.goal,
+        category: resolvedCategory,
+        tags: resolvedTags,
         updatedAt: now,
       }
     : {
@@ -405,6 +689,8 @@ export function upsertWebSiteWorkspace(
         seedUrl: normalizedUrl.toString(),
         primaryHost: siteFamilyHost,
         goal: goal?.trim() || "Построить карту сайта, пройти ключевые страницы и накопить память по структуре.",
+        category: resolvedCategory,
+        tags: resolvedTags,
         createdAt: now,
         updatedAt: now,
         lastVisitAt: null,
@@ -456,11 +742,42 @@ export function summarizeWebSitePagePatterns(userId: string, siteKey: string, li
         `kind=${page.pageKind}`,
         `key=${page.pageKey}`,
         `observations=${page.observationCount}`,
+        `actions=${page.actionCount}`,
         `canonical=${page.canonicalUrl}`,
+        page.milestoneGoal ? `milestone=${truncateText(page.milestoneGoal, 160)}` : null,
+        page.flowPlan ? `plan=${truncateText(page.flowPlan, 180)}` : null,
         page.summary ? `summary=${truncateText(page.summary, 220)}` : null,
       ].filter(Boolean);
       return parts.join("; ");
     });
+}
+
+export function summarizeWebSiteFlowHints(userId: string, siteKey: string, limit = 8) {
+  const meta = readSiteMeta(userId, siteKey);
+  if (!meta) return [];
+
+  return [...readGraph(userId, siteKey).edges]
+    .sort((a, b) => (b.lastObservedAt ?? b.discoveredAt) - (a.lastObservedAt ?? a.discoveredAt))
+    .slice(0, Math.max(0, limit))
+    .map((edge) => {
+      const parts = [
+        `action=${truncateText(edge.actionLabel ?? edge.text ?? "(unknown)", 140)}`,
+        edge.actionKind ? `kind=${edge.actionKind}` : null,
+        `from=${edge.sourcePageKey ?? safePageKey(edge.fromUrl)}`,
+        `to=${edge.targetPageKey ?? safePageKey(edge.toUrl)}`,
+        edge.status ? `status=${edge.status}` : null,
+        edge.observationCount ? `observations=${edge.observationCount}` : null,
+      ].filter(Boolean);
+      return parts.join("; ");
+    });
+}
+
+function safePageKey(rawUrl: string) {
+  try {
+    return getPageIdentity(rawUrl).pageKey;
+  } catch {
+    return rawUrl;
+  }
 }
 
 export function recordWebPageSnapshot(
@@ -473,8 +790,11 @@ export function recordWebPageSnapshot(
     summary = "",
     layout = "",
     links = [],
+    actions = [],
     sourceUrl = null,
     plan = "",
+    milestoneGoal = "",
+    flowPlan = "",
     goalState = "visited",
   }: {
     url: string;
@@ -483,8 +803,11 @@ export function recordWebPageSnapshot(
     summary?: string;
     layout?: string;
     links?: WebPageLink[];
+    actions?: WebPageActionInput[];
     sourceUrl?: string | null;
     plan?: string;
+    milestoneGoal?: string;
+    flowPlan?: string;
     goalState?: WebGoalState;
   },
 ) {
@@ -504,6 +827,13 @@ export function recordWebPageSnapshot(
   const existingPage = graph.pages
     .map(normalizePageSummary)
     .find((page) => page.pageKey === identity.pageKey);
+  const normalizedActions = normalizePageActions({
+    baseUrl: normalizedUrl,
+    links,
+    actions,
+    existingActions: readExistingPageActions(siteDir, existingPage),
+    now,
+  });
 
   const snapshot: WebPageSnapshot = {
     url: normalizedUrl.toString(),
@@ -517,6 +847,8 @@ export function recordWebPageSnapshot(
     statusCode,
     summary: summary.trim(),
     plan: plan.trim(),
+    milestoneGoal: milestoneGoal.trim() || meta.goal,
+    flowPlan: flowPlan.trim(),
     sourceUrl: sourceUrl ? normalizeUrl(sourceUrl).toString() : null,
     goalState,
     firstVisitedAt: existingPage?.firstVisitedAt ?? now,
@@ -526,7 +858,9 @@ export function recordWebPageSnapshot(
     snapshotFile: relativeToSiteDir(siteDir, snapshotFile),
     layoutFile: layoutFile ? relativeToSiteDir(siteDir, layoutFile) : null,
     linkCount: links.length,
+    actionCount: normalizedActions.length,
     links,
+    actions: normalizedActions,
     layout,
   };
 
@@ -547,6 +881,8 @@ export function recordWebPageSnapshot(
     statusCode: snapshot.statusCode,
     summary: snapshot.summary,
     plan: snapshot.plan,
+    milestoneGoal: snapshot.milestoneGoal,
+    flowPlan: snapshot.flowPlan,
     sourceUrl: snapshot.sourceUrl,
     goalState: snapshot.goalState,
     firstVisitedAt: snapshot.firstVisitedAt,
@@ -556,6 +892,7 @@ export function recordWebPageSnapshot(
     snapshotFile: snapshot.snapshotFile,
     layoutFile: snapshot.layoutFile,
     linkCount: snapshot.linkCount,
+    actionCount: snapshot.actionCount,
   };
 
   const nextPages = graph.pages.filter((page) => getStoredPageKey(page) !== snapshot.pageKey);
@@ -565,14 +902,28 @@ export function recordWebPageSnapshot(
   for (const edge of graph.edges) {
     edgeMap.set(getEdgeKey(edge), edge);
   }
-  for (const link of links) {
-    const targetIdentity = getPageIdentity(link.url);
-    edgeMap.set(`${snapshot.pageKey}=>${targetIdentity.pageKey}`, {
+  for (const action of normalizedActions) {
+    if (!action.targetUrl) continue;
+
+    const targetIdentity = getPageIdentity(action.targetUrl);
+    const edgeKey = `${snapshot.pageKey}=>${targetIdentity.pageKey}=>${action.id}`;
+    const current = edgeMap.get(edgeKey);
+    edgeMap.set(edgeKey, {
       fromUrl: snapshot.canonicalUrl,
+      sourcePageKey: snapshot.pageKey,
+      targetPageKey: targetIdentity.pageKey,
       toUrl: targetIdentity.canonicalUrl,
-      text: link.text.trim(),
-      rel: link.rel,
-      discoveredAt: now,
+      text: action.label,
+      rel: action.kind === "link" ? "link" : null,
+      actionId: action.id,
+      actionKind: action.kind,
+      actionLabel: action.label,
+      confidence: action.confidence,
+      status: "discovered",
+      discoveredAt: current?.discoveredAt ?? now,
+      firstObservedAt: current?.firstObservedAt ?? current?.discoveredAt ?? now,
+      lastObservedAt: now,
+      observationCount: (current?.observationCount ?? 0) + 1,
     });
   }
 

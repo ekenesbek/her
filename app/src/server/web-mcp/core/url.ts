@@ -9,6 +9,9 @@ const MULTITENANT_SUFFIXES = [
   "vercel.app",
   "web.app",
 ];
+const SITE_FAMILY_HOST_ALIASES = new Map([
+  ["notion.com", "notion.so"],
+]);
 const VOLATILE_QUERY_KEYS = new Set([
   "from",
   "indoorLevel",
@@ -72,18 +75,23 @@ export function safeDecode(value: string) {
 export function getSiteFamilyHost(hostname: string) {
   const host = sanitizeHost(hostname);
   if (MULTITENANT_SUFFIXES.some((suffix) => host !== suffix && host.endsWith(`.${suffix}`))) {
-    return host;
+    return canonicalizeSiteFamilyHost(host);
   }
 
   const parts = host.split(".").filter(Boolean);
-  if (parts.length <= 2) return host;
+  if (parts.length <= 2) return canonicalizeSiteFamilyHost(host);
 
   const [tld, second, third] = parts.slice(-3).reverse();
   if (tld.length === 2 && COMMON_SECOND_LEVEL_TLDS.has(second) && third) {
-    return parts.slice(-3).join(".");
+    return canonicalizeSiteFamilyHost(parts.slice(-3).join("."));
   }
 
-  return parts.slice(-2).join(".");
+  return canonicalizeSiteFamilyHost(parts.slice(-2).join("."));
+}
+
+export function canonicalizeSiteFamilyHost(value: string) {
+  const host = sanitizeHost(value);
+  return SITE_FAMILY_HOST_ALIASES.get(host) ?? host;
 }
 
 export function getSiteFamilyOrigin(url: URL) {

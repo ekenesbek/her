@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
+import { getSiteFamilyHost } from "./web-mcp/core/url";
 
 export type ServiceKind =
   | "unknown"
@@ -16,7 +17,12 @@ export type ServiceKind =
   | "media"
   | "search"
   | "shopping"
-  | "travel";
+  | "travel"
+  | "taxi"
+  | "maps"
+  | "delivery"
+  | "weather"
+  | "local_services";
 
 type FingerprintRule = {
   match: RegExp;
@@ -29,7 +35,7 @@ const RULES: FingerprintRule[] = [
   { match: /^calendar\.google\.com$/i, kind: "calendar", mcpSlug: "google-calendar" },
   { match: /^contacts\.google\.com$/i, kind: "contacts", mcpSlug: "google-contacts" },
   { match: /^(drive|docs|sheets|slides)\.google\.com$/i, kind: "docs", mcpSlug: "google-drive" },
-  { match: /^(www\.)?notion\.so$/i, kind: "docs", mcpSlug: "notion" },
+  { match: /^(www\.)?notion\.(so|com)$/i, kind: "docs", mcpSlug: "notion" },
   { match: /^(www\.)?linear\.app$/i, kind: "project", mcpSlug: "linear" },
   { match: /^(www\.)?figma\.com$/i, kind: "docs", mcpSlug: "figma" },
   { match: /^(www\.)?github\.com$/i, kind: "code", mcpSlug: "github" },
@@ -39,6 +45,13 @@ const RULES: FingerprintRule[] = [
   { match: /^(www\.)?youtube\.com$/i, kind: "media" },
   { match: /^(www\.)?(duckduckgo|bing|google)\.com$/i, kind: "search" },
   { match: /^(www\.)?amazon\.(com|co\.uk|de|fr)$/i, kind: "shopping" },
+  { match: /(?:^|\.)uber\.com$/i, kind: "taxi" },
+  { match: /(?:^|\.)bolt\.eu$/i, kind: "taxi" },
+  { match: /(?:^|\.)yango\.com$/i, kind: "taxi" },
+  { match: /(?:^|\.)taxi\.yandex\./i, kind: "taxi" },
+  { match: /(?:^|\.)maps\.(google|yandex)\./i, kind: "maps" },
+  { match: /(?:^|\.)weather\./i, kind: "weather" },
+  { match: /(?:doordash|ubereats|wolt|glovo|deliveroo)\./i, kind: "delivery" },
   { match: /\.(bank|chase|revolut|wise)\./i, kind: "finance" },
 ];
 
@@ -53,7 +66,7 @@ export function fingerprintOrigin(origin: string): { kind: ServiceKind; mcpSlug?
 
 function safeHost(origin: string): string | null {
   try {
-    return new URL(origin).host;
+    return new URL(origin).hostname;
   } catch {
     return null;
   }
@@ -78,7 +91,8 @@ export function observeVisit(params: {
   loggedIn: boolean;
 }): ServiceRegistryRow {
   const db = getDb();
-  const { userId, origin, loggedIn } = params;
+  const { userId, loggedIn } = params;
+  const origin = normalizeServiceOrigin(params.origin);
   const fp = fingerprintOrigin(origin);
   const now = Date.now();
 
@@ -183,11 +197,12 @@ export function listServices(userId: string): ServiceRegistryRow[] {
 }
 
 export function markAutoProvisioned(userId: string, origin: string) {
+  const normalizedOrigin = normalizeServiceOrigin(origin);
   getDb()
     .prepare(
       "UPDATE service_registry SET auto_provisioned = 1 WHERE user_id = ? AND origin = ?",
     )
-    .run(userId, origin);
+    .run(userId, normalizedOrigin);
 }
 
 export function appendSiteKnowledge(params: {
@@ -201,6 +216,7 @@ export function appendSiteKnowledge(params: {
   const db = getDb();
   const now = Date.now();
   const id = randomUUID();
+  const origin = normalizeServiceOrigin(params.origin);
   db.prepare(
     `INSERT INTO site_knowledge
        (id, user_id, origin, kind, content_md, source, confidence, created_at, updated_at)
@@ -208,7 +224,7 @@ export function appendSiteKnowledge(params: {
   ).run(
     id,
     params.userId,
-    params.origin,
+    origin,
     params.kind,
     params.contentMd,
     params.source ?? "agent",
@@ -217,6 +233,18 @@ export function appendSiteKnowledge(params: {
     now,
   );
   return id;
+}
+
+export function normalizeServiceOrigin(origin: string) {
+  const url = new URL(origin);
+  const siteFamilyHost = getSiteFamilyHost(url.hostname);
+  if (siteFamilyHost === "notion.so") {
+    url.hostname = siteFamilyHost;
+  }
+  url.pathname = "/";
+  url.search = "";
+  url.hash = "";
+  return url.origin;
 }
 
 export function upsertKnowledgePage(params: {

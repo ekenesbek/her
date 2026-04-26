@@ -4,6 +4,7 @@ import {
   listWebSites,
   readOrInitCommonWebMemory,
   readOrInitWebSiteMemory,
+  summarizeWebSiteFlowHints,
   summarizeWebSitePagePatterns,
 } from "./storage";
 
@@ -18,9 +19,13 @@ export function buildWebMcpRuntimeContext(userId: string, autoRecording: boolean
     `Common Web MCP memory file: .data/web-mcp/users/${userId}/common.md`,
     `Site workspaces root: .data/web-mcp/users/${userId}/sites/`,
     autoRecording
-      ? "The app runtime automatically records supported public-page Chrome MCP observations into Web MCP memory. To feed that recorder, after landing on a public page call chrome_get_web_content with textContent=true or chrome_read_page; do not manually create Web MCP files unless the user asks."
+      ? "The app runtime automatically records supported public-page Chrome MCP observations into Web MCP memory. To feed that recorder, after landing on a public page call chrome_read_page(filter=\"interactive\") and take a screenshot when visual state matters; do not manually create Web MCP files unless the user asks."
       : "When mapping a website without Chrome MCP, persist site memory by writing snapshots/layout/notes under the Web MCP root.",
+    "Goal-directed browser loop: set a short milestone goal, observe the page with screenshot/read_page, identify visible semantic actions, choose the action most likely to move toward the final page, execute it, then repeat on the next page.",
+    "Before clicking, semantic-search the current page actions and known flow hints by goal terms, action label, role, href, and previous target page. Prefer known observed flows, but verify the current page before acting.",
+    "If a remembered flow fails because the action is missing, disabled, stale, or the destination is different, fallback to screenshot + interactive read_page, make a new page plan, and update the flow through normal recording.",
     "Before revisiting a site, use the known Web MCP site index below to avoid rediscovering the same navigation and facts.",
+    "Use each site's category and tags to choose likely flows, tools, and safety rules. For example taxi/maps tasks are route/ETA/price flows, shopping/delivery tasks are commerce flows, and mail/calendar/chat tasks are logged-in account flows.",
     "Known page patterns are canonical instructions, not a log of every URL. Treat URLs that differ only by volatile route/map/search state as the same page pattern and update the existing snapshot.",
     "Use common Web MCP memory for durable cross-site facts such as home/work address, city, transport preferences, preferred services, and recurring constraints.",
     "Use site Web MCP memory only for facts tied to a specific website/account/workflow.",
@@ -43,6 +48,8 @@ export function buildWebMcpRuntimeContext(userId: string, autoRecording: boolean
         [
           `- ${site.primaryHost}`,
           `label=${site.label}`,
+          `category=${site.category}`,
+          site.tags.length > 0 ? `tags=${site.tags.join(",")}` : null,
           `pages=${site.pageCount}`,
           `edges=${site.edgeCount}`,
           `notes=${site.noteCount}`,
@@ -62,6 +69,13 @@ export function buildWebMcpRuntimeContext(userId: string, autoRecording: boolean
         lines.push("  Known page patterns:");
         for (const pattern of pagePatterns) {
           lines.push(`  - ${pattern}`);
+        }
+      }
+      const flowHints = summarizeWebSiteFlowHints(userId, site.siteKey, 6);
+      if (flowHints.length > 0) {
+        lines.push("  Known flow hints:");
+        for (const hint of flowHints) {
+          lines.push(`  - ${hint}`);
         }
       }
     }

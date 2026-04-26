@@ -32,6 +32,8 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const dbPath = path.join(DATA_DIR, "meta.db");
 const AUTH_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const ACTIVE_TASK_STATUSES: TaskRunStatus[] = ["created", "planning", "running", "waiting_for_user"];
+const TERMINAL_TASK_STATUSES = new Set<TaskRunStatus>(["done", "failed", "cancelled"]);
 
 let _db: Database.Database | null = null;
 
@@ -1481,6 +1483,84 @@ export function createTaskRun({
   );
 }
 
+export function cancelActiveTaskRunsForAgent({
+  agentId,
+  userId,
+  reason = "superseded_by_new_message",
+}: {
+  agentId: string;
+  userId: string;
+  reason?: string;
+}): TaskRunSnapshot[] {
+  const db = getDb();
+  const now = Date.now();
+  const statusPlaceholders = ACTIVE_TASK_STATUSES.map(() => "?").join(", ");
+  const rows = db
+    .prepare(
+      `SELECT *
+       FROM task_runs
+       WHERE agent_id = ?
+         AND user_id = ?
+         AND status IN (${statusPlaceholders})
+       ORDER BY started_at ASC`,
+    )
+    .all(agentId, userId, ...ACTIVE_TASK_STATUSES) as TaskRunRow[];
+
+  if (rows.length === 0) return [];
+
+  const ids = rows.map((row) => row.id);
+  const idPlaceholders = ids.map(() => "?").join(", ");
+  const details = JSON.stringify({ reason });
+
+  const tx = db.transaction(() => {
+    db.prepare(
+      `UPDATE task_runs
+       SET status = 'cancelled',
+           completed_at = COALESCE(completed_at, ?)
+       WHERE user_id = ?
+         AND id IN (${idPlaceholders})
+         AND status IN (${statusPlaceholders})`,
+    ).run(now, userId, ...ids, ...ACTIVE_TASK_STATUSES);
+
+    db.prepare(
+      `UPDATE credential_requests
+       SET status = 'expired',
+           resolved_at = ?
+       WHERE user_id = ?
+         AND status = 'pending'
+         AND task_run_id IN (${idPlaceholders})`,
+    ).run(now, userId, ...ids);
+
+    const insertEvent = db.prepare(
+      `INSERT INTO task_events (
+        id, task_run_id, kind, title, status, details, tool_call_id, artifact_id, started_at, completed_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    for (const row of rows) {
+      insertEvent.run(
+        randomUUID(),
+        row.id,
+        "status",
+        "Задача отменена новым сообщением",
+        "cancelled",
+        details,
+        null,
+        null,
+        row.started_at,
+        now,
+        now,
+      );
+    }
+  });
+
+  tx();
+
+  return ids
+    .map((runId) => getTaskRunSnapshot(runId, userId))
+    .filter((snapshot): snapshot is TaskRunSnapshot => Boolean(snapshot));
+}
+
 export function addTaskRunTokenUsage({
   id,
   userId,
@@ -1543,6 +1623,7 @@ export function updateTaskRunStatus({
 }): TaskRunSnapshot | null {
   const current = getTaskRunRow(id, userId);
   if (!current) return null;
+  if (TERMINAL_TASK_STATUSES.has(current.status)) return getTaskRunSnapshot(id, userId);
 
   const db = getDb();
   db.prepare("UPDATE task_runs SET status = ?, completed_at = ? WHERE id = ? AND user_id = ?").run(

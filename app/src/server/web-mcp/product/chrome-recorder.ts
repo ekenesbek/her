@@ -2,7 +2,7 @@ import {
   recordWebPageSnapshot,
   upsertWebSiteWorkspace,
 } from "./storage";
-import type { WebGoalState, WebPageLink } from "../core/types";
+import type { WebActionKind, WebGoalState, WebPageAction, WebPageLink } from "../core/types";
 
 type TabMemory = {
   url: string;
@@ -14,6 +14,7 @@ type TabMemory = {
 export type WebMcpRecordingState = {
   tabs: Map<number, TabMemory>;
   activeTabId: number | null;
+  milestoneGoal: string;
 };
 
 export type WebMcpRecordingOutcome = {
@@ -24,11 +25,13 @@ export type WebMcpRecordingOutcome = {
 const MAX_LAYOUT_CHARS = 24_000;
 const MAX_SUMMARY_CHARS = 700;
 const MAX_LINKS = 120;
+const MAX_ACTIONS = 120;
 
-export function createWebMcpRecordingState(): WebMcpRecordingState {
+export function createWebMcpRecordingState(milestoneGoal = ""): WebMcpRecordingState {
   return {
     tabs: new Map(),
     activeTabId: null,
+    milestoneGoal,
   };
 }
 
@@ -59,7 +62,7 @@ export function recordWebMcpToolResult({
     const workspace = upsertWebSiteWorkspace(userId, {
       url: snapshotInput.url,
       label: new URL(snapshotInput.url).hostname,
-      goal: "Auto-recorded browser memory for public site traversal.",
+      goal: state.milestoneGoal || "Auto-recorded browser memory for public site traversal.",
     }).site;
 
     const snapshot = recordWebPageSnapshot(userId, workspace.siteKey, snapshotInput);
@@ -119,8 +122,17 @@ function buildSnapshotInput(
 
   const summary = buildSummary({ textContent, pageContent, message, toolName, payload });
   const links = extractLinks({ payload, layout, baseUrl: normalizedUrl });
+  const actions = extractActions({ payload, layout, links, baseUrl: normalizedUrl });
   const statusCode = typeof payload.statusCode === "number" ? payload.statusCode : null;
   const goalState: WebGoalState = textContent || pageContent ? "visited" : "queued";
+  const plan = [
+    `Captured automatically from ${toolName}.`,
+    actions.length > 0
+      ? `Next-step candidates: ${actions.slice(0, 8).map((action) => `${action.kind}:${action.label}`).join("; ")}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return {
     url: normalizedUrl.toString(),
@@ -129,8 +141,13 @@ function buildSnapshotInput(
     summary,
     layout,
     links,
+    actions,
     sourceUrl: null,
-    plan: `Captured automatically from ${toolName}.`,
+    plan,
+    flowPlan: actions.length > 0
+      ? `Semantic actions available on this page: ${actions.slice(0, 20).map((action) => action.label).join("; ")}`
+      : "",
+    milestoneGoal: state.milestoneGoal,
     goalState,
   };
 }
@@ -312,6 +329,148 @@ function addLink(
     }
   } catch {
     // Ignore malformed links from page content.
+  }
+}
+
+function extractActions({
+  payload,
+  layout,
+  links,
+  baseUrl,
+}: {
+  payload: Record<string, unknown>;
+  layout: string;
+  links: WebPageLink[];
+  baseUrl: URL;
+}): Array<Partial<WebPageAction>> {
+  const actions = new Map<string, Partial<WebPageAction>>();
+
+  for (const link of links) {
+    addAction(actions, {
+      kind: "link",
+      label: link.text || link.url,
+      text: link.text,
+      href: link.url,
+      targetUrl: link.url,
+      source: "link",
+      confidence: 0.8,
+    });
+  }
+
+  const rawElements = [
+    ...(Array.isArray(payload.elements) ? payload.elements : []),
+    ...(Array.isArray(payload.items) ? payload.items : []),
+    ...(Array.isArray(payload.actions) ? payload.actions : []),
+  ];
+  for (const element of rawElements) {
+    if (!isRecord(element)) continue;
+    const kind = normalizeActionKind(cleanString(element.kind) ?? cleanString(element.role) ?? cleanString(element.type));
+    const href = cleanString(element.href) ?? cleanString(element.url);
+    addAction(actions, {
+      kind,
+      role: cleanString(element.role) ?? null,
+      label:
+        cleanString(element.label) ??
+        cleanString(element.name) ??
+        cleanString(element.text) ??
+        href ??
+        undefined,
+      text: cleanString(element.text) ?? cleanString(element.name) ?? "",
+      href,
+      targetUrl: href ? normalizeHref(href, baseUrl) : null,
+      ref: cleanString(element.ref) ?? cleanString(element.id) ?? null,
+      source: "payload",
+      confidence: 0.85,
+    });
+  }
+
+  for (const line of layout.split(/\r?\n/)) {
+    const parsed = parseInteractiveLine(line, baseUrl);
+    if (parsed) addAction(actions, parsed);
+    if (actions.size >= MAX_ACTIONS) break;
+  }
+
+  return [...actions.values()].slice(0, MAX_ACTIONS);
+}
+
+function addAction(actions: Map<string, Partial<WebPageAction>>, action: Partial<WebPageAction>) {
+  const label = cleanString(action.label);
+  if (!label) return;
+  const key = [
+    action.kind ?? "unknown",
+    label.toLowerCase(),
+    action.targetUrl ?? action.href ?? "",
+    action.ref ?? "",
+  ].join("|");
+  if (!actions.has(key)) {
+    actions.set(key, {
+      ...action,
+      label: truncate(collapseWhitespace(label), 180),
+    });
+  }
+}
+
+function parseInteractiveLine(line: string, baseUrl: URL): Partial<WebPageAction> | null {
+  const roleMatch = line.match(/\b(link|button|textbox|input|combobox|select|checkbox|radio|tab|menuitem|option|form)\b/i);
+  if (!roleMatch) return null;
+
+  const role = roleMatch[1].toLowerCase();
+  const label =
+    line.match(/"([^"]{1,240})"/)?.[1] ??
+    line.match(/\b(?:name|label|aria-label)=["']([^"']{1,240})["']/i)?.[1] ??
+    line.replace(/\s+/g, " ").trim().slice(0, 180);
+  const href = line.match(/\bhref=["']([^"']+)["']/i)?.[1];
+  const ref = line.match(/\b(?:ref|data-ref|id)=["']?([A-Za-z0-9:_-]{1,160})["']?/i)?.[1];
+
+  return {
+    kind: normalizeActionKind(role),
+    role,
+    label,
+    text: label,
+    href,
+    targetUrl: href ? normalizeHref(href, baseUrl) : null,
+    ref,
+    source: "layout",
+    confidence: href || ref ? 0.72 : 0.58,
+  };
+}
+
+function normalizeActionKind(value: string | undefined): WebActionKind {
+  switch (value?.toLowerCase()) {
+    case "link":
+      return "link";
+    case "button":
+      return "button";
+    case "textbox":
+    case "input":
+      return "input";
+    case "combobox":
+    case "select":
+    case "option":
+      return "select";
+    case "checkbox":
+      return "checkbox";
+    case "radio":
+      return "radio";
+    case "tab":
+      return "tab";
+    case "menuitem":
+      return "menuitem";
+    case "form":
+      return "form";
+    default:
+      return "unknown";
+  }
+}
+
+function normalizeHref(href: string, baseUrl: URL) {
+  try {
+    const url = new URL(href, baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
   }
 }
 

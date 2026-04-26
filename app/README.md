@@ -5,6 +5,7 @@
 - Future memory references: [docs/memory-landscape.md](docs/memory-landscape.md)
 - Web MCP product focus: [docs/web-mcp-focus.md](docs/web-mcp-focus.md)
 - Credential broker: [docs/credential-broker.md](docs/credential-broker.md)
+- Todo: [docs/todo.md](docs/todo.md)
 
 ## Getting Started
 

@@ -60,13 +60,8 @@ export default function ChatClient({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [queue, setQueue] = useState<string[]>([]);
   const [now, setNow] = useState(0);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runGenerationRef = useRef<((text: string) => Promise<void>) | null>(null);
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, stream]);
 
   useEffect(() => {
     if (!stream.streaming) return;
@@ -411,7 +406,7 @@ export default function ChatClient({
           </button>
         </header>
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-6 md:px-8 py-6">
+        <div className="flex-1 overflow-y-auto px-4 sm:px-6 md:px-8 py-6">
           <div className="max-w-[780px] mx-auto flex flex-col gap-4">
             {messages.length === 0 && !stream.streaming && (
               <EmptyState lang={lang} agentName={agent.name} />

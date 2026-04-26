@@ -55,6 +55,17 @@ Each edge should preserve enough context for future agents to choose it intentio
 
 Before rediscovering a website, the agent should ask Web MCP for the known site index and graph.
 
+For goal-directed browser tasks, the runtime loop is:
+
+1. Set a short milestone goal for the current task.
+2. Observe the current page with screenshot when visual state matters, plus a compact interactive page read.
+3. Extract semantic actions from visible controls: links, buttons, fields, tabs, menus, forms.
+4. Semantic-search current actions and known flow hints against the milestone and final goal.
+5. Execute the best action, verify the next page, and record the resulting page/action/edge.
+6. Repeat until the final page, done state, or concrete blocker is reached.
+
+On repeated tasks, the agent should prefer remembered observed flows. If an action is missing, stale, disabled, or leads to a different state, the agent falls back to screenshot + page analysis and updates the flow with the new observation.
+
 For goal-directed tasks, Web MCP should support queries like:
 
 - shortest known path to a page or state

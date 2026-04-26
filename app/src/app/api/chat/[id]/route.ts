@@ -8,6 +8,7 @@ import {
   addTaskRunTokenUsage,
   appendMessage,
   appendTaskEvent,
+  cancelActiveTaskRunsForAgent,
   createCredentialRequest,
   createTaskRun,
   expireCredentialRequest,
@@ -33,6 +34,7 @@ import {
   buildIdentityRuntimeContext,
   extractAndPersistMemoryNotes,
 } from "@/server/identity/storage";
+import { normalizeServiceOrigin } from "@/server/service-registry";
 import { extractAndPersistWebMemoryNotes } from "@/server/web-mcp/storage";
 import type {
   Agent,
@@ -82,6 +84,93 @@ type TaskStreamEvent =
   | { type: "event"; event: TaskEvent }
   | { type: "artifacts"; artifacts: TaskArtifact[]; events: TaskEvent[] };
 type TaskTraceRuntime = ReturnType<typeof createTaskTraceRuntime>;
+type ActiveAgentRun = { runId: string; controller: AbortController };
+type BrowserTurnPolicy = {
+  chromeMcpEnabled: boolean;
+  reason:
+    | "enabled"
+    | "agent_without_browser"
+    | "browser_not_configured"
+    | "meta_or_history_question"
+    | "public_lookup_prefers_web_tools";
+};
+
+const MAX_CONTEXT_MESSAGES = 12;
+const MAX_CONTEXT_CHARS = 14_000;
+const MAX_CONTEXT_MESSAGE_CHARS = 1_800;
+
+const activeAgentRuns = new Map<string, Map<string, ActiveAgentRun>>();
+
+function activeAgentRunKey(userId: string, agentId: string) {
+  return `${userId}:${agentId}`;
+}
+
+function abortActiveAgentRuns(userId: string, agentId: string) {
+  const key = activeAgentRunKey(userId, agentId);
+  const runs = activeAgentRuns.get(key);
+  if (!runs) return;
+
+  for (const run of runs.values()) {
+    run.controller.abort();
+  }
+  activeAgentRuns.delete(key);
+}
+
+function registerActiveAgentRun(
+  userId: string,
+  agentId: string,
+  runId: string,
+  controller: AbortController,
+) {
+  const key = activeAgentRunKey(userId, agentId);
+  const runs = activeAgentRuns.get(key) ?? new Map<string, ActiveAgentRun>();
+  runs.set(runId, { runId, controller });
+  activeAgentRuns.set(key, runs);
+
+  return () => {
+    const currentRuns = activeAgentRuns.get(key);
+    currentRuns?.delete(runId);
+    if (currentRuns?.size === 0) {
+      activeAgentRuns.delete(key);
+    }
+  };
+}
+
+function createLinkedAbortController(requestSignal: AbortSignal) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+
+  if (requestSignal.aborted) {
+    abort();
+  } else {
+    requestSignal.addEventListener("abort", abort, { once: true });
+  }
+
+  return {
+    controller,
+    signal: controller.signal,
+    cleanup: () => requestSignal.removeEventListener("abort", abort),
+  };
+}
+
+function streamDirectReply(content: string) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`event: delta\ndata: ${JSON.stringify({ text: content })}\n\n`));
+      controller.enqueue(encoder.encode("event: done\ndata: {}\n\n"));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
 
 export async function GET(req: NextRequest, ctx: Ctx) {
   const user = getUserFromRequest(req);
@@ -110,17 +199,23 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const userRuntimeMetadata = normalizeUserRuntimeMetadata(runtimeMetadata, req);
   const decisionMemory = recordDecisionMemorySignal({ userId: user.id, message });
 
+  abortActiveAgentRuns(user.id, id);
+  cancelActiveTaskRunsForAgent({ agentId: id, userId: user.id });
+
   appendMessage(id, user.id, "user", message);
 
   const history = listMessages(id, user.id);
-  const conversation = history
-    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
-    .join("\n\n");
-  const priorConversation = history
-    .slice(0, -1)
-    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
-    .join("\n\n");
+  const conversation = buildConversationContext(history);
+  const priorConversation = buildConversationContext(history.slice(0, -1));
+  const directReply = buildDirectHistoryReply(message, history.slice(0, -1));
+  if (directReply) {
+    appendMessage(id, user.id, "assistant", directReply);
+    return streamDirectReply(directReply);
+  }
+
   const browserConnection = resolveBrowserConnection(getBrowserSettings(user.id));
+  const browserTurnPolicy = resolveBrowserTurnPolicy(agent, browserConnection, message);
+  const browserConnectionForTurn = applyBrowserTurnPolicy(browserConnection, browserTurnPolicy);
   const provider = getModelProvider(agent.model);
   const runtimeContext = buildRuntimeContext(
     agent,
@@ -129,6 +224,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     userRuntimeMetadata,
     decisionMemory,
     provider,
+    browserTurnPolicy,
   );
   const taskRun = createTaskRun({
     agentId: id,
@@ -141,6 +237,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const assistantMessage = appendMessage(id, user.id, "assistant", "Задача выполняется...", {
     taskRunId: taskRun.id,
   });
+  const linkedAbort = createLinkedAbortController(req.signal);
+  const unregisterActiveRun = registerActiveAgentRun(user.id, id, taskRun.id, linkedAbort.controller);
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -194,10 +292,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       const taskTrace = createTaskTraceRuntime({
         taskRunId: taskRun.id,
         userId: user.id,
+        taskGoal: message,
         send,
       });
 
-      const abortSignal = req.signal;
+      const abortSignal = linkedAbort.signal;
 
       let result: AgentRunResult = { content: "", toolTrace: [] };
       try {
@@ -205,6 +304,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         taskTrace.setStatus("planning", "Задача принята", {
           provider,
           browserSource: browserConnection.source,
+          browserPolicy: browserTurnPolicy,
           userRuntime: userRuntimeMetadata,
         });
 
@@ -214,7 +314,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
             priorConversation,
             latestUserMessage: message,
             runtimeContext,
-            browserConnection,
+            browserConnection: browserConnectionForTurn,
             taskTrace,
             send,
             abortSignal,
@@ -222,9 +322,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         } else {
           result = await streamClaudeReply({
             agent,
-            conversation,
+            priorConversation,
+            latestUserMessage: message,
             runtimeContext,
-            browserConnection,
+            browserConnection: browserConnectionForTurn,
             taskTrace,
             send,
             abortSignal,
@@ -233,7 +334,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
         if (abortSignal.aborted) {
           taskTrace.setStatus("cancelled", "Задача остановлена пользователем", {}, Date.now());
-        } else if (shouldRetryBrowserAutonomyHandoff(result, agent, browserConnection, message)) {
+        } else if (shouldRetryBrowserAutonomyHandoff(result, agent, browserConnectionForTurn, message)) {
           taskTrace.addEvent({
             taskRunId: taskTrace.taskRunId,
             userId: taskTrace.userId,
@@ -252,16 +353,17 @@ export async function POST(req: NextRequest, ctx: Ctx) {
                 priorConversation: [conversation, `Assistant: ${result.content}`].join("\n\n"),
                 latestUserMessage: BROWSER_AUTONOMY_RETRY_INSTRUCTION,
                 runtimeContext,
-                browserConnection,
+                browserConnection: browserConnectionForTurn,
                 taskTrace,
                 send,
                 abortSignal,
               })
             : await streamClaudeReply({
                 agent,
-                conversation: retryConversation,
+                priorConversation: retryConversation,
+                latestUserMessage: BROWSER_AUTONOMY_RETRY_INSTRUCTION,
                 runtimeContext,
-                browserConnection,
+                browserConnection: browserConnectionForTurn,
                 taskTrace,
                 send,
                 abortSignal,
@@ -273,10 +375,51 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           };
         }
 
-        if (!abortSignal.aborted && shouldRunCredentialBrokerFallback(result, agent, browserConnection)) {
+        if (!abortSignal.aborted && shouldRetryStaleCredentialTabResult(result, message)) {
+          taskTrace.addEvent({
+            taskRunId: taskTrace.taskRunId,
+            userId: taskTrace.userId,
+            kind: "message",
+            title: "Повтор: агент ответил по старой вкладке",
+            details: {
+              reason: "stale_credential_tab_result",
+            },
+          });
+          send("replace", { text: "" });
+
+          const retryInstruction = buildStaleCredentialTabRetryInstruction(message, result.content);
+          const retryResult = provider === "codex"
+            ? await streamCodexReply({
+                agent,
+                priorConversation: [conversation, `Assistant: ${result.content}`].join("\n\n"),
+                latestUserMessage: retryInstruction,
+                runtimeContext,
+                browserConnection: browserConnectionForTurn,
+                taskTrace,
+                send,
+                abortSignal,
+              })
+            : await streamClaudeReply({
+                agent,
+                priorConversation: [conversation, `Assistant: ${result.content}`].join("\n\n"),
+                latestUserMessage: retryInstruction,
+                runtimeContext,
+                browserConnection: browserConnectionForTurn,
+                taskTrace,
+                send,
+                abortSignal,
+              });
+
+          result = {
+            content: retryResult.content,
+            toolTrace: [...result.toolTrace, ...retryResult.toolTrace],
+          };
+        }
+
+        if (!abortSignal.aborted && shouldRunCredentialBrokerFallback(result, agent, browserConnectionForTurn, message)) {
           const credentialRequest = inferCredentialFallbackRequest({
             agent,
-            browserConnection,
+            browserConnection: browserConnectionForTurn,
             taskTrace,
             userMessage: message,
             result,
@@ -288,7 +431,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
               provider,
               conversation,
               runtimeContext,
-              browserConnection,
+              browserConnection: browserConnectionForTurn,
               taskTrace,
               send,
               abortSignal,
@@ -328,6 +471,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         send("replace", { text: result.content });
         send("done", {});
       } finally {
+        unregisterActiveRun();
+        linkedAbort.cleanup();
         if (result.content) {
           const persisted = extractAndPersistMemoryNotes(user, agent, result.content);
           const webMemory = extractAndPersistWebMemoryNotes(user.id, persisted.cleanedContent);
@@ -393,14 +538,16 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 function createTaskTraceRuntime({
   taskRunId,
   userId,
+  taskGoal,
   send,
 }: {
   taskRunId: string;
   userId: string;
+  taskGoal: string;
   send: (event: string, data: unknown) => void;
 }) {
   const sendTask = (data: TaskStreamEvent) => send("task", data);
-  const webMcpRecordingState = createWebMcpRecordingState();
+  const webMcpRecordingState = createWebMcpRecordingState(taskGoal);
 
   const sendSnapshot = () => {
     const taskRun = getTaskRunSnapshot(taskRunId, userId);
@@ -500,10 +647,12 @@ function createCredentialBrokerMcpServer({
   agent,
   taskTrace,
   browserConnection,
+  abortSignal,
 }: {
   agent: Agent;
   taskTrace: TaskTraceRuntime;
   browserConnection: BrowserConnection;
+  abortSignal?: AbortSignal;
 }) {
   return createSdkMcpServer({
     name: "meta_credentials",
@@ -564,7 +713,10 @@ function createCredentialBrokerMcpServer({
           });
           taskTrace.sendSnapshot();
 
-          const resolved = await waitForCredentialDecision(request.id, taskTrace.userId, request.expiresAt);
+          const resolved = await waitForCredentialDecision(request.id, taskTrace.userId, request.expiresAt, abortSignal);
+          if (abortSignal?.aborted) {
+            return credentialToolError("The task was cancelled by a newer user message.");
+          }
           if (!resolved || resolved.status === "expired") {
             taskTrace.setStatus("running", "Credential approval истёк", {
               credentialRequest: resolved ? credentialRequestForClient(resolved) : credentialRequestForClient(request),
@@ -666,11 +818,18 @@ function credentialToolError(message: string) {
   };
 }
 
-async function waitForCredentialDecision(requestId: string, userId: string, expiresAt: number) {
+async function waitForCredentialDecision(
+  requestId: string,
+  userId: string,
+  expiresAt: number,
+  abortSignal?: AbortSignal,
+) {
   while (Date.now() < expiresAt) {
+    if (abortSignal?.aborted) return expireCredentialRequest(requestId, userId);
+
     const request = getCredentialRequest(requestId, userId);
     if (!request || request.status !== "pending") return request;
-    await sleep(500);
+    await sleep(Math.min(500, Math.max(0, expiresAt - Date.now())), abortSignal);
   }
 
   return expireCredentialRequest(requestId, userId);
@@ -736,7 +895,8 @@ async function runCredentialBrokerFallback({
   });
   taskTrace.sendSnapshot();
 
-  const resolved = await waitForCredentialDecision(saved.id, taskTrace.userId, saved.expiresAt);
+  const resolved = await waitForCredentialDecision(saved.id, taskTrace.userId, saved.expiresAt, abortSignal);
+  if (abortSignal?.aborted) return null;
   if (!resolved || resolved.status === "expired") {
     taskTrace.setStatus("running", "Credential approval истёк", {
       credentialRequest: resolved ? credentialRequestForClient(resolved) : credentialRequestForClient(saved),
@@ -782,7 +942,8 @@ async function runCredentialBrokerFallback({
       })
     : streamClaudeReply({
         agent,
-        conversation: [conversation, `Assistant: ${blockedContent}`, `User: ${retryInstruction}`].join("\n\n"),
+        priorConversation: [conversation, `Assistant: ${blockedContent}`].join("\n\n"),
+        latestUserMessage: retryInstruction,
         runtimeContext,
         browserConnection,
         taskTrace,
@@ -795,6 +956,7 @@ function shouldRunCredentialBrokerFallback(
   result: AgentRunResult,
   agent: Agent,
   browserConnection: BrowserConnection,
+  latestUserMessage: string,
 ) {
   if (!hasCredentialBroker(agent, browserConnection)) return false;
   if (result.toolTrace.some((entry) => entry.name === "mcp__meta_credentials__request_credential_approval")) {
@@ -803,9 +965,119 @@ function shouldRunCredentialBrokerFallback(
 
   const content = result.content.replace(/\s+/g, " ").trim();
   if (!content) return false;
+  if (!isCredentialFallbackRelevantToLatestMessage(latestUserMessage, content)) return false;
 
   return CREDENTIAL_BLOCKER_PATTERNS.some((pattern) => pattern.test(content));
 }
+
+function shouldRetryStaleCredentialTabResult(result: AgentRunResult, latestUserMessage: string) {
+  const content = result.content.replace(/\s+/g, " ").trim();
+  if (!content) return false;
+  if (isCredentialFallbackRelevantToLatestMessage(latestUserMessage, content)) return false;
+  if (!CREDENTIAL_BLOCKER_PATTERNS.some((pattern) => pattern.test(content))) return false;
+
+  const origin =
+    inferCredentialCurrentUrl(content) ??
+    inferCredentialOriginFromText(content) ??
+    inferCredentialOriginFromToolTrace(result.toolTrace);
+
+  return Boolean(origin);
+}
+
+function inferCredentialOriginFromToolTrace(toolTrace: ToolTraceEntry[]) {
+  for (const entry of toolTrace) {
+    const candidate = findServiceUrlInValue(entry.input) ?? findServiceUrlInValue(entry.result);
+    if (candidate) return normalizeCredentialOrigin(candidate);
+  }
+
+  return null;
+}
+
+function findServiceUrlInValue(value: unknown): string | null {
+  if (typeof value === "string") {
+    return inferCredentialCurrentUrl(value);
+  }
+
+  if (!value || typeof value !== "object") return null;
+
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 10)) {
+      const found = findServiceUrlInValue(item);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  for (const child of Object.values(value).slice(0, 20)) {
+    const found = findServiceUrlInValue(child);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function isCredentialFallbackRelevantToLatestMessage(latestUserMessage: string, blockerContent: string) {
+  const latest = latestUserMessage.replace(/\s+/g, " ").trim();
+  if (!latest) return false;
+  if (isMetaOrClarifyingQuestion(latest)) return false;
+  if (isContinuationOrConfirmationMessage(latest)) return true;
+  if (CREDENTIAL_RELEVANT_TASK_PATTERNS.some((pattern) => pattern.test(latest))) return true;
+  if (PRIVATE_ACCOUNT_TASK_PATTERNS.some((pattern) => pattern.test(latest))) return true;
+
+  const currentUrl = inferCredentialCurrentUrl(blockerContent);
+  const origin = currentUrl ? normalizeCredentialOrigin(currentUrl) : inferCredentialOriginFromText(blockerContent);
+  if (!origin) return false;
+
+  return credentialOriginMatchesLatestMessage(origin, latest);
+}
+
+function isContinuationOrConfirmationMessage(message: string) {
+  const normalized = message.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized || normalized.length > 120) return false;
+  return CONTINUATION_CONFIRMATION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function credentialOriginMatchesLatestMessage(origin: string, latestUserMessage: string) {
+  const normalized = latestUserMessage.toLowerCase();
+
+  let host = "";
+  try {
+    host = new URL(origin).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return false;
+  }
+
+  if (normalized.includes(host)) return true;
+  const aliases = CREDENTIAL_ORIGIN_ALIASES[host] ?? [];
+  return aliases.some((alias) => normalized.includes(alias));
+}
+
+const CONTINUATION_CONFIRMATION_PATTERNS = [
+  /^(?:да|yes|yep|ok|okay|ок|ага|угу|подтверждаю|разрешаю|продолжай|продолжи|go ahead|continue)\b/i,
+  /^(?:нажми|жми|кликни|generate|confirm|allow|approve)\b/i,
+];
+
+const CREDENTIAL_RELEVANT_TASK_PATTERNS = [
+  /(?:login|log\s*in|sign\s*in|authorize|oauth|connect|integrate|token|pat|api\s*key|credential|password|passkey|mfa|2fa)/i,
+  /(?:залогин|авториз|подключ|интегр|токен|ключ\s*api|credential|парол|passkey|mfa|2fa|аккаунт|доступ)/i,
+];
+
+const PRIVATE_ACCOUNT_TASK_PATTERNS = [
+  /(?:gmail|mail|email|calendar|drive|docs|slack|notion|figma|linear|github|gitlab)/i,
+  /(?:почт|календар|диск|документ|сообщени|репозитор|issue|pull\s*request|\bpr\b)/i,
+];
+
+const CREDENTIAL_ORIGIN_ALIASES: Record<string, string[]> = {
+  "github.com": ["github", "гитхаб", "репозитор", "pull request", "issue", "pat"],
+  "gitlab.com": ["gitlab", "гитлаб", "репозитор", "merge request"],
+  "google.com": ["google", "gmail", "mail", "calendar", "drive", "docs", "почт", "календар", "диск"],
+  "accounts.google.com": ["google", "gmail", "mail", "calendar", "drive", "docs", "почт", "календар", "диск"],
+  "slack.com": ["slack", "слак", "сообщени"],
+  "notion.so": ["notion", "ноушн", "документ"],
+  "notion.com": ["notion", "ноушн", "документ"],
+  "figma.com": ["figma", "фигма"],
+  "linear.app": ["linear", "линеар", "issue"],
+};
 
 function inferCredentialFallbackRequest({
   userMessage,
@@ -866,7 +1138,7 @@ const CREDENTIAL_BLOCKER_PATTERNS = [
 function inferCredentialCurrentUrl(text: string) {
   const matches = text.match(/https?:\/\/[^\s`"'<>)]*/gi) ?? [];
   const candidate =
-    matches.find((url) => /github\.com|gitlab\.com|google\.com|slack\.com|notion\.so|figma\.com|linear\.app/i.test(url)) ??
+    matches.find((url) => /github\.com|gitlab\.com|google\.com|slack\.com|notion\.(so|com)|figma\.com|linear\.app/i.test(url)) ??
     matches[0];
   if (!candidate) return null;
 
@@ -907,7 +1179,7 @@ function buildCredentialFallbackReason(text: string) {
 
 function normalizeCredentialOrigin(value: string) {
   try {
-    return new URL(value).origin;
+    return normalizeServiceOrigin(value);
   } catch {
     return null;
   }
@@ -935,13 +1207,31 @@ function cleanCredentialText(value: unknown, maxLength: number) {
   return cleaned ? cleaned.slice(0, maxLength) : null;
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, abortSignal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (abortSignal?.aborted || ms <= 0) {
+      resolve();
+      return;
+    }
+
+    let settled = false;
+    function done() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      abortSignal?.removeEventListener("abort", done);
+      resolve();
+    }
+
+    const timeout = setTimeout(done, ms);
+    abortSignal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 async function streamClaudeReply({
   agent,
-  conversation,
+  priorConversation,
+  latestUserMessage,
   runtimeContext,
   browserConnection,
   taskTrace,
@@ -949,7 +1239,8 @@ async function streamClaudeReply({
   abortSignal,
 }: {
   agent: Agent;
-  conversation: string;
+  priorConversation: string;
+  latestUserMessage: string;
   runtimeContext: string;
   browserConnection: BrowserConnection;
   taskTrace: TaskTraceRuntime;
@@ -962,13 +1253,14 @@ async function streamClaudeReply({
   const reportTokenUsage = createTokenUsageReporter(taskTrace);
 
   const hasBrowserMcp = agent.capabilities.includes("chrome_browser") && Boolean(browserConnection.chromeMcpUrl);
+  const prompt = buildClaudePrompt(agent, priorConversation, latestUserMessage);
   taskTrace.setStatus("running", "Агент начал выполнение", {
     provider: "claude",
     browserConnected: hasBrowserMcp,
   });
 
   const q = query({
-    prompt: conversation,
+    prompt,
     options: {
       model: agent.model,
       systemPrompt: [agent.systemPrompt.trim(), runtimeContext.trim()].filter(Boolean).join("\n\n") || undefined,
@@ -984,6 +1276,7 @@ async function streamClaudeReply({
                       agent,
                       taskTrace,
                       browserConnection,
+                      abortSignal,
                     }),
                   }
                 : {}),
@@ -1000,7 +1293,7 @@ async function streamClaudeReply({
         }
 
         if (hasBrowserMcp) {
-          return { behavior: "allow" as const, updatedInput: input };
+          return { behavior: "allow" as const, updatedInput: optimizeChromeMcpToolInput(toolName, input) };
         }
 
         return {
@@ -1417,6 +1710,25 @@ function shortToolName(name: string) {
   return name.replace(/^mcp__chrome__/, "").replace(/^mcp__[^_]+__/, "");
 }
 
+function optimizeChromeMcpToolInput(toolName: string, input: Record<string, unknown>) {
+  const name = shortToolName(toolName);
+
+  if (name === "chrome_read_page") {
+    if ("filter" in input) return input;
+    return { ...input, filter: "interactive" };
+  }
+
+  if (name === "chrome_get_web_content") {
+    return {
+      ...input,
+      textContent: "textContent" in input ? input.textContent : true,
+      htmlContent: "htmlContent" in input ? input.htmlContent : false,
+    };
+  }
+
+  return input;
+}
+
 function createTokenUsageReporter(taskTrace: TaskTraceRuntime) {
   let lastUsage = emptyTokenUsage();
 
@@ -1595,6 +1907,134 @@ function buildTaskTitle(input: string) {
   return title.length > 90 ? `${title.slice(0, 87)}...` : title || "Task";
 }
 
+function buildConversationContext(messages: Array<{ role: "user" | "assistant"; content: string }>) {
+  const formatted: string[] = [];
+  let remainingChars = MAX_CONTEXT_CHARS;
+
+  for (const message of [...messages].reverse().slice(0, MAX_CONTEXT_MESSAGES)) {
+    const content = truncateForModelContext(message.content.replace(/\s+/g, " ").trim(), MAX_CONTEXT_MESSAGE_CHARS);
+    if (!content) continue;
+    if (message.role === "assistant" && content === "Задача выполняется...") continue;
+
+    const entry = `${message.role === "user" ? "User" : "Assistant"}: ${content}`;
+    if (entry.length > remainingChars && formatted.length > 0) break;
+
+    const clippedEntry = truncateForModelContext(entry, remainingChars);
+    formatted.push(clippedEntry);
+    remainingChars -= clippedEntry.length + 2;
+    if (remainingChars <= 0) break;
+  }
+
+  return formatted.reverse().join("\n\n");
+}
+
+function truncateForModelContext(value: string, maxLength: number) {
+  if (maxLength <= 0) return "";
+  return value.length > maxLength ? `${value.slice(0, Math.max(0, maxLength - 3))}...` : value;
+}
+
+function resolveBrowserTurnPolicy(
+  agent: Agent,
+  browserConnection: BrowserConnection,
+  latestUserMessage: string,
+): BrowserTurnPolicy {
+  if (!agent.capabilities.includes("chrome_browser")) {
+    return { chromeMcpEnabled: false, reason: "agent_without_browser" };
+  }
+
+  if (!browserConnection.chromeMcpUrl) {
+    return { chromeMcpEnabled: false, reason: "browser_not_configured" };
+  }
+
+  if (isMetaOrClarifyingQuestion(latestUserMessage) || isPreviousAnswerSourceQuestion(latestUserMessage)) {
+    return { chromeMcpEnabled: false, reason: "meta_or_history_question" };
+  }
+
+  if (canPreferWebToolsForPublicLookup(agent, latestUserMessage)) {
+    return { chromeMcpEnabled: false, reason: "public_lookup_prefers_web_tools" };
+  }
+
+  return { chromeMcpEnabled: true, reason: "enabled" };
+}
+
+function applyBrowserTurnPolicy(
+  browserConnection: BrowserConnection,
+  policy: BrowserTurnPolicy,
+): BrowserConnection {
+  return policy.chromeMcpEnabled
+    ? browserConnection
+    : { ...browserConnection, chromeMcpUrl: null };
+}
+
+function canPreferWebToolsForPublicLookup(agent: Agent, latestUserMessage: string) {
+  if (!agent.capabilities.includes("web_search") && !agent.capabilities.includes("web_fetch")) return false;
+
+  const normalized = latestUserMessage.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized) return false;
+  if (BROWSER_REQUIRED_PUBLIC_LOOKUP_PATTERNS.some((pattern) => pattern.test(normalized))) return false;
+
+  return PUBLIC_LOOKUP_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+const PUBLIC_LOOKUP_PATTERNS = [
+  /(?:погод|температур|осадк|ветер|прогноз)/i,
+  /\b(?:weather|forecast|temperature|rain|wind)\b/i,
+  /(?:курс|обменн|валют|котировк)/i,
+  /\b(?:exchange rate|stock price|quote)\b/i,
+  /(?:новост|последн|актуальн)/i,
+  /\b(?:news|latest|current)\b/i,
+  /(?:сколько|какое|какая|какой).*(?:врем|дата|число|день недели)/i,
+  /\b(?:what time|what date|what day)\b/i,
+];
+
+const BROWSER_REQUIRED_PUBLIC_LOOKUP_PATTERNS = [
+  /(?:браузер|chrome|вкладк|страниц[ауеы]?|открой|перейди|кликн|нажми)/i,
+  /\b(?:browser|chrome|tab|page|open|click|press|navigate)\b/i,
+  /(?:gmail|почт|календар|calendar|contacts?|drive|docs|slack|notion|figma|linear|github|gitlab)/i,
+  /(?:логин|залогин|авториз|аккаунт|oauth|token|токен|pat|api\s*key|ключ\s*api|парол|passkey|mfa|2fa)/i,
+  /(?:закаж|купи|корзин|checkout|payment|billing|booking|такси|яндекс|uber)/i,
+];
+
+function buildDirectHistoryReply(latestUserMessage: string, priorMessages: Array<{ role: "user" | "assistant"; content: string }>) {
+  if (!isPreviousAnswerSourceQuestion(latestUserMessage)) return null;
+
+  const lastAssistant = [...priorMessages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.content.trim() && message.content.trim() !== "Задача выполняется...");
+
+  if (!lastAssistant) {
+    return "В истории нет предыдущего ответа с источником. Браузер для этого уточнения запускать не нужно.";
+  }
+
+  const urls = extractHttpUrls(lastAssistant.content);
+  if (urls.length > 0) {
+    return `Источник был указан в предыдущем ответе: ${urls.join(", ")}. Браузер для этого уточнения запускать не нужно.`;
+  }
+
+  return "В предыдущем ответе не был сохранён явный URL источника. Браузер для этого уточнения запускать не нужно.";
+}
+
+function isPreviousAnswerSourceQuestion(message: string) {
+  const normalized = message.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized) return false;
+
+  return PREVIOUS_ANSWER_SOURCE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+const PREVIOUS_ANSWER_SOURCE_PATTERNS = [
+  /(?:где|откуда).*(?:посмотрел|смотрел|взял|наш[её]л|получил|узнал|данн|информац|погод)/i,
+  /(?:какой|какая|какие).*(?:источник|сайт|страниц|url|ссылк)/i,
+  /(?:дай|покажи|скинь|назови).*(?:источник|ссылк|url)/i,
+  /\bsource\b|\bsources\b|\bcitation\b|\blink\b/i,
+  /\bwhere did (?:you )?(?:look|find|get|check)\b/i,
+  /\bwhat (?:source|site|url|link)\b/i,
+];
+
+function extractHttpUrls(text: string) {
+  const urls = text.match(/https?:\/\/[^\s`"'<>)]*/gi) ?? [];
+  return [...new Set(urls.map((url) => url.replace(/[.,;:!?]+$/g, "")))];
+}
+
 function previewToolValue(value: unknown): unknown {
   return redactSensitiveValue(value);
 }
@@ -1706,6 +2146,7 @@ const BROWSER_HANDOFF_PATTERNS = [
 function isBrowserGroundedTask(message: string) {
   const normalized = message.replace(/\s+/g, " ").trim().toLowerCase();
   if (!normalized) return false;
+  if (isMetaOrClarifyingQuestion(normalized) || isPreviousAnswerSourceQuestion(normalized)) return false;
 
   return BROWSER_GROUNDED_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
 }
@@ -1728,6 +2169,9 @@ const META_QUESTION_PATTERNS = [
   /\bтво[ёе]?\s+имя\b/i,
   /\bрасскажи\s+о\s+себе\b/i,
   /\bчто\s+ты\s+зна(ешь|ете)\b/i,
+  /(?:где|откуда).*(?:посмотрел|смотрел|взял|наш[её]л|получил|узнал|данн|информац|погод)/i,
+  /(?:какой|какая|какие).*(?:источник|сайт|страниц|url|ссылк)/i,
+  /(?:почему|зачем).*(?:браузер|вкладк|github|git hub|гитхаб)/i,
   /\bпочему\b/i,
   /\bзачем\b/i,
   /\bwho\s+are\s+you\b/i,
@@ -1752,6 +2196,17 @@ const BROWSER_AUTONOMY_RETRY_INSTRUCTION = [
   "Если это задача выбора, планирования, поиска или сравнения, сам собери доступные варианты в браузере, сравни их по критериям, которые видны в источнике, и дай рекомендацию.",
   "Если реально блокирует логин, MFA, капча, неоднозначный выбор или финальное подтверждение, кратко назови этот блокер; иначе верни проверенный результат.",
 ].join(" ");
+
+function buildStaleCredentialTabRetryInstruction(latestUserMessage: string, invalidAnswer: string) {
+  return [
+    "Предыдущий ответ был ошибочным: он продолжил старую browser/credential вкладку, не относящуюся к последнему запросу пользователя.",
+    `Последний запрос пользователя, на который нужно ответить: ${latestUserMessage.trim()}`,
+    "Не продолжай GitHub/login/token/PAT/credential flow и не проси пароль, MFA или sudo confirmation, если последний запрос явно не про этот же сервис и flow.",
+    "Игнорируй текущую активную вкладку как stale context. Если нужен браузер, открой новую релевантную страницу или используй поиск под последний запрос.",
+    "Если последний запрос про погоду или другой локальный факт, используй runtime location из системного контекста, если она есть; если локации нет, задай один короткий уточняющий вопрос о городе.",
+    `Ошибочный старый ответ для справки, его нельзя повторять: ${truncateForUser(invalidAnswer.replace(/\s+/g, " ").trim(), 700)}`,
+  ].join(" ");
+}
 
 function buildBrowserAutonomyRetryConversation(conversation: string, invalidAnswer: string) {
   return [
@@ -2040,6 +2495,25 @@ function isSseMcpUrl(url: string) {
   }
 }
 
+function buildClaudePrompt(
+  agent: Agent,
+  priorConversation: string,
+  latestUserMessage: string,
+) {
+  return [
+    `You are the agent "${agent.name}".`,
+    `You are running on model: ${agent.model}.`,
+    priorConversation.trim()
+      ? `History (context only — do NOT continue or re-execute prior tasks unless the latest user message explicitly asks to continue, retry, or confirm that prior task):\n${priorConversation.trim()}`
+      : null,
+    `Latest user message (respond to THIS message only):\n${latestUserMessage.trim()}`,
+    "Use history only to resolve references in the latest message. Existing browser tabs may be stale from a prior task and must not override the latest user message.",
+    "If the latest message is a meta or clarifying question (about you, your model, your prior answer, app settings, why something happened), answer it directly without using browser tools. Only run a new browser task if the latest message itself asks for one. Keep the answer user-facing and concise.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function buildCodexPrompt(
   agent: Agent,
   priorConversation: string,
@@ -2055,9 +2529,10 @@ function buildCodexPrompt(
     runtimeContext.trim() ? `Runtime context:\n${runtimeContext.trim()}` : null,
     `Enabled capabilities: ${capabilities}.`,
     priorConversation.trim()
-      ? `History (context only — do NOT re-execute prior tasks; treat completed tasks as done):\n${priorConversation.trim()}`
+      ? `History (context only — do NOT continue or re-execute prior tasks unless the latest user message explicitly asks to continue, retry, or confirm that prior task):\n${priorConversation.trim()}`
       : null,
     `Latest user message (respond to THIS message only):\n${latestUserMessage.trim()}`,
+    "Use history only to resolve references in the latest message. Existing browser tabs may be stale from a prior task and must not override the latest user message.",
     "If the latest message is a meta or clarifying question (about you, your model, your prior answer, app settings, why something happened), answer it directly without using browser tools. Only run a new browser task if the latest message itself asks for one. Keep the answer user-facing and concise.",
   ]
     .filter(Boolean)
@@ -2094,8 +2569,10 @@ function buildRuntimeContext(
   userRuntimeMetadata: UserRuntimeMetadata,
   decisionMemory: DecisionMemory,
   provider: "claude" | "codex",
+  browserTurnPolicy: BrowserTurnPolicy,
 ) {
   const userId = user.id;
+  const browserMcpEnabledForTurn = browserTurnPolicy.chromeMcpEnabled && Boolean(browserConnection.chromeMcpUrl);
   const lines: string[] = [
     "Always return a final user-visible task outcome.",
     "If the task is blocked, failed, or ambiguous, still answer with: what was verified, what the blocker is, and the exact next step needed from the user.",
@@ -2119,14 +2596,16 @@ function buildRuntimeContext(
   }
 
   if (agent.capabilities.includes("chrome_browser")) {
-    if (browserConnection.chromeMcpUrl) {
+    if (browserMcpEnabledForTurn) {
       lines.push(
         "A live browser MCP server is connected for this user session.",
         "When the task depends on logged-in browser state, use the browser MCP tools to do the work instead of giving setup instructions.",
         "Browser MCP permissions are handled by the app runtime; do not ask the user to grant tool access in an external CLI.",
         "The currently active tab is only a starting point, not a limitation. If it is not the right service/page, use get_windows_and_tabs to find an existing relevant tab, chrome_switch_tab to activate it, or chrome_navigate to open the needed URL yourself.",
+        "Do not continue a browser flow from an already-open tab unless the latest user message asks for that same flow. Treat open tabs from prior tasks as stale context when the latest message is about something else.",
+        "For weather, local facts, dates, current conditions, or other non-account questions, do not inspect an arbitrary active account/settings tab first. Use runtime location/search/source pages that match the latest request, or ask one concise location question if no location context is available.",
         "Do not ask the user to open a tab, switch tabs, navigate to a service, or prepare a page when browser tools can do that. Ask the user only for login/MFA/captcha, an ambiguous choice that cannot be resolved safely, or explicit confirmation before an irreversible final action.",
-        "Browser execution loop: choose or open the target page, observe with chrome_read_page(filter=\"interactive\"), semantically match the target by role/name/text/href, act by ref with chrome_click_element/chrome_fill_or_select/chrome_computer, then verify the result with chrome_read_page or a screenshot.",
+        "Browser execution loop for every web task: set a short milestone goal, choose or open the target page, observe with screenshot when visual state matters plus chrome_read_page(filter=\"interactive\"), semantically match visible actions by role/name/text/href against the milestone, act by ref with chrome_click_element/chrome_fill_or_select/chrome_computer, then verify the result with chrome_read_page or a screenshot.",
         "If the target is not exposed in chrome_read_page or an icon-only control is ambiguous, take a chrome_computer screenshot, infer coordinates from the screenshot, act carefully, and verify. After about three failed attempts, use chrome_request_element_selection instead of guessing.",
         "Prefer refs from chrome_read_page over coordinates. Use coordinates only for visual-only controls, canvas-like UI, or when refs are missing/expired.",
         "For any task that involves choosing, planning, comparing, scheduling, purchasing, booking, routing, or other decisions, first gather the practical options available through the relevant browser surface instead of asking generic preference questions.",
@@ -2146,9 +2625,17 @@ function buildRuntimeContext(
               "The credential broker may pause the task for UI approval. It never returns plaintext secrets to you. After approval, continue through the live browser session. If OS autofill, passkey user presence, MFA, captcha, or a missing saved credential still blocks progress, report that exact blocker.",
             ]
           : []),
-        "For public websites, after each meaningful landing page call chrome_get_web_content with textContent=true or chrome_read_page so the app can record Web MCP memory automatically for faster future runs.",
+        "Repeat the milestone loop on each page until the target page, done state, or concrete blocker is reached. Web MCP is the memory layer for recording and reusing the observed pages, semantic actions, and flow edges; it is not a separate navigation mode.",
+        "For public websites, after each meaningful landing page call chrome_read_page(filter=\"interactive\") or chrome_get_web_content with textContent=true so the app can record pages, semantic actions, and flow edges automatically for faster future runs.",
+        "On repeated visits, prefer known Web MCP flow hints but verify the current page first; if an action is missing or stale, fallback to screenshot plus page analysis and let the new observation update the flow.",
         "For irreversible actions such as sending, deleting, archiving, purchasing, or placing an order, stop at the final confirmation screen and ask the user for explicit confirmation before the final action.",
         "Do not mention external CLI setup unless the user explicitly asks for implementation details."
+      );
+    } else if (browserConnection.chromeMcpUrl) {
+      lines.push(
+        `Chrome MCP is connected but intentionally not attached to this turn. Browser policy reason: ${browserTurnPolicy.reason}.`,
+        "Do not inspect or continue open browser tabs for this turn. Answer directly or use enabled web/search tools that match the latest user message.",
+        "If the latest user message turns out to require logged-in browser state, say that a browser-specific task should be retried explicitly."
       );
     } else {
       lines.push(
@@ -2161,12 +2648,12 @@ function buildRuntimeContext(
   }
 
   const shouldExposeWebMemoryRoot =
-    agent.capabilities.includes("chrome_browser") ||
+    browserMcpEnabledForTurn ||
     (agent.capabilities.includes("file_write") &&
       (agent.capabilities.includes("web_fetch") || agent.capabilities.includes("web_search")));
 
   if (shouldExposeWebMemoryRoot) {
-    lines.push(buildWebMcpRuntimeContext(userId, agent.capabilities.includes("chrome_browser") && Boolean(browserConnection.chromeMcpUrl)));
+    lines.push(buildWebMcpRuntimeContext(userId, browserMcpEnabledForTurn));
   }
 
   return lines.join("\n");
@@ -2187,6 +2674,9 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
   if (!user) return unauthorizedJson();
 
   const { id } = await ctx.params;
+  abortActiveAgentRuns(user.id, id);
+  cancelActiveTaskRunsForAgent({ agentId: id, userId: user.id, reason: "chat_history_deleted" });
+
   const fromMessageId = req.nextUrl.searchParams.get("fromMessageId");
   if (fromMessageId) {
     const ok = truncateMessagesFrom(id, user.id, fromMessageId);

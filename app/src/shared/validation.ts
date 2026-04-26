@@ -46,17 +46,67 @@ export const passkeyFinishSchema = z.object({
 
 const webNoteKindSchema = z.enum(["general", "goal", "plan", "finding", "run", "memory"]);
 const webGoalStateSchema = z.enum(["seed", "queued", "visited", "blocked", "done"]);
+const webSiteCategorySchema = z.enum([
+  "unknown",
+  "taxi",
+  "maps",
+  "delivery",
+  "mail",
+  "calendar",
+  "contacts",
+  "chat",
+  "docs",
+  "project",
+  "code",
+  "finance",
+  "social",
+  "media",
+  "search",
+  "shopping",
+  "travel",
+  "weather",
+  "local_services",
+]);
+const webActionKindSchema = z.enum([
+  "link",
+  "button",
+  "input",
+  "select",
+  "checkbox",
+  "radio",
+  "tab",
+  "menuitem",
+  "form",
+  "navigation",
+  "unknown",
+]);
 
 export const webSiteCreateSchema = z.object({
   url: z.string().trim().url(),
   label: z.string().trim().max(120).optional(),
   goal: z.string().trim().max(2000).optional(),
+  category: webSiteCategorySchema.optional(),
+  tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
 });
 
 export const webPageLinkSchema = z.object({
   url: z.string().trim().url(),
   text: z.string().max(1000).default(""),
   rel: z.string().trim().max(120).nullable().optional(),
+});
+
+export const webPageActionSchema = z.object({
+  id: z.string().trim().max(120).optional(),
+  kind: webActionKindSchema.optional(),
+  label: z.string().trim().max(1000).optional(),
+  role: z.string().trim().max(120).nullable().optional(),
+  text: z.string().trim().max(1000).optional(),
+  href: z.string().trim().max(2000).nullable().optional(),
+  targetUrl: z.string().trim().url().nullable().optional(),
+  ref: z.string().trim().max(160).nullable().optional(),
+  semanticKey: z.string().trim().max(500).optional(),
+  source: z.string().trim().max(120).optional(),
+  confidence: z.number().min(0).max(1).optional(),
 });
 
 export const webPageSnapshotSchema = z.object({
@@ -66,8 +116,11 @@ export const webPageSnapshotSchema = z.object({
   summary: z.string().max(10000).optional(),
   layout: z.string().max(40000).optional(),
   links: z.array(webPageLinkSchema).max(1000).optional(),
+  actions: z.array(webPageActionSchema).max(1000).optional(),
   sourceUrl: z.string().trim().url().nullable().optional(),
   plan: z.string().max(10000).optional(),
+  milestoneGoal: z.string().max(5000).optional(),
+  flowPlan: z.string().max(10000).optional(),
   goalState: webGoalStateSchema.optional(),
 });
 

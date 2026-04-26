@@ -17,6 +17,7 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
   if (!detail) notFound();
 
   const { site, siteMemory, pages, edges, notes } = detail;
+  const actionCount = pages.reduce((sum, page) => sum + page.actionCount, 0);
 
   return (
     <div className="flex-1 px-6 py-10 max-w-6xl w-full mx-auto space-y-8">
@@ -35,6 +36,12 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
             <div className="text-xs uppercase tracking-wide text-[var(--fg-dim)]">Web MCP workspace</div>
             <h1 className="text-3xl font-semibold tracking-tight mt-1">{site.label}</h1>
             <div className="text-sm text-[var(--fg-muted)] mt-2 break-all">{site.seedUrl}</div>
+            <div className="flex flex-wrap gap-2 mt-3 text-xs text-[var(--fg-muted)]">
+              <span className="chip chip-active">{site.category}</span>
+              {site.tags.map((tag) => (
+                <span key={tag} className="chip">{tag}</span>
+              ))}
+            </div>
           </div>
           <div className="text-right text-xs text-[var(--fg-muted)]">
             <div>Обновлено: {formatDate(site.updatedAt)}</div>
@@ -42,9 +49,10 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-3 mt-6">
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 mt-6">
           <Metric label="Pages" value={String(site.pageCount)} />
           <Metric label="Edges" value={String(site.edgeCount)} />
+          <Metric label="Actions" value={String(actionCount)} />
           <Metric label="Notes" value={String(site.noteCount)} />
           <Metric label="Host" value={site.primaryHost} />
         </div>
@@ -112,6 +120,7 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
                       <span className="chip chip-active">{page.pageKind}</span>
                       <span className="chip">{page.observationCount} observations</span>
                       <span className="chip">{page.linkCount} links</span>
+                      <span className="chip">{page.actionCount} actions</span>
                       <span className="chip">{page.siteFamilyHost}</span>
                       <span className="chip">{formatDate(page.visitedAt)}</span>
                     </div>
@@ -135,11 +144,19 @@ export default async function WebMcpSitePage({ params }: { params: Promise<{ sit
                 <EmptyState text="Рёбер пока нет. Они появляются автоматически, когда сохраняется страница с outgoing links." />
               ) : (
                 edges.map((edge) => (
-                  <div key={`${edge.fromUrl}-${edge.toUrl}`} className="text-xs border border-[var(--border)] rounded-lg p-3 bg-[var(--bg-softer)]">
+                  <div key={`${edge.fromUrl}-${edge.toUrl}-${edge.actionId ?? edge.text}`} className="text-xs border border-[var(--border)] rounded-lg p-3 bg-[var(--bg-softer)]">
+                    <div className="mb-2 text-[var(--fg)]">
+                      {edge.actionKind ? `${edge.actionKind}: ` : "action: "}
+                      <span className="text-[var(--fg-muted)]">{edge.actionLabel || edge.text || "unknown"}</span>
+                    </div>
                     <div className="break-all text-[var(--fg)]">{edge.fromUrl}</div>
                     <div className="text-[var(--fg-dim)] my-1">↓</div>
                     <div className="break-all text-[var(--fg-muted)]">{edge.toUrl}</div>
-                    {edge.text && <div className="mt-2 text-[var(--fg-dim)]">anchor: {edge.text}</div>}
+                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-[var(--fg-dim)]">
+                      {edge.status && <span className="chip">{edge.status}</span>}
+                      {edge.observationCount && <span className="chip">{edge.observationCount} observations</span>}
+                      {edge.confidence !== undefined && <span className="chip">confidence {edge.confidence.toFixed(2)}</span>}
+                    </div>
                   </div>
                 ))
               )}

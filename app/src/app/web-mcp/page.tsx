@@ -92,9 +92,13 @@ export default async function WebMcpPage() {
                 </div>
 
                 <div className="flex flex-wrap gap-2 mt-4 text-xs text-[var(--fg-muted)]">
+                  <span className="chip chip-active">{site.category}</span>
                   <span className="chip chip-active">{site.pageCount} pages</span>
                   <span className="chip">{site.edgeCount} edges</span>
                   <span className="chip">{site.noteCount} notes</span>
+                  {site.tags.slice(0, 4).map((tag) => (
+                    <span key={tag} className="chip">{tag}</span>
+                  ))}
                 </div>
               </Link>
             ))}
