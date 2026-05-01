@@ -1,0 +1,17 @@
+[project]
+name = "meta-ios-backend"
+version = "0.1.0"
+description = "Local backend for Meta iOS meeting transcription and summaries."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "faster-whisper>=1.0.0",
+    "openai>=1.99.0",
+    "pydantic-settings>=2.4.0",
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[tool.ruff]
+line-length = 100
+

@@ -18,30 +18,30 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleURLTypes</key>
     <array>
-        <dict>
-            <key>CFBundleTypeRole</key>
-            <string>Editor</string>
-            <key>CFBundleURLName</key>
-            <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>com.example.conversationsummarizer</string>
-            </array>
-        </dict>
-    </array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			</array>
+		</dict>
+	</array>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>MWDAT</key>
     <dict>
-        <key>Analytics</key>
-        <dict>
-            <key>OptOut</key>
-            <true/>
-        </dict>
-        <key>AppLinkURLScheme</key>
-        <string>com.example.conversationsummarizer://</string>
+		<key>Analytics</key>
+		<dict>
+			<key>OptOut</key>
+			<true/>
+		</dict>
+		<key>AppLinkURLScheme</key>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER)://</string>
         <key>MetaAppID</key>
         <string>$(META_APP_ID)</string>
         <key>ClientToken</key>
@@ -57,8 +57,17 @@
     <string>Microphone access is needed to record meetings for transcription and summaries.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Location is used to add optional city-level context to conversation summaries.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Local network access is needed to reach the meeting backend running on your Mac during MVP testing.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Speech Recognition is needed to transcribe recorded meetings.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+    <key>BackendAPIURL</key>
+    <string>http://Yerasyls-MacBook-Pro.local:8787</string>
     <key>SummaryAPIURL</key>
     <string></string>
     <key>UILaunchScreen</key>

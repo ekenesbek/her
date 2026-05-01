@@ -147,7 +147,8 @@ struct ContentView: View {
             wrappedValue: ConversationSessionViewModel(
                 recorder: MeetingRecorder(),
                 transcriber: SpeechTranscriber(),
-                summaryService: SummaryServiceFactory.make()
+                summaryService: SummaryServiceFactory.make(),
+                meetingProcessor: MeetingProcessingServiceFactory.make()
             )
         )
     }
@@ -530,10 +531,11 @@ private struct ExactPairRayBanScreen: View {
                         }
                         Spacer()
                         Button(action: {
-                            bridge.connectDetectedAudioRoute()
-                            onFinish()
+                            if bridge.performSetupPairAction() {
+                                onFinish()
+                            }
                         }) {
-                            Text("pair")
+                            Text(bridge.setupPairActionTitle)
                                 .font(.system(size: 13, weight: .medium, design: .serif))
                                 .foregroundColor(AppTheme.bg)
                                 .padding(.horizontal, 16)
@@ -1367,9 +1369,11 @@ private struct WarmGlassesStatusCard: View {
             return AppTheme.danger
         case .sessionStarted:
             return AppTheme.success
+        case .configurationMissing:
+            return AppTheme.warn
         case .detected, .ready:
             return bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.fg
-        case .registrationStarted:
+        case .registrationAvailable, .registrationStarted:
             return AppTheme.warn
         case .notDetected:
             return AppTheme.dim
@@ -1757,7 +1761,7 @@ private struct WearablesPanel: View {
 
                 HStack(spacing: 8) {
                     StateChip(title: routeStatusTitle, icon: routeStatusIcon, color: routeStatusColor, accented: bridge.audioRoute.primaryDetectedDevice != nil)
-                    StateChip(title: bridge.isDATLinked ? "DAT linked" : "DAT missing", icon: "shippingbox", color: bridge.isDATLinked ? AppTheme.success : AppTheme.dim)
+                    StateChip(title: datStatusTitle, icon: "shippingbox", color: datStatusColor)
                 }
 
                 VStack(alignment: .leading, spacing: 9) {
@@ -1811,15 +1815,31 @@ private struct WearablesPanel: View {
         return device.supportsInput ? "mic.circle" : "speaker.wave.2"
     }
 
+    private var datStatusTitle: String {
+        if !bridge.isDATLinked {
+            return "DAT missing"
+        }
+        return bridge.hasDATCredentials ? "DAT ready" : "DAT setup"
+    }
+
+    private var datStatusColor: Color {
+        if !bridge.isDATLinked {
+            return AppTheme.dim
+        }
+        return bridge.hasDATCredentials ? AppTheme.success : AppTheme.warn
+    }
+
     private var routeStatusColor: Color {
         switch bridge.state {
         case .failed:
             return AppTheme.danger
         case .sessionStarted:
             return AppTheme.success
+        case .configurationMissing:
+            return AppTheme.warn
         case .detected, .ready:
             return bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.accent
-        case .registrationStarted:
+        case .registrationAvailable, .registrationStarted:
             return AppTheme.accent
         case .notDetected:
             return AppTheme.dim
@@ -3007,7 +3027,7 @@ private struct OnboardingGlassesCard: View {
 
             HStack(spacing: 8) {
                 StateChip(title: bridge.audioRoute.primaryDetectedDevice == nil ? "not found" : "detected", icon: "dot.radiowaves.left.and.right", color: bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.accent, accented: bridge.audioRoute.primaryDetectedDevice != nil)
-                StateChip(title: bridge.isDATLinked ? "DAT linked" : "DAT missing", icon: "shippingbox", color: bridge.isDATLinked ? AppTheme.success : AppTheme.dim)
+                StateChip(title: datStatusTitle, icon: "shippingbox", color: datStatusColor)
             }
 
             HStack(spacing: 10) {
@@ -3023,6 +3043,20 @@ private struct OnboardingGlassesCard: View {
                 bridge.startGlassesSession()
             }
         }
+    }
+
+    private var datStatusTitle: String {
+        if !bridge.isDATLinked {
+            return "DAT missing"
+        }
+        return bridge.hasDATCredentials ? "DAT ready" : "DAT setup"
+    }
+
+    private var datStatusColor: Color {
+        if !bridge.isDATLinked {
+            return AppTheme.dim
+        }
+        return bridge.hasDATCredentials ? AppTheme.success : AppTheme.warn
     }
 }
 

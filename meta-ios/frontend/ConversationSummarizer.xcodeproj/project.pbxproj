@@ -14,9 +14,11 @@
 		00000000000000000000B203 /* MeetingRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F203 /* MeetingRecorder.swift */; };
 		00000000000000000000B204 /* SpeechTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F204 /* SpeechTranscriber.swift */; };
 		00000000000000000000B205 /* SummaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F205 /* SummaryService.swift */; };
+		00000000000000000000B206 /* MeetingProcessingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F206 /* MeetingProcessingService.swift */; };
 		00000000000000000000B301 /* WearablesBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F301 /* WearablesBridge.swift */; };
 		00000000000000000000B401 /* MeetingSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F401 /* MeetingSummary.swift */; };
 		00000000000000000000B502 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F502 /* Assets.xcassets */; };
+		00000000000000000000B601 /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = 00000000000000000000P601 /* MWDATCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +30,7 @@
 		00000000000000000000F203 /* MeetingRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRecorder.swift; sourceTree = "<group>"; };
 		00000000000000000000F204 /* SpeechTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechTranscriber.swift; sourceTree = "<group>"; };
 		00000000000000000000F205 /* SummaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummaryService.swift; sourceTree = "<group>"; };
+		00000000000000000000F206 /* MeetingProcessingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingProcessingService.swift; sourceTree = "<group>"; };
 		00000000000000000000F301 /* WearablesBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WearablesBridge.swift; sourceTree = "<group>"; };
 		00000000000000000000F401 /* MeetingSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingSummary.swift; sourceTree = "<group>"; };
 		00000000000000000000F501 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -39,6 +42,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				00000000000000000000B601 /* MWDATCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -98,6 +102,7 @@
 				00000000000000000000F203 /* MeetingRecorder.swift */,
 				00000000000000000000F204 /* SpeechTranscriber.swift */,
 				00000000000000000000F205 /* SummaryService.swift */,
+				00000000000000000000F206 /* MeetingProcessingService.swift */,
 			);
 			path = Recording;
 			sourceTree = "<group>";
@@ -144,6 +149,7 @@
 			);
 			name = ConversationSummarizer;
 			packageProductDependencies = (
+				00000000000000000000P601 /* MWDATCore */,
 			);
 			productName = ConversationSummarizer;
 			productReference = 000000000000000000000005 /* ConversationSummarizer.app */;
@@ -174,6 +180,7 @@
 			);
 			mainGroup = 000000000000000000000002;
 			packageReferences = (
+				00000000000000000000P600 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
 			);
 			productRefGroup = 000000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -207,6 +214,7 @@
 				00000000000000000000B203 /* MeetingRecorder.swift in Sources */,
 				00000000000000000000B204 /* SpeechTranscriber.swift in Sources */,
 				00000000000000000000B205 /* SummaryService.swift in Sources */,
+				00000000000000000000B206 /* MeetingProcessingService.swift in Sources */,
 				00000000000000000000B301 /* WearablesBridge.swift in Sources */,
 				00000000000000000000B401 /* MeetingSummary.swift in Sources */,
 			);
@@ -333,19 +341,22 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLIENT_TOKEN = "AR|1447912729894042|66513ea3c4b689008256182da7ac35a4";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 6UNHXUUR5T;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ConversationSummarizer/Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Meta Agent ";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.conversationsummarizer;
+				META_APP_ID = 1447912729894042;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.metaagent;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -359,19 +370,22 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLIENT_TOKEN = "AR|1447912729894042|66513ea3c4b689008256182da7ac35a4";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 6UNHXUUR5T;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ConversationSummarizer/Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Meta Agent ";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.conversationsummarizer;
+				META_APP_ID = 1447912729894042;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.metaagent;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -404,6 +418,24 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		00000000000000000000P600 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
+			requirement = {
+				kind = exactVersion;
+				version = 0.6.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		00000000000000000000P601 /* MWDATCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 00000000000000000000P600 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 000000000000000000000001 /* Project object */;
 }

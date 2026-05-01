@@ -13,16 +13,19 @@ final class ConversationSessionViewModel: ObservableObject {
     private let recorder: MeetingRecorder
     private let transcriber: SpeechTranscriber
     private let summaryService: SummaryService
+    private let meetingProcessor: MeetingProcessingService?
     private var timer: Timer?
 
     init(
         recorder: MeetingRecorder,
         transcriber: SpeechTranscriber,
-        summaryService: SummaryService
+        summaryService: SummaryService,
+        meetingProcessor: MeetingProcessingService? = nil
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
         self.summaryService = summaryService
+        self.meetingProcessor = meetingProcessor
     }
 
     var primaryButtonTitle: String {
@@ -75,10 +78,12 @@ final class ConversationSessionViewModel: ObservableObject {
             return
         }
 
-        let speechAllowed = await transcriber.requestAuthorization()
-        guard speechAllowed else {
-            fail("Speech Recognition permission is required to transcribe meetings.")
-            return
+        if meetingProcessor == nil {
+            let speechAllowed = await transcriber.requestAuthorization()
+            guard speechAllowed else {
+                fail("Speech Recognition permission is required to transcribe meetings.")
+                return
+            }
         }
 
         do {
@@ -98,9 +103,15 @@ final class ConversationSessionViewModel: ObservableObject {
         do {
             let recordingURL = try recorder.stop()
             phase = .transcribing
-            transcript = try await transcriber.transcribe(fileURL: recordingURL)
-            phase = .summarizing
-            summary = try await summaryService.summarize(transcript: transcript)
+            if let meetingProcessor {
+                let result = try await meetingProcessor.process(recordingURL: recordingURL)
+                transcript = result.transcript
+                summary = result.summary
+            } else {
+                transcript = try await transcriber.transcribe(fileURL: recordingURL)
+                phase = .summarizing
+                summary = try await summaryService.summarize(transcript: transcript)
+            }
             phase = .completed
         } catch {
             fail(error.localizedDescription)
