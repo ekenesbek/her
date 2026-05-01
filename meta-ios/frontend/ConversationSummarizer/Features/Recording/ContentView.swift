@@ -131,14 +131,17 @@ private enum MainRoute {
     case pair
     case conversations
     case detail
+    case memory
+    case recording
+    case meta
 }
 
 struct ContentView: View {
     @ObservedObject var wearablesBridge: WearablesBridge
     @ObservedObject var settings: AppSettingsStore
     @StateObject private var viewModel: ConversationSessionViewModel
-    @State private var showingSettings = false
     @State private var route: MainRoute = .home
+    @State private var recordingMuted = false
 
     init(wearablesBridge: WearablesBridge, settings: AppSettingsStore) {
         self.wearablesBridge = wearablesBridge
@@ -165,7 +168,7 @@ struct ContentView: View {
                         bridge: wearablesBridge,
                         settings: settings,
                         onSettings: {
-                            showingSettings = true
+                            route = .meta
                         },
                         onPair: {
                             route = .pair
@@ -173,8 +176,12 @@ struct ContentView: View {
                         onConversations: {
                             route = .conversations
                         },
+                        onRecord: showRecording,
+                        onMemory: {
+                            route = .memory
+                        },
                         onMeta: {
-                            showingSettings = true
+                            route = .meta
                         }
                     )
                 case .pair:
@@ -188,11 +195,39 @@ struct ContentView: View {
                     ExactConversationsScreen(
                         onBackHome: { route = .home },
                         onSelect: { route = .detail },
-                        onMeta: { showingSettings = true }
+                        onRecord: showRecording,
+                        onMemory: { route = .memory },
+                        onMeta: { route = .meta }
                     )
                 case .detail:
                     ExactConversationDetailScreen(
                         onBack: { route = .conversations }
+                    )
+                case .memory:
+                    ExactMemoryScreen(
+                        recording: viewModel.phase == .recording,
+                        onHome: { route = .home },
+                        onConversations: { route = .conversations },
+                        onRecord: showRecording,
+                        onMeta: { route = .meta }
+                    )
+                case .recording:
+                    ExactRecordingScreen(
+                        viewModel: viewModel,
+                        muted: $recordingMuted,
+                        onStop: stopRecordingAndReturnHome,
+                        onDismiss: { route = .home }
+                    )
+                case .meta:
+                    ExactSettingsMetaScreen(
+                        settings: settings,
+                        bridge: wearablesBridge,
+                        viewModel: viewModel,
+                        onHome: { route = .home },
+                        onConversations: { route = .conversations },
+                        onRecord: showRecording,
+                        onMemory: { route = .memory },
+                        onPair: { route = .pair }
                     )
                 }
             }
@@ -200,9 +235,21 @@ struct ContentView: View {
             .navigationBarHidden(true)
         }
         .navigationViewStyle(.stack)
-        .sheet(isPresented: $showingSettings) {
-            SettingsSheet(settings: settings)
+    }
+
+    private func showRecording() {
+        if viewModel.phase != .recording, viewModel.canTapPrimaryButton {
+            viewModel.primaryAction()
         }
+        recordingMuted = false
+        route = .recording
+    }
+
+    private func stopRecordingAndReturnHome() {
+        if viewModel.phase == .recording {
+            viewModel.primaryAction()
+        }
+        route = .home
     }
 }
 
@@ -234,6 +281,8 @@ private struct ExactHomeScreen: View {
     let onSettings: () -> Void
     let onPair: () -> Void
     let onConversations: () -> Void
+    let onRecord: () -> Void
+    let onMemory: () -> Void
     let onMeta: () -> Void
 
     private let recent = [
@@ -285,7 +334,7 @@ private struct ExactHomeScreen: View {
                 .padding(.bottom, 36)
             }
 
-            ExactTabBar(activeIndex: 0, recording: isRecording, onHome: {}, onRecord: viewModel.primaryAction, onLog: onConversations, onMemory: {}, onMeta: onMeta)
+            ExactTabBar(activeIndex: 0, recording: isRecording, onHome: {}, onRecord: onRecord, onLog: onConversations, onMemory: onMemory, onMeta: onMeta)
         }
     }
 
@@ -512,9 +561,11 @@ private struct ExactPairRayBanScreen: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: 388)
+                .frame(maxHeight: .infinity)
+                .frame(minHeight: 300)
                 .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(AppTheme.bgSoft))
                 .padding(.vertical, 20)
+                .layoutPriority(1)
 
                 WwCard {
                     HStack(spacing: 14) {
@@ -552,6 +603,7 @@ private struct ExactPairRayBanScreen: View {
             .padding(.horizontal, 22)
             .padding(.top, 14)
             .padding(.bottom, 22)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
     }
 }
@@ -559,6 +611,8 @@ private struct ExactPairRayBanScreen: View {
 private struct ExactConversationsScreen: View {
     let onBackHome: () -> Void
     let onSelect: () -> Void
+    let onRecord: () -> Void
+    let onMemory: () -> Void
     let onMeta: () -> Void
 
     private let items: [ConversationMock] = [
@@ -624,7 +678,7 @@ private struct ExactConversationsScreen: View {
                 .padding(.horizontal, 22)
             }
 
-            ExactTabBar(activeIndex: 1, recording: false, onHome: onBackHome, onRecord: onBackHome, onLog: {}, onMemory: {}, onMeta: onMeta)
+            ExactTabBar(activeIndex: 1, recording: false, onHome: onBackHome, onRecord: onRecord, onLog: {}, onMemory: onMemory, onMeta: onMeta)
         }
     }
 
@@ -900,6 +954,1165 @@ private struct ExactAskInput: View {
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
         .overlay(alignment: .top) { DividerLine() }
+    }
+}
+
+private struct ExactMemoryScreen: View {
+    let recording: Bool
+    let onHome: () -> Void
+    let onConversations: () -> Void
+    let onRecord: () -> Void
+    let onMeta: () -> Void
+
+    private let pinned = [
+        ("name", "Ersultan Kenesbek"),
+        ("based in", "Almaty · often works late"),
+        ("health", "prefers not to discuss medication in public"),
+        ("work", "building meta personal AI for Ray-Ban"),
+        ("people", "Anya is a close friend")
+    ]
+
+    private let topics = [
+        ("work", "124", "projects, teams, decisions"),
+        ("health", "38", "appointments, preferences"),
+        ("relationships", "61", "friends, family, reminders"),
+        ("places", "42", "shops, routes, meetings"),
+        ("tastes", "74", "coffee, music, gifts"),
+        ("routines", "63", "wake time, errands, habits")
+    ]
+
+    private let people = [
+        ("A", "Anya", "friend · 17 memories", "startup, enamel pins, mom bday"),
+        ("N", "Nazym", "family · 9 memories", "calls sunday, likes green tea"),
+        ("M", "Мама", "family · 12 memories", "birthday reminders, health"),
+        ("D", "Daulet", "work · 7 memories", "backend, launch checklist"),
+        ("S", "Sasha", "friend · 6 memories", "football, late dinners")
+    ]
+
+    private let learned = [
+        ("today", "Anya accepted the startup offer."),
+        ("yesterday", "Ray-Ban pairing should stay optional in setup."),
+        ("apr 29", "Doctor Karimov appointment was at Mediker clinic.")
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ExactBrandBar(status: "MEMORY")
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    MonoLabel("your mind, indexed")
+                    (Text("What I know\n")
+                        + Text("about you.").italic())
+                        .font(.system(size: 34, weight: .medium, design: .serif))
+                        .foregroundColor(AppTheme.fg)
+                        .lineSpacing(0)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 6)
+
+                    Text("Facts, people, places, and preferences that meta can use to answer better. You can forget anything.")
+                        .font(.system(size: 14, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.muted)
+                        .lineSpacing(5)
+                        .padding(.top, 10)
+
+                    MemoryMetricStrip()
+                        .padding(.top, 18)
+
+                    MemorySearchCapsule()
+                        .padding(.top, 14)
+
+                    SettingsSectionHeader(title: "essentials", hint: "6 pinned")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            ForEach(Array(pinned.enumerated()), id: \.offset) { index, item in
+                                MemoryPinRow(label: item.0, value: item.1)
+                                if index < pinned.count - 1 {
+                                    DividerLine()
+                                }
+                            }
+                            DividerLine()
+                            HStack {
+                                Text("+ 1 more pinned")
+                                    .font(.system(size: 13, weight: .regular, design: .serif))
+                                    .italic()
+                                    .foregroundColor(AppTheme.dim)
+                                Spacer()
+                                Text("see all →")
+                                    .font(.system(size: 12, weight: .regular, design: .serif))
+                                    .italic()
+                                    .foregroundColor(AppTheme.fg)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "by topic")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            ForEach(Array(topics.enumerated()), id: \.offset) { index, topic in
+                                MemoryTopicRow(title: topic.0, count: topic.1, detail: topic.2)
+                                if index < topics.count - 1 {
+                                    DividerLine()
+                                }
+                            }
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "people", hint: "38 in mind")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            ForEach(Array(people.enumerated()), id: \.offset) { index, person in
+                                MemoryPersonRow(initial: person.0, name: person.1, subtitle: person.2, detail: person.3)
+                                if index < people.count - 1 {
+                                    DividerLine()
+                                }
+                            }
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "recently learned", hint: "last 7 days")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            ForEach(Array(learned.enumerated()), id: \.offset) { index, item in
+                                MemoryLearnedRow(time: item.0, text: item.1)
+                                if index < learned.count - 1 {
+                                    DividerLine()
+                                }
+                            }
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "forget")
+                    Text("Remove memories by topic, person, place, or time range. Forgotten items stop appearing in summaries and answers.")
+                        .font(.system(size: 13, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.muted)
+                        .lineSpacing(4)
+                        .padding(.horizontal, 4)
+                        .padding(.bottom, 10)
+
+                    FlowWrap(items: ["forget anya", "clear health", "delete last 24h", "export memory"]) { item in
+                        Text(item)
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .foregroundColor(AppTheme.fg)
+                            .padding(.horizontal, 12)
+                            .frame(height: 30)
+                            .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
+                    }
+
+                    Text("memory is yours — never sold, never shared, ever.")
+                        .font(.system(size: 12, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.dim)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 28)
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 4)
+                .padding(.bottom, 32)
+            }
+
+            ExactTabBar(activeIndex: 2, recording: recording, onHome: onHome, onRecord: onRecord, onLog: onConversations, onMemory: {}, onMeta: onMeta)
+        }
+    }
+}
+
+private struct MemoryMetricStrip: View {
+    private let metrics = [
+        ("402", "facts"),
+        ("38", "people"),
+        ("12", "places"),
+        ("62d", "memory")
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+            ForEach(Array(metrics.enumerated()), id: \.offset) { _, metric in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(metric.0)
+                        .font(.system(size: 24, weight: .medium, design: .serif))
+                        .foregroundColor(AppTheme.fg)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    MonoLabel(metric.1)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bgSoft))
+            }
+        }
+    }
+}
+
+private struct MemorySearchCapsule: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            MetaOrb(size: 16)
+            Text("ask — \"what do you know about anya?\"")
+                .font(.system(size: 13.5, weight: .regular, design: .serif))
+                .italic()
+                .foregroundColor(AppTheme.muted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+            Spacer()
+            Text("⌘K")
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundColor(AppTheme.dim)
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .background(Capsule().fill(AppTheme.bgDeep))
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 46)
+        .background(Capsule().fill(AppTheme.bgSoft).overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1)))
+    }
+}
+
+private struct MemoryPinRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundColor(AppTheme.dim)
+                .tracking(1.4)
+                .frame(width: 92, alignment: .leading)
+            Text(value)
+                .font(.system(size: 13.5, weight: .regular, design: .serif))
+                .foregroundColor(AppTheme.fg)
+                .lineSpacing(3)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct MemoryTopicRow: View {
+    let title: String
+    let count: String
+    let detail: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: topicIcon)
+                .font(.system(size: 15, weight: .regular))
+                .foregroundColor(AppTheme.fg)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                Text(detail)
+                    .font(.system(size: 12, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.dim)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+            Spacer()
+            Text(count)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .foregroundColor(AppTheme.muted)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(AppTheme.dim)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+    }
+
+    private var topicIcon: String {
+        switch title {
+        case "work":
+            return "briefcase"
+        case "health":
+            return "heart"
+        case "relationships":
+            return "person.2"
+        case "places":
+            return "mappin.and.ellipse"
+        case "tastes":
+            return "sparkles"
+        default:
+            return "clock"
+        }
+    }
+}
+
+private struct MemoryPersonRow: View {
+    let initial: String
+    let name: String
+    let subtitle: String
+    let detail: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(initial)
+                .font(.system(size: 14, weight: .medium, design: .serif))
+                .foregroundColor(AppTheme.bg)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(AppTheme.fg))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                Text(subtitle)
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundColor(AppTheme.dim)
+                    .tracking(0.5)
+                Text(detail)
+                    .font(.system(size: 12, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.muted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+            Spacer()
+            Image(systemName: "arrow.right")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(AppTheme.dim)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct MemoryLearnedRow: View {
+    let time: String
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(time.uppercased())
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundColor(AppTheme.dim)
+                .tracking(1.2)
+                .frame(width: 68, alignment: .leading)
+            Text(text)
+                .font(.system(size: 13.5, weight: .regular, design: .serif))
+                .foregroundColor(AppTheme.fg)
+                .lineSpacing(3)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct ExactRecordingScreen: View {
+    @ObservedObject var viewModel: ConversationSessionViewModel
+    @Binding var muted: Bool
+    let onStop: () -> Void
+    let onDismiss: () -> Void
+
+    private let transcript = [
+        RecordingTranscriptEntry(time: "07:10", speaker: "Dana", initial: "D", text: "Let's lock the onboarding flow first. Pairing should feel optional, but not hidden.", active: false, unknown: false),
+        RecordingTranscriptEntry(time: "07:18", speaker: "You", initial: "Y", text: "Agree. The phone MVP works without glasses, then Ray-Ban becomes the better input.", active: false, unknown: false),
+        RecordingTranscriptEntry(time: "07:31", speaker: "Unknown", initial: "?", text: "Can we show live transcript only after recording starts?", active: false, unknown: true),
+        RecordingTranscriptEntry(time: "07:42", speaker: "Dana", initial: "D", text: "Yes. Add muted state too so users understand capture is paused.", active: true, unknown: false)
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            recordingHeader
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .lastTextBaseline) {
+                    Text(viewModel.elapsedText)
+                        .font(.system(size: 52, weight: .medium, design: .monospaced))
+                        .foregroundColor(AppTheme.fg)
+                        .monospacedDigit()
+                    Spacer()
+                    Text(muted ? "muted" : "3 voices")
+                        .font(.system(size: 13, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.dim)
+                }
+
+                RecordingWaveform(muted: muted)
+                    .frame(height: 68)
+            }
+            .padding(.horizontal, 22)
+            .padding(.bottom, 14)
+
+            RecordingInsightChip(muted: muted)
+                .padding(.horizontal, 22)
+                .padding(.bottom, 14)
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 10) {
+                    MonoLabel(muted ? "paused transcript" : "live transcript")
+                        .padding(.horizontal, 4)
+                    ForEach(transcript) { entry in
+                        RecordingTranscriptRow(entry: entry, muted: muted)
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.bottom, 18)
+            }
+
+            RecordingControlDock(muted: $muted, onStop: onStop)
+        }
+    }
+
+    private var recordingHeader: some View {
+        HStack(alignment: .center, spacing: 12) {
+            RecordingStatusPill(title: muted ? "paused" : "recording", active: !muted)
+                .frame(width: 104, alignment: .leading)
+
+            VStack(spacing: 2) {
+                Text("Standup")
+                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                Text("Office, Almaty")
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundColor(AppTheme.dim)
+                    .tracking(0.6)
+            }
+            .frame(maxWidth: .infinity)
+
+            Button(action: onDismiss) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(AppTheme.fg)
+                    .frame(width: 38, height: 38)
+                    .background(Circle().fill(AppTheme.bgSoft))
+                    .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+            }
+            .buttonStyle(PlainButtonStyle())
+            .frame(width: 104, alignment: .trailing)
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
+    }
+}
+
+private struct RecordingStatusPill: View {
+    let title: String
+    let active: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(active ? AppTheme.danger : AppTheme.dim)
+                .frame(width: 7, height: 7)
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundColor(AppTheme.fg)
+                .tracking(1.2)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(Capsule().fill(AppTheme.bgSoft).overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1)))
+    }
+}
+
+private struct RecordingWaveform: View {
+    let muted: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 2) {
+            ForEach(0..<64, id: \.self) { index in
+                Capsule()
+                    .fill(muted ? AppTheme.dim.opacity(0.34) : AppTheme.fg)
+                    .frame(width: 2.2, height: height(for: index))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 10)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(AppTheme.bgSoft))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(AppTheme.border, lineWidth: 1))
+    }
+
+    private func height(for index: Int) -> CGFloat {
+        if muted {
+            return 7
+        }
+        let wave = abs(sin(Double(index) * 0.47 + 0.7))
+        let accent = index % 9 == 0 ? 14.0 : 0.0
+        return CGFloat(12.0 + wave * 42.0 + accent)
+    }
+}
+
+private struct RecordingInsightChip: View {
+    let muted: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            MetaOrb(size: 18)
+            Text(muted ? "capture paused — transcript will continue when unmuted." : "I heard two action items. One sounds assigned to you.")
+                .font(.system(size: 13.5, weight: .regular, design: .serif))
+                .italic()
+                .foregroundColor(AppTheme.muted)
+                .lineSpacing(4)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bgSoft))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+    }
+}
+
+private struct RecordingTranscriptEntry: Identifiable {
+    let id = UUID()
+    let time: String
+    let speaker: String
+    let initial: String
+    let text: String
+    let active: Bool
+    let unknown: Bool
+}
+
+private struct RecordingTranscriptRow: View {
+    let entry: RecordingTranscriptEntry
+    let muted: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(entry.initial)
+                .font(.system(size: 13, weight: .medium, design: .serif))
+                .foregroundColor(entry.unknown ? AppTheme.fg : AppTheme.bg)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(entry.unknown ? AppTheme.bgDeep : AppTheme.fg))
+                .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: entry.unknown ? 1 : 0))
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    MonoLabel("\(entry.time) \(entry.speaker.lowercased())")
+                    if entry.unknown {
+                        Text("tap to name")
+                            .font(.system(size: 11, weight: .regular, design: .serif))
+                            .italic()
+                            .foregroundColor(AppTheme.fg)
+                    }
+                    if entry.active && !muted {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(AppTheme.danger)
+                                .frame(width: 5, height: 5)
+                            Text("now")
+                                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                .foregroundColor(AppTheme.danger)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                Text(entry.text)
+                    .font(.system(size: 14.5, weight: .regular, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(entry.active ? AppTheme.bgSoft : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(entry.active ? AppTheme.borderStrong : Color.clear, lineWidth: 1))
+        .opacity(muted && entry.active ? 0.62 : 1)
+    }
+}
+
+private struct RecordingControlDock: View {
+    @Binding var muted: Bool
+    let onStop: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 28) {
+            Button(action: { muted.toggle() }) {
+                VStack(spacing: 6) {
+                    Image(systemName: muted ? "mic" : "mic.slash")
+                        .font(.system(size: 18, weight: .medium))
+                    Text(muted ? "unmute" : "mute")
+                        .font(.system(size: 11, weight: .regular, design: .serif))
+                        .italic()
+                }
+                .foregroundColor(AppTheme.fg)
+                .frame(width: 70, height: 58)
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Button(action: onStop) {
+                Circle()
+                    .fill(AppTheme.fg)
+                    .frame(width: 72, height: 72)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(AppTheme.bg)
+                            .frame(width: 22, height: 22)
+                    )
+                    .shadow(color: Color.black.opacity(0.16), radius: 12, x: 0, y: 6)
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Button(action: {}) {
+                VStack(spacing: 6) {
+                    Image(systemName: "note.text")
+                        .font(.system(size: 18, weight: .medium))
+                    Text("note")
+                        .font(.system(size: 11, weight: .regular, design: .serif))
+                        .italic()
+                }
+                .foregroundColor(AppTheme.fg)
+                .frame(width: 70, height: 58)
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 12)
+        .padding(.bottom, 24)
+        .background(AppTheme.bg)
+        .overlay(alignment: .top) { DividerLine() }
+    }
+}
+
+private struct ExactSettingsMetaScreen: View {
+    @ObservedObject var settings: AppSettingsStore
+    @ObservedObject var bridge: WearablesBridge
+    @ObservedObject var viewModel: ConversationSessionViewModel
+
+    let onHome: () -> Void
+    let onConversations: () -> Void
+    let onRecord: () -> Void
+    let onMemory: () -> Void
+    let onPair: () -> Void
+
+    @State private var editingProfile = false
+    @State private var aiName: String
+    @State private var ownerName: String
+    @State private var processOnDevice = true
+    @State private var redactPII = true
+    @State private var glassesIndicator = true
+    @State private var requireFaceID = false
+    @State private var silenceTrim = true
+    @State private var dailySummary = true
+    @State private var followUps = true
+    @State private var wifiOnly = false
+
+    init(
+        settings: AppSettingsStore,
+        bridge: WearablesBridge,
+        viewModel: ConversationSessionViewModel,
+        onHome: @escaping () -> Void,
+        onConversations: @escaping () -> Void,
+        onRecord: @escaping () -> Void,
+        onMemory: @escaping () -> Void,
+        onPair: @escaping () -> Void
+    ) {
+        self.settings = settings
+        self.bridge = bridge
+        self.viewModel = viewModel
+        self.onHome = onHome
+        self.onConversations = onConversations
+        self.onRecord = onRecord
+        self.onMemory = onMemory
+        self.onPair = onPair
+        _aiName = State(initialValue: settings.aiDisplayName)
+        _ownerName = State(initialValue: settings.ownerDisplayName == "Owner" ? "" : settings.ownerDisplayName)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ExactBrandBar(status: "SETTINGS")
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    MonoLabel("your account")
+                    Text("Settings.")
+                        .font(.system(size: 28, weight: .medium, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.fg)
+                        .padding(.top, 6)
+
+                    SettingsProfileCard(
+                        settings: settings,
+                        editingProfile: $editingProfile,
+                        aiName: $aiName,
+                        ownerName: $ownerName
+                    )
+                    .padding(.top, 18)
+
+                    SettingsSectionHeader(title: "glasses", hint: bridge.audioRoute.primaryDetectedDevice == nil ? "not connected" : "connected")
+                    SettingsGlassesCard(bridge: bridge, onPair: onPair)
+
+                    SettingsSectionHeader(title: "memory & data")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            SettingsValueRow(icon: "brain.head.profile", label: "What meta knows", subtitle: "402 facts · 38 people · 12 places", value: "manage")
+                            DividerLine()
+                            SettingsValueRow(icon: "square.stack.3d.up", label: "Conversations", subtitle: "218 recordings · 47h total", value: "218")
+                            DividerLine()
+                            SettingsValueRow(icon: "clock", label: "Auto-delete after", value: "90 days")
+                            DividerLine()
+                            SettingsActionRow(icon: "square.and.arrow.up", label: "Export everything", subtitle: "json + audio archive")
+                            DividerLine()
+                            SettingsActionRow(icon: "xmark", label: "Clear by topic", subtitle: "forget a person, place, or event", danger: true)
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "privacy", hint: "on-device first")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            SettingsToggleRow(icon: "lock", label: "Process on-device", subtitle: "ship to cloud only when you ask", isOn: $processOnDevice)
+                            DividerLine()
+                            SettingsToggleRow(icon: "shield", label: "Redact PII in cloud", subtitle: "phone numbers, addresses, names", isOn: $redactPII)
+                            DividerLine()
+                            SettingsToggleRow(icon: "eyeglasses", label: "Glasses indicator LED", subtitle: "recording light always visible", isOn: $glassesIndicator)
+                            DividerLine()
+                            SettingsToggleRow(icon: "faceid", label: "Require Face ID", subtitle: "to open conversations", isOn: $requireFaceID)
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "voice & capture")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            SettingsValueRow(icon: "globe", label: "Language", value: "english · ru")
+                            DividerLine()
+                            SettingsValueRow(icon: "mic", label: "Wake word", subtitle: "\"hey \(settings.aiDisplayName.lowercased())\"", value: "custom")
+                            DividerLine()
+                            SettingsValueRow(icon: "sparkles", label: "Sensitivity", subtitle: "how easily I start listening", value: "medium")
+                            DividerLine()
+                            SettingsToggleRow(icon: "waveform", label: "Silence trim", isOn: $silenceTrim)
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "notifications")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            SettingsToggleRow(icon: "sparkles", label: "Daily summary", subtitle: "9:30 every morning", isOn: $dailySummary)
+                            DividerLine()
+                            SettingsToggleRow(icon: "pin", label: "Follow-ups", subtitle: "when meta finds an action item", isOn: $followUps)
+                            DividerLine()
+                            SettingsToggleRow(icon: "wifi", label: "Sync over Wi-Fi only", isOn: $wifiOnly)
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "about")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            SettingsValueRow(icon: "gearshape", label: "Version", value: appVersion)
+                            DividerLine()
+                            SettingsActionRow(icon: "shield", label: "Privacy policy")
+                            DividerLine()
+                            SettingsActionRow(icon: "doc.text", label: "Terms of service")
+                            DividerLine()
+                            SettingsActionRow(icon: "bubble.left.and.bubble.right", label: "Help & feedback")
+                            DividerLine()
+                            SettingsActionRow(icon: "curlybraces", label: "Open source licenses")
+                        }
+                    }
+
+                    SettingsDangerFooter {
+                        settings.resetOnboarding()
+                    }
+                    .padding(.top, 26)
+
+                    Text("made carefully · almaty · 2026")
+                        .font(.system(size: 12, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.dim)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 28)
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 4)
+                .padding(.bottom, 32)
+            }
+
+            ExactTabBar(
+                activeIndex: 3,
+                recording: viewModel.phase == .recording,
+                onHome: onHome,
+                onRecord: onRecord,
+                onLog: onConversations,
+                onMemory: onMemory,
+                onMeta: {}
+            )
+        }
+    }
+
+    private var appVersion: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+        return "\(version) (\(build))"
+    }
+}
+
+private struct SettingsProfileCard: View {
+    @ObservedObject var settings: AppSettingsStore
+    @Binding var editingProfile: Bool
+    @Binding var aiName: String
+    @Binding var ownerName: String
+
+    var body: some View {
+        WwCard(padding: 0) {
+            VStack(spacing: 0) {
+                HStack(alignment: .center, spacing: 14) {
+                    Text(ownerInitial)
+                        .font(.system(size: 24, weight: .medium, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.bg)
+                        .frame(width: 52, height: 52)
+                        .background(Circle().fill(AppTheme.fg))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(settings.ownerDisplayName)
+                            .font(.system(size: 16, weight: .medium, design: .serif))
+                            .foregroundColor(AppTheme.fg)
+                        Text(settings.signInProvider?.title.lowercased() ?? "local account")
+                            .font(.system(size: 10, weight: .regular, design: .monospaced))
+                            .foregroundColor(AppTheme.dim)
+                            .tracking(0.5)
+                    }
+
+                    Spacer()
+
+                    Button(action: { editingProfile.toggle() }) {
+                        Text(editingProfile ? "done" : "edit")
+                            .font(.system(size: 13, weight: .regular, design: .serif))
+                            .italic()
+                            .foregroundColor(AppTheme.fg)
+                            .padding(.horizontal, 12)
+                            .frame(height: 30)
+                            .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                .padding(16)
+
+                DividerLine()
+
+                HStack(spacing: 12) {
+                    SettingsProfileMetric(label: "plan", value: "mvp")
+                    SettingsProfileMetric(label: "storage", value: "2.4 / 10 gb")
+                    SettingsProfileMetric(label: "agent", value: settings.aiDisplayName.lowercased())
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+
+                DividerLine()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    GeometryReader { geometry in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(AppTheme.bgDeep)
+                            Capsule()
+                                .fill(AppTheme.fg)
+                                .frame(width: geometry.size.width * 0.24)
+                        }
+                    }
+                    .frame(height: 4)
+
+                    HStack {
+                        MonoLabel("used 2.4 gb")
+                        Spacer()
+                        Text("upgrade plan →")
+                            .font(.system(size: 11, weight: .regular, design: .serif))
+                            .italic()
+                            .foregroundColor(AppTheme.fg)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+
+                if editingProfile {
+                    DividerLine()
+                    VStack(alignment: .leading, spacing: 14) {
+                        ProfileTextField(label: "AI NAME", placeholder: "meta", text: $aiName)
+                        ProfileTextField(label: "OWNER", placeholder: "Your name", text: $ownerName)
+                        WwPrimaryButton("save profile") {
+                            settings.saveProfile(aiName: aiName, ownerName: ownerName)
+                            editingProfile = false
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+        }
+    }
+
+    private var ownerInitial: String {
+        String(settings.ownerDisplayName.prefix(1)).uppercased()
+    }
+}
+
+private struct SettingsProfileMetric: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            MonoLabel(label)
+            Text(value)
+                .font(.system(size: 14, weight: .regular, design: .serif))
+                .italic()
+                .foregroundColor(AppTheme.fg)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SettingsGlassesCard: View {
+    @ObservedObject var bridge: WearablesBridge
+    let onPair: () -> Void
+
+    var body: some View {
+        WwCard(padding: 0) {
+            VStack(spacing: 0) {
+                HStack(alignment: .center, spacing: 14) {
+                    SmallGlassesIcon()
+                        .frame(width: 32)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(glassesTitle)
+                            .font(.system(size: 15, weight: .medium, design: .serif))
+                            .foregroundColor(AppTheme.fg)
+                        Text(glassesSubtitle)
+                            .font(.system(size: 10, weight: .regular, design: .monospaced))
+                            .foregroundColor(AppTheme.dim)
+                            .tracking(0.5)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.75)
+                    }
+
+                    Spacer()
+
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(isLinked ? AppTheme.fg : AppTheme.dim)
+                            .frame(width: 5, height: 5)
+                        Text(isLinked ? "linked" : "offline")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .tracking(1.5)
+                    }
+                    .foregroundColor(AppTheme.fg)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .overlay(Capsule().stroke(isLinked ? AppTheme.fg : AppTheme.borderStrong, lineWidth: 1))
+                }
+                .padding(16)
+
+                DividerLine()
+                SettingsActionRow(icon: "plus", label: "Pair another device", action: onPair)
+                DividerLine()
+                SettingsActionRow(icon: "arrow.clockwise", label: "Refresh audio route", subtitle: bridge.audioRoute.routeSummary) {
+                    bridge.refreshAudioRoute()
+                }
+                DividerLine()
+                SettingsActionRow(icon: "xmark", label: "Forget this device", subtitle: "will erase pairing key from phone", danger: true)
+            }
+        }
+    }
+
+    private var isLinked: Bool {
+        bridge.audioRoute.primaryDetectedDevice != nil
+    }
+
+    private var glassesTitle: String {
+        bridge.audioRoute.primaryDetectedDevice?.name ?? "Ray-Ban meta · Wayfarer"
+    }
+
+    private var glassesSubtitle: String {
+        guard let device = bridge.audioRoute.primaryDetectedDevice else {
+            return "Pair from iOS Bluetooth, then refresh here."
+        }
+
+        let input = device.supportsInput ? "MIC READY" : "OUTPUT ONLY"
+        return "\(input) · \(bridge.state.detail.uppercased())"
+    }
+}
+
+private struct SettingsSectionHeader: View {
+    let title: String
+    let hint: String?
+
+    init(title: String, hint: String? = nil) {
+        self.title = title
+        self.hint = hint
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            MonoLabel(title)
+            Spacer()
+            if let hint {
+                Text(hint)
+                    .font(.system(size: 12, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.dim)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 22)
+        .padding(.bottom, 8)
+    }
+}
+
+private struct SettingsActionRow: View {
+    let icon: String
+    let label: String
+    let subtitle: String?
+    let danger: Bool
+    let action: (() -> Void)?
+
+    init(icon: String, label: String, subtitle: String? = nil, danger: Bool = false, action: (() -> Void)? = nil) {
+        self.icon = icon
+        self.label = label
+        self.subtitle = subtitle
+        self.danger = danger
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: { action?() }) {
+            settingsRowContent(trailing: AnyView(
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(AppTheme.dim)
+            ))
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+
+    fileprivate func settingsRowContent(trailing: AnyView) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .regular))
+                .foregroundColor(danger ? AppTheme.danger : AppTheme.fg)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .foregroundColor(danger ? AppTheme.danger : AppTheme.fg)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 12, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.dim)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.78)
+                }
+            }
+
+            Spacer(minLength: 8)
+            trailing
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+    }
+}
+
+private struct SettingsValueRow: View {
+    let icon: String
+    let label: String
+    let subtitle: String?
+    let value: String
+
+    init(icon: String, label: String, subtitle: String? = nil, value: String) {
+        self.icon = icon
+        self.label = label
+        self.subtitle = subtitle
+        self.value = value
+    }
+
+    var body: some View {
+        SettingsActionRow(icon: icon, label: label, subtitle: subtitle).settingsRowContent(trailing: AnyView(
+            HStack(spacing: 6) {
+                Text(value)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(AppTheme.muted)
+                    .tracking(0.5)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.68)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(AppTheme.dim)
+            }
+        ))
+    }
+}
+
+private struct SettingsToggleRow: View {
+    let icon: String
+    let label: String
+    let subtitle: String?
+    @Binding var isOn: Bool
+
+    init(icon: String, label: String, subtitle: String? = nil, isOn: Binding<Bool>) {
+        self.icon = icon
+        self.label = label
+        self.subtitle = subtitle
+        _isOn = isOn
+    }
+
+    var body: some View {
+        Button(action: { isOn.toggle() }) {
+            SettingsActionRow(icon: icon, label: label, subtitle: subtitle).settingsRowContent(trailing: AnyView(
+                ZStack(alignment: isOn ? .trailing : .leading) {
+                    Capsule()
+                        .fill(isOn ? AppTheme.fg : AppTheme.bgDeep)
+                        .frame(width: 38, height: 22)
+                    Circle()
+                        .fill(AppTheme.bg)
+                        .frame(width: 18, height: 18)
+                        .padding(2)
+                }
+                .animation(.easeInOut(duration: 0.18), value: isOn)
+            ))
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+}
+
+private struct SettingsDangerFooter: View {
+    let restartSetup: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Button(action: restartSetup) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 14, weight: .medium))
+                    Text("restart setup")
+                        .font(.system(size: 16, weight: .medium, design: .serif))
+                }
+                .foregroundColor(AppTheme.fg)
+                .frame(maxWidth: .infinity, minHeight: 52)
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Button(action: {}) {
+                Text("delete my account")
+                    .font(.system(size: 13.5, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.danger)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Text("erases everything — conversations, memory, glasses pairing — in 30 days. you can cancel anytime.")
+                .font(.system(size: 11.5, weight: .regular, design: .serif))
+                .italic()
+                .foregroundColor(AppTheme.dim)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .frame(maxWidth: 280)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -2447,16 +3660,6 @@ private struct SetupOwnerNamePage: View {
                                 .disableAutocorrection(true)
                                 .textInputAutocapitalization(.words)
                                 .frame(minHeight: 54)
-                            Rectangle()
-                                .fill(AppTheme.fg)
-                                .frame(width: 2, height: 30)
-                            Text("EDIT")
-                                .font(.system(size: 9, weight: .regular, design: .monospaced))
-                                .tracking(1.5)
-                                .foregroundColor(AppTheme.fg)
-                                .padding(.horizontal, 10)
-                                .frame(height: 24)
-                                .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
                         }
                         .padding(.top, 10)
 
@@ -2523,9 +3726,6 @@ private struct SetupAgentNamePage: View {
                                 .disableAutocorrection(true)
                                 .textInputAutocapitalization(.never)
                                 .frame(height: 66)
-                            Rectangle()
-                                .fill(AppTheme.fg)
-                                .frame(width: 3, height: 46)
                         }
                         .padding(.top, 14)
                         MonoLabel("tap to rename")
