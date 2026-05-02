@@ -1,6 +1,6 @@
 # Meta iOS Backend
 
-Local API for the iOS app. It receives meeting audio, transcribes it with local Whisper, and summarizes the transcript with OpenAI when `OPENAI_API_KEY` is configured.
+Local API for the iOS app. It receives meeting audio, transcribes it with local Whisper, summarizes the transcript with OpenAI when `OPENAI_API_KEY` is configured, and persists meetings in SQLite.
 
 ## Run
 
@@ -29,6 +29,15 @@ The default summary model is `gpt-5-nano`. Set `OPENAI_API_KEY` and `OPENAI_SUMM
 - `POST /v1/meetings/process` with multipart field `audio`
 - `GET /v1/meetings`
 - `GET /v1/meetings/{id}`
+
+## Database
+
+The backend stores data in `DATA_DIR/meetings.sqlite3` with normalized tables:
+
+- `meetings`: transcript, title, overview, language, duration, source/device/location metadata.
+- `summary_items`: decisions, action items, and follow-ups linked to a meeting.
+
+Older JSON-blob databases are migrated automatically on startup.
 
 ## Notes
 

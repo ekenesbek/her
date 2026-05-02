@@ -126,9 +126,104 @@ enum SignInProvider: String, CaseIterable, Identifiable {
     }
 }
 
+private final class LiveContextStore: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published private(set) var locationName: String?
+
+    private let manager = CLLocationManager()
+    private let geocoder = CLGeocoder()
+    private var isRequestingLocation = false
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyKilometer
+        manager.distanceFilter = 1_000
+    }
+
+    func refreshIfAuthorized() {
+        guard CLLocationManager.locationServicesEnabled() else {
+            locationName = nil
+            return
+        }
+
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            requestCurrentLocation()
+        case .notDetermined, .denied, .restricted:
+            locationName = nil
+        @unknown default:
+            locationName = nil
+        }
+    }
+
+    func homeContextLabel(for date: Date) -> String {
+        var parts = [Self.dayFormatter.string(from: date).lowercased()]
+        if let locationName {
+            parts.append(locationName.lowercased())
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    var recordingLocationLabel: String {
+        locationName ?? "location unavailable"
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        refreshIfAuthorized()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        isRequestingLocation = false
+        guard let location = locations.last else {
+            return
+        }
+        reverseGeocode(location)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        isRequestingLocation = false
+    }
+
+    private func requestCurrentLocation() {
+        guard !isRequestingLocation else {
+            return
+        }
+        isRequestingLocation = true
+        manager.requestLocation()
+    }
+
+    private func reverseGeocode(_ location: CLLocation) {
+        geocoder.cancelGeocode()
+        geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, _ in
+            guard let self else {
+                return
+            }
+
+            let place = placemarks?.first
+            let name = place?.locality
+                ?? place?.subAdministrativeArea
+                ?? place?.administrativeArea
+                ?? place?.country
+
+            DispatchQueue.main.async {
+                let cleanName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.locationName = cleanName?.isEmpty == false ? cleanName : nil
+            }
+        }
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "EEE · MMM d"
+        return formatter
+    }()
+}
+
 private enum MainRoute {
     case home
     case pair
+    case deviceConnected
     case conversations
     case detail
     case memory
@@ -140,6 +235,7 @@ struct ContentView: View {
     @ObservedObject var wearablesBridge: WearablesBridge
     @ObservedObject var settings: AppSettingsStore
     @StateObject private var viewModel: ConversationSessionViewModel
+    @StateObject private var liveContext = LiveContextStore()
     @State private var route: MainRoute = .home
     @State private var recordingMuted = false
 
@@ -167,12 +263,11 @@ struct ContentView: View {
                         viewModel: viewModel,
                         bridge: wearablesBridge,
                         settings: settings,
+                        liveContext: liveContext,
                         onSettings: {
                             route = .meta
                         },
-                        onPair: {
-                            route = .pair
-                        },
+                        onPair: showDeviceFlow,
                         onConversations: {
                             route = .conversations
                         },
@@ -188,8 +283,17 @@ struct ContentView: View {
                     ExactPairRayBanScreen(
                         bridge: wearablesBridge,
                         onBack: { route = .home },
-                        onFinish: { route = .home },
+                        onFinish: { route = .deviceConnected },
                         onSkip: { route = .home }
+                    )
+                case .deviceConnected:
+                    ExactDeviceConnectedScreen(
+                        bridge: wearablesBridge,
+                        onBack: { route = .home },
+                        onConnect: {
+                            wearablesBridge.startGlassesSession()
+                        },
+                        onRecord: showRecording
                     )
                 case .conversations:
                     ExactConversationsScreen(
@@ -214,6 +318,7 @@ struct ContentView: View {
                 case .recording:
                     ExactRecordingScreen(
                         viewModel: viewModel,
+                        liveContext: liveContext,
                         muted: $recordingMuted,
                         onStop: stopRecordingAndReturnHome,
                         onDismiss: { route = .home }
@@ -227,7 +332,7 @@ struct ContentView: View {
                         onConversations: { route = .conversations },
                         onRecord: showRecording,
                         onMemory: { route = .memory },
-                        onPair: { route = .pair }
+                        onPair: showDeviceFlow
                     )
                 }
             }
@@ -235,6 +340,9 @@ struct ContentView: View {
             .navigationBarHidden(true)
         }
         .navigationViewStyle(.stack)
+        .onAppear {
+            liveContext.refreshIfAuthorized()
+        }
     }
 
     private func showRecording() {
@@ -243,6 +351,15 @@ struct ContentView: View {
         }
         recordingMuted = false
         route = .recording
+    }
+
+    private func showDeviceFlow() {
+        wearablesBridge.refreshAudioRoute()
+        if wearablesBridge.audioRoute.primaryDetectedDevice == nil {
+            route = .pair
+        } else {
+            route = .deviceConnected
+        }
     }
 
     private func stopRecordingAndReturnHome() {
@@ -278,6 +395,7 @@ private struct ExactHomeScreen: View {
     @ObservedObject var viewModel: ConversationSessionViewModel
     @ObservedObject var bridge: WearablesBridge
     @ObservedObject var settings: AppSettingsStore
+    @ObservedObject var liveContext: LiveContextStore
     let onSettings: () -> Void
     let onPair: () -> Void
     let onConversations: () -> Void
@@ -292,11 +410,17 @@ private struct ExactHomeScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ExactBrandBar(status: isRecording ? "● LISTENING" : "IDLE")
+            ExactHomeTopBar(
+                bridge: bridge,
+                status: isRecording ? "● LISTENING" : "IDLE",
+                onDevice: onPair
+            )
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
-                    MonoLabel("thu · may 1 · almaty")
+                    TimelineView(.periodic(from: Date(), by: 60)) { timeline in
+                        MonoLabel(liveContext.homeContextLabel(for: timeline.date))
+                    }
                     Text(isRecording ? "Listening, \(settings.ownerDisplayName)..." : "Good morning, \(settings.ownerDisplayName).")
                         .font(.system(size: 28, weight: .medium, design: .serif))
                         .italic()
@@ -340,6 +464,61 @@ private struct ExactHomeScreen: View {
 
     private var isRecording: Bool {
         viewModel.phase == .recording
+    }
+}
+
+private struct ExactHomeTopBar: View {
+    @ObservedObject var bridge: WearablesBridge
+    let status: String
+    let onDevice: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onDevice) {
+                HStack(spacing: 8) {
+                    RayBanPhoto()
+                        .frame(width: 46, height: 22)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Ray-Ban")
+                            .font(.system(size: 12, weight: .medium, design: .serif))
+                            .foregroundColor(AppTheme.fg)
+                        MonoLabel(deviceStatus, color: deviceStatusColor)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 42)
+                .background(Capsule().fill(AppTheme.bgSoft))
+                .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Spacer()
+
+            Text(status.uppercased())
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundColor(AppTheme.dim)
+                .tracking(1.5)
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
+    }
+
+    private var deviceStatus: String {
+        if let device = bridge.audioRoute.primaryDetectedDevice {
+            if device.supportsInput && device.isActive {
+                return "connected"
+            }
+            if device.supportsInput {
+                return "mic ready"
+            }
+            return "audio only"
+        }
+        return "searching"
+    }
+
+    private var deviceStatusColor: Color {
+        bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.fg
     }
 }
 
@@ -532,10 +711,10 @@ private struct ExactPairRayBanScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            WwHeader(pre: "bluetooth", title: "Pair your Ray-Ban.", italic: true, onBack: onBack)
+            WwHeader(pre: "connect", title: "Searching for Ray-Ban.", italic: true, onBack: onBack)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Open the case near your phone. We'll find them automatically.")
+                Text("Open the case near your phone. If they already appear in iOS Bluetooth, meta will show them here.")
                     .font(.system(size: 14, weight: .regular, design: .serif))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(5)
@@ -550,12 +729,12 @@ private struct ExactPairRayBanScreen: View {
                     }
                     VStack(spacing: 18) {
                         LargeGlassesIcon()
-                            .frame(width: 240, height: 90)
+                            .frame(width: 270, height: 110)
                         HStack(spacing: 6) {
                             Circle()
                                 .fill(AppTheme.fg)
                                 .frame(width: 6, height: 6)
-                            Text("searching...")
+                            Text(deviceStatusText)
                                 .font(.system(size: 13, weight: .regular, design: .serif))
                                 .italic()
                                 .foregroundColor(AppTheme.fg)
@@ -609,6 +788,126 @@ private struct ExactPairRayBanScreen: View {
             .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var deviceStatusText: String {
+        bridge.audioRoute.primaryDetectedDevice == nil ? "searching..." : "device found"
+    }
+}
+
+private struct ExactDeviceConnectedScreen: View {
+    @ObservedObject var bridge: WearablesBridge
+    let onBack: () -> Void
+    let onConnect: () -> Void
+    let onRecord: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            WwHeader(pre: "device", title: "Ray-Ban connected.", italic: true, onBack: onBack)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text("meta can now use the active iOS audio route for recording. Keep the glasses selected as the microphone route when the meeting starts.")
+                    .font(.system(size: 14, weight: .regular, design: .serif))
+                    .foregroundColor(AppTheme.muted)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(AppTheme.bgSoft)
+                    VStack(spacing: 20) {
+                        RayBanPhoto()
+                            .frame(width: 290, height: 130)
+                        VStack(spacing: 6) {
+                            Text(deviceName)
+                                .font(.system(size: 22, weight: .medium, design: .serif))
+                                .foregroundColor(AppTheme.fg)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                            MonoLabel(deviceDetail, color: AppTheme.dim)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 330)
+                .padding(.vertical, 20)
+
+                WwCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            MonoLabel("status", color: AppTheme.dim)
+                            Spacer()
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(statusColor)
+                                    .frame(width: 6, height: 6)
+                                MonoLabel(statusLabel, color: statusColor)
+                            }
+                        }
+                        DividerLine()
+                        RouteInfoRow(label: "ROUTE", value: bridge.audioRoute.routeSummary)
+                        RouteInfoRow(label: "MIC", value: micLabel)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    WwGhostButton(title: "Refresh route") {
+                        bridge.refreshAudioRoute()
+                    }
+                    Button(action: onConnect) {
+                        Text("use glasses")
+                            .font(.system(size: 14, weight: .medium, design: .serif))
+                            .foregroundColor(AppTheme.bg)
+                            .frame(maxWidth: .infinity, minHeight: 54)
+                            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.fg))
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                .padding(.top, 12)
+
+                WwGhostButton(title: "Start recording", action: onRecord)
+                    .padding(.top, 12)
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 14)
+            .padding(.bottom, 22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxHeight: .infinity, alignment: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var deviceName: String {
+        bridge.audioRoute.primaryDetectedDevice?.name ?? "Ray-Ban Wayfarer"
+    }
+
+    private var deviceDetail: String {
+        guard let device = bridge.audioRoute.primaryDetectedDevice else {
+            return "waiting for bluetooth"
+        }
+        if device.supportsInput && device.isActive {
+            return "connected · microphone active"
+        }
+        if device.supportsInput {
+            return "connected · microphone ready"
+        }
+        return "connected · audio output"
+    }
+
+    private var micLabel: String {
+        guard let device = bridge.audioRoute.primaryDetectedDevice else {
+            return "not detected"
+        }
+        return device.supportsInput ? "available" : "output only"
+    }
+
+    private var statusLabel: String {
+        bridge.audioRoute.primaryDetectedDevice == nil ? "searching" : "connected"
+    }
+
+    private var statusColor: Color {
+        bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.fg
     }
 }
 
@@ -1316,6 +1615,7 @@ private struct MemoryLearnedRow: View {
 
 private struct ExactRecordingScreen: View {
     @ObservedObject var viewModel: ConversationSessionViewModel
+    @ObservedObject var liveContext: LiveContextStore
     @Binding var muted: Bool
     let onStop: () -> Void
     let onDismiss: () -> Void
@@ -1379,10 +1679,12 @@ private struct ExactRecordingScreen: View {
                 Text("Standup")
                     .font(.system(size: 15, weight: .medium, design: .serif))
                     .foregroundColor(AppTheme.fg)
-                Text("Office, Almaty")
+                Text(liveContext.recordingLocationLabel)
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundColor(AppTheme.dim)
                     .tracking(0.6)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
             .frame(maxWidth: .infinity)
 
@@ -2203,37 +2505,23 @@ private struct ExactTabBar: View {
 
 private struct SmallGlassesIcon: View {
     var body: some View {
-        HStack(spacing: -1) {
-            Circle().stroke(AppTheme.fg, lineWidth: 1.4).frame(width: 10, height: 10)
-            Rectangle().fill(AppTheme.fg).frame(width: 5, height: 1.4)
-            Circle().stroke(AppTheme.fg, lineWidth: 1.4).frame(width: 10, height: 10)
-        }
-        .frame(width: 28, height: 14)
+        RayBanPhoto()
+            .frame(width: 34, height: 18)
     }
 }
 
 private struct LargeGlassesIcon: View {
     var body: some View {
-        ZStack {
-            HStack(spacing: 52) {
-                Circle()
-                    .fill(AppTheme.bg)
-                    .overlay(Circle().stroke(AppTheme.fg, lineWidth: 1.8))
-                    .frame(width: 68, height: 68)
-                Circle()
-                    .fill(AppTheme.bg)
-                    .overlay(Circle().stroke(AppTheme.fg, lineWidth: 1.8))
-                    .frame(width: 68, height: 68)
-            }
-            Rectangle()
-                .fill(AppTheme.fg)
-                .frame(width: 52, height: 1.8)
-            HStack {
-                Rectangle().fill(AppTheme.fg).frame(width: 20, height: 1.8).rotationEffect(.degrees(12))
-                Spacer()
-                Rectangle().fill(AppTheme.fg).frame(width: 20, height: 1.8).rotationEffect(.degrees(-12))
-            }
-        }
+        RayBanPhoto()
+    }
+}
+
+private struct RayBanPhoto: View {
+    var body: some View {
+        Image("RayBanMetaWayfarer")
+            .resizable()
+            .scaledToFit()
+            .accessibilityLabel("Ray-Ban Meta Wayfarer")
     }
 }
 

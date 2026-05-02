@@ -65,11 +65,13 @@
     <string>Speech Recognition is needed to transcribe recorded meetings.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
     <key>BackendAPIURL</key>
-    <string>http://Yerasyls-MacBook-Pro.local:8787</string>
+    <string>http://51.195.200.207:8787</string>
     <key>SummaryAPIURL</key>
     <string></string>
     <key>UILaunchScreen</key>

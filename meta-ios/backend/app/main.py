@@ -23,13 +23,15 @@ transcriber = WhisperTranscriber(settings)
 summarizer = SummaryService(settings)
 store = MeetingStore(settings.data_dir)
 
-app = FastAPI(title="Meta iOS Backend", version="0.1.0")
+app = FastAPI(title="Meta iOS Backend", version="0.2.0")
 
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
+        version=app.version,
+        database=str(store.db_path),
         whisperModel=settings.whisper_model,
         summaryModel=settings.openai_summary_model,
         openaiConfigured=bool(settings.openai_api_key),
@@ -98,4 +100,3 @@ async def persist_upload(upload: UploadFile) -> Path:
         while chunk := await upload.read(1024 * 1024):
             target.write(chunk)
         return Path(target.name)
-

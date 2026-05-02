@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
+    version: str
+    database: str
     whisperModel: str
     summaryModel: str
     openaiConfigured: bool
@@ -35,9 +37,11 @@ class MeetingResponse(SummaryResponse):
     transcript: str
     language: str | None = None
     durationSeconds: float | None = None
+    source: str | None = None
+    deviceName: str | None = None
+    locationName: str | None = None
     createdAt: datetime
 
 
 class MeetingListResponse(BaseModel):
     meetings: list[MeetingResponse]
-
