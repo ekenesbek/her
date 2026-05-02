@@ -539,6 +539,8 @@ private struct ExactPairRayBanScreen: View {
                     .font(.system(size: 14, weight: .regular, design: .serif))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 ZStack {
                     ForEach([CGFloat(110), CGFloat(190), CGFloat(270)], id: \.self) { diameter in
@@ -603,8 +605,10 @@ private struct ExactPairRayBanScreen: View {
             .padding(.horizontal, 22)
             .padding(.top, 14)
             .padding(.bottom, 22)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .frame(maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -639,6 +643,7 @@ private struct ExactConversationsScreen: View {
             .padding(.horizontal, 22)
             .padding(.top, 6)
             .padding(.bottom, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 10) {
                 MetaOrb(size: 16)
@@ -767,12 +772,14 @@ private struct ExactConversationDetailScreen: View {
                     .buttonStyle(PlainButtonStyle())
                     MonoLabel("● ray-ban · yesterday 20:45")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 8)
 
                 Text("Coffee with Anya")
                     .font(.system(size: 28, weight: .medium, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.fg)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 HStack(spacing: 14) {
                     Text("Coffee Boom")
@@ -788,6 +795,7 @@ private struct ExactConversationDetailScreen: View {
                         .italic()
                         .foregroundColor(AppTheme.dim)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
             }
             .padding(.horizontal, 22)
@@ -820,6 +828,7 @@ private struct ExactConversationDetailScreen: View {
 
             ExactAskInput()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -2314,10 +2323,12 @@ private struct WwHeader: View {
                         .padding(.bottom, 10)
                 }
                 .buttonStyle(PlainButtonStyle())
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !pre.isEmpty {
                 MonoLabel(pre)
                     .padding(.bottom, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             Text(title)
                 .font(.system(size: 32, weight: .medium, design: .serif))
@@ -2325,9 +2336,11 @@ private struct WwHeader: View {
                 .foregroundColor(AppTheme.fg)
                 .lineLimit(2)
                 .minimumScaleFactor(0.78)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 22)
         .padding(.bottom, 18)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
