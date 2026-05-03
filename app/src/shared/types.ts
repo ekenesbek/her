@@ -34,11 +34,21 @@ export type AgentDraft = Omit<Agent, "id" | "createdAt" | "updatedAt">;
 export type ChatMessage = {
   id: string;
   agentId: string;
+  chatId?: string;
   role: "user" | "assistant";
   content: string;
   toolTrace?: ToolTraceEntry[];
   taskRun?: TaskRunSnapshot;
   createdAt: number;
+};
+
+export type ChatThread = {
+  id: string;
+  agentId: string;
+  title: string;
+  messageCount: number;
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type ToolTraceEntry = {
@@ -109,6 +119,7 @@ export type TaskEvent = {
 export type TaskRunSnapshot = {
   id: string;
   agentId: string;
+  chatId?: string;
   status: TaskRunStatus;
   title: string;
   input: string;
@@ -154,7 +165,7 @@ export type BrowserSettings = {
 
 export type BrowserConnection = {
   chromeMcpUrl: string | null;
-  source: "user" | "env" | "none";
+  source: "user" | "env" | "auto" | "none";
 };
 
 export type DecisionMemorySignal = {

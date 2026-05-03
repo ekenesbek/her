@@ -7,6 +7,7 @@ import type {
   Agent,
   BrowserConnection,
   ChatMessage,
+  ChatThread,
   CredentialRequest,
   TaskArtifact,
   TaskEvent,
@@ -15,7 +16,11 @@ import type {
   UserRuntimeLocation,
   UserRuntimeMetadata,
 } from "@/shared/types";
-import { readRuntimeExactLocation, refreshSharedExactLocation } from "@/client/location";
+import {
+  readRuntimeExactLocation,
+  refreshSharedExactLocation,
+  requestAlwaysExactLocationOnce,
+} from "@/client/location";
 import { MODEL_LABELS } from "@/shared/types";
 import { useLang, t, type Lang } from "@/client/i18n";
 
@@ -43,10 +48,14 @@ type TaskStreamEvent =
 
 export default function ChatClient({
   agent,
+  activeChatId,
+  chatThreads,
   initialMessages,
   browserConnection,
 }: {
   agent: Agent;
+  activeChatId: string;
+  chatThreads: ChatThread[];
   initialMessages: ChatMessage[];
   browserConnection: BrowserConnection;
 }) {
@@ -54,6 +63,7 @@ export default function ChatClient({
   const [lang] = useLang();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [threads, setThreads] = useState<ChatThread[]>(chatThreads);
   const [input, setInput] = useState("");
   const [stream, setStream] = useState<StreamState>({ streaming: false, current: "", toolCalls: [] });
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +72,7 @@ export default function ChatClient({
   const [now, setNow] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const runGenerationRef = useRef<((text: string) => Promise<void>) | null>(null);
+  const apiChatUrl = `/api/chat/${agent.id}?chatId=${encodeURIComponent(activeChatId)}`;
 
   useEffect(() => {
     if (!stream.streaming) return;
@@ -88,7 +99,7 @@ export default function ChatClient({
 
     const interval = window.setInterval(async () => {
       try {
-        const res = await fetch(`/api/chat/${agent.id}`, { cache: "no-store" });
+        const res = await fetch(apiChatUrl, { cache: "no-store" });
         if (!res.ok) return;
         const next = (await res.json()) as ChatMessage[];
         setMessages(next);
@@ -98,7 +109,7 @@ export default function ChatClient({
     }, 2000);
 
     return () => window.clearInterval(interval);
-  }, [agent.id, messages, stream.streaming]);
+  }, [apiChatUrl, messages, stream.streaming]);
 
   async function send() {
     const text = input.trim();
@@ -134,10 +145,7 @@ export default function ChatClient({
     setError(null);
 
     try {
-      const res = await fetch(
-        `/api/chat/${agent.id}?fromMessageId=${encodeURIComponent(messageId)}`,
-        { method: "DELETE" },
-      );
+      const res = await fetch(`${apiChatUrl}&fromMessageId=${encodeURIComponent(messageId)}`, { method: "DELETE" });
       if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : t(lang, "chat.error.http"));
@@ -161,15 +169,18 @@ export default function ChatClient({
 
   async function runGeneration(text: string) {
     setError(null);
-    setNow(Date.now());
+    const createdAt = Date.now();
+    setNow(createdAt);
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       agentId: agent.id,
+      chatId: activeChatId,
       role: "user",
       content: text,
-      createdAt: Date.now(),
+      createdAt,
     };
     setMessages((m) => [...m, userMsg]);
+    setThreads((items) => bumpActiveThread(items, activeChatId, text, 1, createdAt));
     setStream({ streaming: true, current: "", toolCalls: [] });
 
     const controller = new AbortController();
@@ -177,8 +188,11 @@ export default function ChatClient({
     let aborted = false;
 
     try {
-      const runtimeLocation = readRuntimeExactLocation();
-      const res = await fetch(`/api/chat/${agent.id}`, {
+      const runtimeLocation =
+        readRuntimeExactLocation() ??
+        (await refreshSharedExactLocation()) ??
+        (await requestAlwaysExactLocationOnce());
+      const res = await fetch(apiChatUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, runtimeMetadata: collectUserRuntimeMetadata(runtimeLocation) }),
@@ -232,6 +246,7 @@ export default function ChatClient({
         const assistantMsg: ChatMessage = {
           id: crypto.randomUUID(),
           agentId: agent.id,
+          chatId: activeChatId,
           role: "assistant",
           content: accumulated,
           toolTrace,
@@ -239,6 +254,7 @@ export default function ChatClient({
           createdAt: Date.now(),
         };
         setMessages((m) => [...m, assistantMsg]);
+        setThreads((items) => bumpActiveThread(items, activeChatId, undefined, 1));
       }
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") {
@@ -251,7 +267,7 @@ export default function ChatClient({
       setStream({ streaming: false, current: "", toolCalls: [] });
       if (aborted) {
         try {
-          const res = await fetch(`/api/chat/${agent.id}`, { cache: "no-store" });
+          const res = await fetch(apiChatUrl, { cache: "no-store" });
           if (res.ok) setMessages((await res.json()) as ChatMessage[]);
         } catch {
           // ignore refresh failure
@@ -262,8 +278,28 @@ export default function ChatClient({
 
   async function clearHistory() {
     if (!confirm(t(lang, "chat.clearConfirm"))) return;
-    await fetch(`/api/chat/${agent.id}`, { method: "DELETE" });
+    await fetch(apiChatUrl, { method: "DELETE" });
     setMessages([]);
+    setThreads((items) =>
+      items.map((thread) =>
+        thread.id === activeChatId
+          ? { ...thread, messageCount: 0, updatedAt: Date.now() }
+          : thread,
+      ),
+    );
+  }
+
+  async function createNewChat() {
+    if (stream.streaming) return;
+    const res = await fetch(`/api/chat/${agent.id}/threads`, { method: "POST" });
+    if (!res.ok) {
+      setError(`HTTP ${res.status}`);
+      return;
+    }
+    const thread = (await res.json()) as ChatThread;
+    setThreads((items) => [thread, ...items]);
+    router.push(`/chat/${agent.id}?chatId=${encodeURIComponent(thread.id)}`);
+    router.refresh();
   }
 
   async function logout() {
@@ -273,13 +309,16 @@ export default function ChatClient({
   }
 
   const msgCount = messages.length;
+  const activeThread = threads.find((thread) => thread.id === activeChatId);
   const chromeConnected = Boolean(browserConnection.chromeMcpUrl);
   const chromeSrc =
     browserConnection.source === "user"
       ? t(lang, "chat.chrome.personal")
       : browserConnection.source === "env"
         ? t(lang, "chat.chrome.shared")
-        : t(lang, "chat.chrome.notLinked");
+        : browserConnection.source === "auto"
+          ? t(lang, "chat.chrome.auto")
+          : t(lang, "chat.chrome.notLinked");
 
   return (
     <div className="h-[100dvh] bg-[var(--bg)] relative">
@@ -325,7 +364,43 @@ export default function ChatClient({
           </div>
         </Link>
 
-        <NavItem icon={<ChatIcon />} label={t(lang, "chat.nav.talk")} active />
+        <div className="mt-1 flex items-center gap-2 px-1">
+          <div className="label-mono flex-1" style={{ fontSize: 9 }}>
+            {t(lang, "chat.threads")}
+          </div>
+          <button
+            type="button"
+            onClick={createNewChat}
+            disabled={stream.streaming}
+            className="w-7 h-7 rounded-md inline-flex items-center justify-center hover:bg-[var(--bg-soft)] disabled:opacity-40"
+            aria-label={t(lang, "chat.new")}
+            title={t(lang, "chat.new")}
+          >
+            <PlusIcon />
+          </button>
+        </div>
+        <div className="flex flex-col gap-1 max-h-[32dvh] overflow-y-auto pr-0.5">
+          {threads.map((thread) => {
+            const active = thread.id === activeChatId;
+            return (
+              <Link
+                key={thread.id}
+                href={`/chat/${agent.id}?chatId=${encodeURIComponent(thread.id)}`}
+                className={`rounded-lg px-2 py-1.5 text-[12px] flex flex-col gap-0.5 ${
+                  active
+                    ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                    : "text-[var(--fg-muted)] hover:bg-[var(--bg-soft)] hover:text-[var(--fg)]"
+                }`}
+              >
+                <span className="truncate font-medium">{thread.title || t(lang, "chat.untitled")}</span>
+                <span className="label-mono" style={{ fontSize: 8 }}>
+                  {thread.messageCount} {thread.messageCount === 1 ? t(lang, "chat.msg.short") : t(lang, "chat.msgs.short")}
+                </span>
+              </Link>
+            );
+          })}
+        </div>
+
         <NavItem icon={<WebMcpIcon />} label={t(lang, "chat.nav.webMcp")} href="/web-mcp" />
         <NavItem icon={<LockIcon />} label={t(lang, "chat.nav.vault")} href="#" muted />
         <NavItem icon={<LayersIcon />} label={t(lang, "chat.nav.tasks")} href="#" muted />
@@ -385,9 +460,9 @@ export default function ChatClient({
             <MenuIcon />
           </button>
           <div className="flex-1 min-w-0">
-            <div className="text-[13px] font-medium truncate">{agent.name}</div>
+            <div className="text-[13px] font-medium truncate">{activeThread?.title || t(lang, "chat.untitled")}</div>
             <div className="label-mono mt-0.5" style={{ fontSize: 9 }}>
-              {msgCount} {msgCount === 1 ? t(lang, "chat.msg") : t(lang, "chat.msgs")}
+              {agent.name} · {msgCount} {msgCount === 1 ? t(lang, "chat.msg") : t(lang, "chat.msgs")}
             </div>
           </div>
           <span
@@ -396,6 +471,15 @@ export default function ChatClient({
           >
             {MODEL_LABELS[agent.model].label}
           </span>
+          <button
+            type="button"
+            onClick={createNewChat}
+            disabled={stream.streaming}
+            className="label-mono hover:text-[var(--fg)] disabled:opacity-40 hidden sm:inline-flex items-center gap-1"
+            style={{ fontSize: 9 }}
+          >
+            <PlusIcon /> {t(lang, "chat.new")}
+          </button>
           <button
             type="button"
             onClick={clearHistory}
@@ -1227,13 +1311,6 @@ function Composer({
 
 /* ───────────── icons ───────────── */
 
-function ChatIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 12a8 8 0 01-11.3 7.3L4 21l1.7-5.7A8 8 0 1121 12z" />
-    </svg>
-  );
-}
 function LockIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -1425,6 +1502,33 @@ function isActiveTaskRun(taskRun?: TaskRunSnapshot) {
       taskRun.status !== "failed" &&
       taskRun.status !== "cancelled",
   );
+}
+
+function bumpActiveThread(
+  threads: ChatThread[],
+  activeChatId: string,
+  titleSeed?: string,
+  messageDelta = 0,
+  updatedAt = Date.now(),
+) {
+  return threads
+    .map((thread) => {
+      if (thread.id !== activeChatId) return thread;
+      const shouldTitle = titleSeed && (!thread.title || thread.title === "New chat");
+      return {
+        ...thread,
+        title: shouldTitle ? buildClientChatTitle(titleSeed) : thread.title,
+        messageCount: thread.messageCount + messageDelta,
+        updatedAt,
+      };
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function buildClientChatTitle(seed: string) {
+  const normalized = seed.replace(/\s+/g, " ").trim();
+  if (!normalized) return "New chat";
+  return normalized.length <= 48 ? normalized : `${normalized.slice(0, 45)}...`;
 }
 
 function collectUserRuntimeMetadata(location?: UserRuntimeLocation): UserRuntimeMetadata {

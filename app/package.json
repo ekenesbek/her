@@ -9,6 +9,7 @@
     "browser:start": "node scripts/managed-chrome.mjs start",
     "browser:stop": "node scripts/managed-chrome.mjs stop",
     "browser:status": "node scripts/managed-chrome.mjs status",
+    "test": "node --test",
     "dev": "next dev --webpack",
     "dev:turbopack": "next dev",
     "build": "next build",

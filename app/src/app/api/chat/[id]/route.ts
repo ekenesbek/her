@@ -3,6 +3,10 @@ import { spawn } from "node:child_process";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { getUserFromRequest, unauthorizedJson } from "@/server/auth";
+import {
+  maybeRunBrowserAutoAcceptOnce,
+  type BrowserAutoAcceptResult,
+} from "@/server/browser-auto-accept";
 import { resolveBrowserConnection } from "@/server/browser";
 import {
   addTaskRunTokenUsage,
@@ -14,8 +18,10 @@ import {
   expireCredentialRequest,
   getAgent,
   getBrowserSettings,
+  getChatThread,
   getCredentialRequest,
   getTaskRunSnapshot,
+  getOrCreateLatestChatThread,
   recordDecisionMemorySignal,
   listMessages,
   truncateMessagesFrom,
@@ -34,6 +40,13 @@ import {
   buildIdentityRuntimeContext,
   extractAndPersistMemoryNotes,
 } from "@/server/identity/storage";
+import { buildConversationContextWindow } from "@/server/conversation-context.mjs";
+import { matchesBrowserGroundedTask } from "@/server/browser-task-policy.mjs";
+import {
+  getBrowserRunGuardViolation,
+  isBrowserToolName as isBrowserRunToolName,
+} from "@/server/browser-run-guard.mjs";
+import { buildBrowserWorkflowRuntimeContext } from "@/server/browser-workflows.mjs";
 import { normalizeServiceOrigin } from "@/server/service-registry";
 import { extractAndPersistWebMemoryNotes } from "@/server/web-mcp/storage";
 import type {
@@ -85,6 +98,7 @@ type TaskStreamEvent =
   | { type: "artifacts"; artifacts: TaskArtifact[]; events: TaskEvent[] };
 type TaskTraceRuntime = ReturnType<typeof createTaskTraceRuntime>;
 type ActiveAgentRun = { runId: string; controller: AbortController };
+type BrowserRunGuardViolation = { reason: string; message: string; [key: string]: unknown };
 type BrowserTurnPolicy = {
   chromeMcpEnabled: boolean;
   reason:
@@ -92,21 +106,19 @@ type BrowserTurnPolicy = {
     | "agent_without_browser"
     | "browser_not_configured"
     | "meta_or_history_question"
+    | "browser_continuation"
+    | "not_browser_grounded"
     | "public_lookup_prefers_web_tools";
 };
 
-const MAX_CONTEXT_MESSAGES = 12;
-const MAX_CONTEXT_CHARS = 14_000;
-const MAX_CONTEXT_MESSAGE_CHARS = 1_800;
-
 const activeAgentRuns = new Map<string, Map<string, ActiveAgentRun>>();
 
-function activeAgentRunKey(userId: string, agentId: string) {
-  return `${userId}:${agentId}`;
+function activeAgentRunKey(userId: string, agentId: string, chatId: string) {
+  return `${userId}:${agentId}:${chatId}`;
 }
 
-function abortActiveAgentRuns(userId: string, agentId: string) {
-  const key = activeAgentRunKey(userId, agentId);
+function abortActiveAgentRuns(userId: string, agentId: string, chatId: string) {
+  const key = activeAgentRunKey(userId, agentId, chatId);
   const runs = activeAgentRuns.get(key);
   if (!runs) return;
 
@@ -119,10 +131,11 @@ function abortActiveAgentRuns(userId: string, agentId: string) {
 function registerActiveAgentRun(
   userId: string,
   agentId: string,
+  chatId: string,
   runId: string,
   controller: AbortController,
 ) {
-  const key = activeAgentRunKey(userId, agentId);
+  const key = activeAgentRunKey(userId, agentId, chatId);
   const runs = activeAgentRuns.get(key) ?? new Map<string, ActiveAgentRun>();
   runs.set(runId, { runId, controller });
   activeAgentRuns.set(key, runs);
@@ -172,6 +185,12 @@ function streamDirectReply(content: string) {
   });
 }
 
+function resolveRequestChatThread(req: NextRequest, agentId: string, userId: string) {
+  const chatId = req.nextUrl.searchParams.get("chatId")?.trim();
+  if (chatId) return getChatThread(agentId, userId, chatId);
+  return getOrCreateLatestChatThread(agentId, userId);
+}
+
 export async function GET(req: NextRequest, ctx: Ctx) {
   const user = getUserFromRequest(req);
   if (!user) return unauthorizedJson();
@@ -180,7 +199,9 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   if (!getAgent(id, user.id)) {
     return Response.json({ error: "agent_not_found" }, { status: 404 });
   }
-  return Response.json(listMessages(id, user.id));
+  const thread = resolveRequestChatThread(req, id, user.id);
+  if (!thread) return Response.json({ error: "chat_thread_not_found" }, { status: 404 });
+  return Response.json(listMessages(id, user.id, thread.id));
 }
 
 export async function POST(req: NextRequest, ctx: Ctx) {
@@ -190,6 +211,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const { id } = await ctx.params;
   const agent = getAgent(id, user.id);
   if (!agent) return Response.json({ error: "agent_not_found" }, { status: 404 });
+  const thread = resolveRequestChatThread(req, id, user.id);
+  if (!thread) return Response.json({ error: "chat_thread_not_found" }, { status: 404 });
 
   const { message, runtimeMetadata } = (await req.json()) as {
     message: string;
@@ -199,22 +222,23 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   const userRuntimeMetadata = normalizeUserRuntimeMetadata(runtimeMetadata, req);
   const decisionMemory = recordDecisionMemorySignal({ userId: user.id, message });
 
-  abortActiveAgentRuns(user.id, id);
-  cancelActiveTaskRunsForAgent({ agentId: id, userId: user.id });
+  abortActiveAgentRuns(user.id, id, thread.id);
+  cancelActiveTaskRunsForAgent({ agentId: id, userId: user.id, chatId: thread.id });
 
-  appendMessage(id, user.id, "user", message);
+  appendMessage(id, user.id, "user", message, undefined, thread.id);
 
-  const history = listMessages(id, user.id);
-  const conversation = buildConversationContext(history);
-  const priorConversation = buildConversationContext(history.slice(0, -1));
+  const history = listMessages(id, user.id, thread.id);
+  const conversationContext = buildConversationContextWindow(history, { latestUserMessage: message });
+  const priorConversationContext = buildConversationContextWindow(history.slice(0, -1), { latestUserMessage: message });
+  const conversation = conversationContext.text;
+  const priorConversation = priorConversationContext.text;
   const directReply = buildDirectHistoryReply(message, history.slice(0, -1));
   if (directReply) {
-    appendMessage(id, user.id, "assistant", directReply);
+    appendMessage(id, user.id, "assistant", directReply, undefined, thread.id);
     return streamDirectReply(directReply);
   }
-
   const browserConnection = resolveBrowserConnection(getBrowserSettings(user.id));
-  const browserTurnPolicy = resolveBrowserTurnPolicy(agent, browserConnection, message);
+  const browserTurnPolicy = resolveBrowserTurnPolicy(agent, browserConnection, message, history.slice(0, -1));
   const browserConnectionForTurn = applyBrowserTurnPolicy(browserConnection, browserTurnPolicy);
   const provider = getModelProvider(agent.model);
   const runtimeContext = buildRuntimeContext(
@@ -223,12 +247,14 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     browserConnection,
     userRuntimeMetadata,
     decisionMemory,
+    message,
     provider,
     browserTurnPolicy,
   );
   const taskRun = createTaskRun({
     agentId: id,
     userId: user.id,
+    chatId: thread.id,
     title: buildTaskTitle(message),
     input: message,
     provider,
@@ -236,9 +262,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
   });
   const assistantMessage = appendMessage(id, user.id, "assistant", "Задача выполняется...", {
     taskRunId: taskRun.id,
-  });
+  }, thread.id);
   const linkedAbort = createLinkedAbortController(req.signal);
-  const unregisterActiveRun = registerActiveAgentRun(user.id, id, taskRun.id, linkedAbort.controller);
+  const unregisterActiveRun = registerActiveAgentRun(user.id, id, thread.id, taskRun.id, linkedAbort.controller);
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -267,7 +293,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         updateMessage(id, user.id, assistantMessage.id, "assistant", content, {
           taskRunId: taskRun.id,
           ...metadata,
-        });
+        }, thread.id);
         lastPersistedAt = now;
         lastPersistedLength = content.length;
       };
@@ -307,6 +333,64 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           browserPolicy: browserTurnPolicy,
           userRuntime: userRuntimeMetadata,
         });
+        taskTrace.addEvent({
+          taskRunId: taskTrace.taskRunId,
+          userId: taskTrace.userId,
+          kind: "message",
+          title: "Контекст подготовлен",
+          details: {
+            runtimeContextChars: runtimeContext.length,
+            priorConversationChars: priorConversationContext.contextChars,
+            estimatedContextTokens: priorConversationContext.estimatedTokens,
+            contextTokenBudget: priorConversationContext.tokenBudget,
+            contextStrategy: priorConversationContext.strategy,
+            compactedMessages: priorConversationContext.compactedMessageCount,
+            retrievedMessages: priorConversationContext.retrievedMessageCount,
+            recentMessages: priorConversationContext.recentMessageCount,
+            compactedContextChars: priorConversationContext.compactedChars,
+            retrievedContextChars: priorConversationContext.retrievedChars,
+            recentContextChars: priorConversationContext.recentChars,
+            compactedContextTokens: priorConversationContext.compactedTokens,
+            retrievedContextTokens: priorConversationContext.retrievedTokens,
+            recentContextTokens: priorConversationContext.recentTokens,
+            latestUserMessageChars: message.length,
+            browserGrounded: isBrowserGroundedTask(message),
+            exactBrowserLocation: hasExactBrowserLocation(userRuntimeMetadata),
+          },
+        });
+
+        const autoAccept = await maybeRunBrowserAutoAcceptOnce(browserConnectionForTurn);
+        const browserRuntimeBlocked = shouldFailFastBrowserRuntime(autoAccept, browserConnectionForTurn);
+        if (autoAccept.ran || browserRuntimeBlocked) {
+          taskTrace.addEvent({
+            taskRunId: taskTrace.taskRunId,
+            userId: taskTrace.userId,
+            kind: autoAccept.ok ? "message" : "error",
+            title: autoAccept.ok
+              ? "Chrome MCP auto-accept выполнен"
+              : "Chrome MCP auto-accept не подключил runtime",
+            details: {
+              reason: autoAccept.reason,
+              markerPath: autoAccept.markerPath,
+              error: autoAccept.error,
+            },
+          });
+
+          if (browserRuntimeBlocked) {
+            result = {
+              content: buildBrowserRuntimeUnavailableResult(autoAccept),
+              toolTrace: [],
+            };
+            taskTrace.setStatus("failed", "Browser runtime не подключен", {
+              reason: autoAccept.reason,
+              markerPath: autoAccept.markerPath,
+              error: autoAccept.error,
+            }, Date.now());
+            send("replace", { text: result.content });
+            send("done", {});
+            return;
+          }
+        }
 
         if (provider === "codex") {
           result = await streamCodexReply({
@@ -513,7 +597,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           updateMessage(id, user.id, assistantMessage.id, "assistant", result.content, {
             toolTrace: result.toolTrace,
             taskRunId: taskRun.id,
-          });
+          }, thread.id);
         }
         if (clientOpen) {
           try {
@@ -1428,10 +1512,11 @@ async function streamCodexReply({
   send: (event: string, data: unknown) => void;
   abortSignal?: AbortSignal;
 }): Promise<AgentRunResult> {
+  const browserRequired = agent.capabilities.includes("chrome_browser") && Boolean(browserConnection.chromeMcpUrl);
   const args = buildCodexArgs(agent, priorConversation, latestUserMessage, runtimeContext, browserConnection);
   taskTrace.setStatus("running", "Агент начал выполнение", {
     provider: "codex",
-    browserConnected: agent.capabilities.includes("chrome_browser") && Boolean(browserConnection.chromeMcpUrl),
+    browserConnected: browserRequired,
   });
 
   const child = spawn("codex", args, {
@@ -1457,7 +1542,40 @@ async function streamCodexReply({
   let finalMessage = "";
   let codexError: string | null = null;
   const toolTrace: ToolTraceEntry[] = [];
-  const reportTokenUsage = createTokenUsageReporter(taskTrace);
+  let browserToolCalls = 0;
+  let guardViolation: BrowserRunGuardViolation | null = null;
+
+  const stopCodexForGuard = (violation: BrowserRunGuardViolation) => {
+    if (guardViolation) return;
+    guardViolation = violation;
+    codexError = violation.message;
+    taskTrace.addEvent({
+      taskRunId: taskTrace.taskRunId,
+      userId: taskTrace.userId,
+      kind: "error",
+      title: "Остановлено: неверный runtime для browser-задачи",
+      details: {
+        ...violation,
+        browserRequired,
+        browserToolCalls,
+      },
+      completedAt: Date.now(),
+    });
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+  };
+
+  const reportTokenUsage = createTokenUsageReporter(taskTrace, (usage) => {
+    const violation = getBrowserRunGuardViolation({
+      browserRequired,
+      totalTokens: usage.totalTokens,
+      browserToolCalls,
+    }) as BrowserRunGuardViolation | null;
+    if (violation) stopCodexForGuard(violation);
+  });
 
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
@@ -1478,6 +1596,7 @@ async function streamCodexReply({
 
       if (!event || typeof event !== "object") continue;
       reportTokenUsage(event);
+      if (guardViolation) continue;
       const payload = event as {
         type?: string;
         message?: string;
@@ -1515,11 +1634,22 @@ async function streamCodexReply({
           toolCallId: entry.id,
           startedAt,
         });
+
+        const violation = getBrowserRunGuardViolation({
+          browserRequired,
+          toolName: entry.name,
+          browserToolCalls,
+        }) as BrowserRunGuardViolation | null;
+        if (violation) {
+          stopCodexForGuard(violation);
+          continue;
+        }
       }
 
       if (payload.type === "item.started" && payload.item?.type === "mcp_tool_call") {
         const startedAt = Date.now();
         const name = buildCodexMcpToolName(payload.item.server, payload.item.tool);
+        if (isBrowserRunToolName(name)) browserToolCalls += 1;
         const entry = {
           id: payload.item.id ?? `codex-${toolTrace.length + 1}`,
           name,
@@ -1669,7 +1799,7 @@ async function streamCodexReply({
   }
   abortSignal?.removeEventListener("abort", onAbort);
 
-  if (abortSignal?.aborted) {
+  if (abortSignal?.aborted && !guardViolation) {
     return { content: finalMessage, toolTrace };
   }
 
@@ -1686,6 +1816,11 @@ async function streamCodexReply({
     } catch {
       // Ignore incomplete tail.
     }
+  }
+
+  const finalGuardViolation = guardViolation as BrowserRunGuardViolation | null;
+  if (finalGuardViolation) {
+    throw new AgentRunError(finalGuardViolation.message, { content: finalMessage, toolTrace });
   }
 
   if (exitCode !== 0) {
@@ -1729,7 +1864,10 @@ function optimizeChromeMcpToolInput(toolName: string, input: Record<string, unkn
   return input;
 }
 
-function createTokenUsageReporter(taskTrace: TaskTraceRuntime) {
+function createTokenUsageReporter(
+  taskTrace: TaskTraceRuntime,
+  onUpdatedUsage?: (usage: TokenUsage) => void,
+) {
   let lastUsage = emptyTokenUsage();
 
   return (value: unknown) => {
@@ -1740,7 +1878,8 @@ function createTokenUsageReporter(taskTrace: TaskTraceRuntime) {
     lastUsage = maxTokenUsage(lastUsage, current);
     if (!hasTokenUsage(delta)) return;
 
-    taskTrace.addTokenUsage(delta);
+    const updated = taskTrace.addTokenUsage(delta);
+    if (updated?.tokenUsage) onUpdatedUsage?.(updated.tokenUsage);
   };
 }
 
@@ -1907,36 +2046,11 @@ function buildTaskTitle(input: string) {
   return title.length > 90 ? `${title.slice(0, 87)}...` : title || "Task";
 }
 
-function buildConversationContext(messages: Array<{ role: "user" | "assistant"; content: string }>) {
-  const formatted: string[] = [];
-  let remainingChars = MAX_CONTEXT_CHARS;
-
-  for (const message of [...messages].reverse().slice(0, MAX_CONTEXT_MESSAGES)) {
-    const content = truncateForModelContext(message.content.replace(/\s+/g, " ").trim(), MAX_CONTEXT_MESSAGE_CHARS);
-    if (!content) continue;
-    if (message.role === "assistant" && content === "Задача выполняется...") continue;
-
-    const entry = `${message.role === "user" ? "User" : "Assistant"}: ${content}`;
-    if (entry.length > remainingChars && formatted.length > 0) break;
-
-    const clippedEntry = truncateForModelContext(entry, remainingChars);
-    formatted.push(clippedEntry);
-    remainingChars -= clippedEntry.length + 2;
-    if (remainingChars <= 0) break;
-  }
-
-  return formatted.reverse().join("\n\n");
-}
-
-function truncateForModelContext(value: string, maxLength: number) {
-  if (maxLength <= 0) return "";
-  return value.length > maxLength ? `${value.slice(0, Math.max(0, maxLength - 3))}...` : value;
-}
-
 function resolveBrowserTurnPolicy(
   agent: Agent,
   browserConnection: BrowserConnection,
   latestUserMessage: string,
+  priorMessages: Array<{ role: "user" | "assistant"; content: string }> = [],
 ): BrowserTurnPolicy {
   if (!agent.capabilities.includes("chrome_browser")) {
     return { chromeMcpEnabled: false, reason: "agent_without_browser" };
@@ -1952,6 +2066,14 @@ function resolveBrowserTurnPolicy(
 
   if (canPreferWebToolsForPublicLookup(agent, latestUserMessage)) {
     return { chromeMcpEnabled: false, reason: "public_lookup_prefers_web_tools" };
+  }
+
+  if (isBrowserContinuationReply(latestUserMessage, priorMessages)) {
+    return { chromeMcpEnabled: true, reason: "browser_continuation" };
+  }
+
+  if (!isBrowserGroundedTask(latestUserMessage)) {
+    return { chromeMcpEnabled: false, reason: "not_browser_grounded" };
   }
 
   return { chromeMcpEnabled: true, reason: "enabled" };
@@ -2035,6 +2157,36 @@ function extractHttpUrls(text: string) {
   return [...new Set(urls.map((url) => url.replace(/[.,;:!?]+$/g, "")))];
 }
 
+function isBrowserContinuationReply(
+  latestUserMessage: string,
+  priorMessages: Array<{ role: "user" | "assistant"; content: string }>,
+) {
+  const normalized = latestUserMessage.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized || normalized.length > 120) return false;
+  if (!BROWSER_CONTINUATION_REPLY_PATTERNS.some((pattern) => pattern.test(normalized))) return false;
+
+  const lastAssistant = [...priorMessages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.content.trim());
+  if (!lastAssistant) return false;
+
+  return BROWSER_CONTINUATION_CONTEXT_PATTERNS.some((pattern) => pattern.test(lastAssistant.content));
+}
+
+const BROWSER_CONTINUATION_REPLY_PATTERNS = [
+  /^(?:да|ок|окей|yes|y|go|продолжай|сделай|отправь|закажи|подтверждаю|confirm|continue|send|order)$/i,
+  /^(?:готово|done|ввел|ввёл|entered)$/i,
+  /^[0-9]{4,8}$/i,
+  /^[a-z0-9_-]{4,12}$/i,
+];
+
+const BROWSER_CONTINUATION_CONTEXT_PATTERNS = [
+  /(?:код|mfa|2fa|otp|капч|captcha|парол|passkey|credential|логин|login|авториз)/i,
+  /(?:подтверд|confirm|финальн|final|заказ|order|отправ|send|покупк|checkout|payment)/i,
+  /(?:куда|пункт назначения|destination|адрес|маршрут|такси|taxi|pickup)/i,
+  /(?:браузер|chrome|вкладк|страниц|browser|tab|page)/i,
+];
+
 function previewToolValue(value: unknown): unknown {
   return redactSensitiveValue(value);
 }
@@ -2055,6 +2207,26 @@ function normalizeAgentRunFailure(err: unknown, fallback: AgentRunResult): Agent
     partialContent: fallback.content,
     toolTrace: fallback.toolTrace,
   };
+}
+
+function shouldFailFastBrowserRuntime(
+  autoAccept: BrowserAutoAcceptResult,
+  browserConnection: BrowserConnection,
+) {
+  if (!browserConnection.chromeMcpUrl) return false;
+  if (autoAccept.ok) return false;
+  return !["browser_not_configured", "non_local_browser_mcp"].includes(autoAccept.reason);
+}
+
+function buildBrowserRuntimeUnavailableResult(autoAccept: BrowserAutoAcceptResult) {
+  const reason = autoAccept.error || autoAccept.reason;
+  return [
+    "Не запустил браузерную задачу, чтобы не тратить токены впустую.",
+    "",
+    "Chrome MCP runtime сейчас не отвечает, а одноразовый auto-accept не смог его подключить.",
+    `Причина: ${reason}`,
+    "Следующий шаг: подключить extension-capable Chrome runtime и повторить задачу. После успешного подключения агент должен сам открыть нужный сайт и продолжить через браузер.",
+  ].join("\n");
 }
 
 function buildFailureResult({
@@ -2148,19 +2320,8 @@ function isBrowserGroundedTask(message: string) {
   if (!normalized) return false;
   if (isMetaOrClarifyingQuestion(normalized) || isPreviousAnswerSourceQuestion(normalized)) return false;
 
-  return BROWSER_GROUNDED_TASK_PATTERNS.some((pattern) => pattern.test(normalized));
+  return matchesBrowserGroundedTask(normalized);
 }
-
-const BROWSER_GROUNDED_TASK_PATTERNS = [
-  /(?:сейчас|сегодня|завтра|актуальн|текущ|в\s+реальном\s+времени)/i,
-  /(?:проверь|посмотри|найди|открой|сравни|подбери|выбери|оцени)/i,
-  /(?:интегрир|подключи|подключить|сконнект|авторизу|залогин|логин|connect|integrate|authorize|oauth)/i,
-  /(?:github|gitlab|slack|notion|figma|linear).*(?:интегр|подключ|connect|integrate|oauth|токен|token|pat|api\s*key|ключ\s+api)/i,
-  /(?:токен|token|pat|api\s*key|ключ\s+api|personal access|fine[-\s]?grained)/i,
-  /(?:создай|создать|сгенерируй|сгенерировать|выдай|получи|получить|issue|generate|create).*(?:токен|token|pat|api\s*key|ключ)/i,
-  /(?:сколько|когда|где|какой|какая|какие|лучший|лучше|варианты|цена|стоимость|доступн|свободн|наличи)/i,
-  /\b(?:current|latest|today|now|check|find|compare|choose|options|price|availability|eta)\b/i,
-];
 
 const META_QUESTION_PATTERNS = [
   /\bкак(ая|ую|ой|ие)\s+модел/i,
@@ -2303,6 +2464,14 @@ function getBrowserLocation(location: UserRuntimeMetadata["location"]): UserRunt
       : {}),
     ...(isValidIsoDateTime(location.capturedAt) ? { capturedAt: location.capturedAt } : {}),
   };
+}
+
+function hasExactBrowserLocation(metadata: UserRuntimeMetadata) {
+  return (
+    metadata.location?.source === "browser" &&
+    isValidLatitude(metadata.location.latitude) &&
+    isValidLongitude(metadata.location.longitude)
+  );
 }
 
 function getEdgeLocation(req: NextRequest): UserRuntimeMetadata["location"] | undefined {
@@ -2466,12 +2635,12 @@ function buildCodexArgs(
     "--ignore-rules",
     "--skip-git-repo-check",
     "--sandbox",
-    getCodexSandbox(agent.capabilities),
+    getCodexSandboxForTurn(agent.capabilities, browserConnection),
     "--model",
     agent.model,
   ];
 
-  args.push(buildCodexPrompt(agent, priorConversation, latestUserMessage, runtimeContext));
+  args.push(buildCodexPrompt(agent, priorConversation, latestUserMessage, runtimeContext, browserConnection));
   return args;
 }
 
@@ -2519,15 +2688,17 @@ function buildCodexPrompt(
   priorConversation: string,
   latestUserMessage: string,
   runtimeContext: string,
+  browserConnection: BrowserConnection,
 ) {
-  const capabilities = agent.capabilities.length > 0 ? agent.capabilities.join(", ") : "none";
+  const promptCapabilities = getCodexPromptCapabilities(agent.capabilities, browserConnection);
+  const capabilities = promptCapabilities.length > 0 ? promptCapabilities.join(", ") : "none";
 
   return [
     `You are the agent "${agent.name}".`,
     `You are running on model: ${agent.model}.`,
     agent.systemPrompt.trim() ? `System instructions:\n${agent.systemPrompt.trim()}` : null,
     runtimeContext.trim() ? `Runtime context:\n${runtimeContext.trim()}` : null,
-    `Enabled capabilities: ${capabilities}.`,
+    `Enabled capabilities for this turn: ${capabilities}.`,
     priorConversation.trim()
       ? `History (context only — do NOT continue or re-execute prior tasks unless the latest user message explicitly asks to continue, retry, or confirm that prior task):\n${priorConversation.trim()}`
       : null,
@@ -2539,10 +2710,22 @@ function buildCodexPrompt(
     .join("\n\n");
 }
 
+function getCodexPromptCapabilities(capabilities: Capability[], browserConnection: BrowserConnection) {
+  const browserRequired = capabilities.includes("chrome_browser") && Boolean(browserConnection.chromeMcpUrl);
+  return browserRequired
+    ? capabilities.filter((capability) => capability !== "file_write" && capability !== "shell")
+    : capabilities;
+}
+
 function getCodexSandbox(capabilities: Capability[]) {
   return capabilities.includes("file_write") || capabilities.includes("shell")
     ? "workspace-write"
     : "read-only";
+}
+
+function getCodexSandboxForTurn(capabilities: Capability[], browserConnection: BrowserConnection) {
+  const browserRequired = capabilities.includes("chrome_browser") && Boolean(browserConnection.chromeMcpUrl);
+  return browserRequired ? "read-only" : getCodexSandbox(capabilities);
 }
 
 function extractCodexError(codexError: string | null, stderr: string) {
@@ -2568,11 +2751,14 @@ function buildRuntimeContext(
   browserConnection: BrowserConnection,
   userRuntimeMetadata: UserRuntimeMetadata,
   decisionMemory: DecisionMemory,
+  latestUserMessage: string,
   provider: "claude" | "codex",
   browserTurnPolicy: BrowserTurnPolicy,
 ) {
   const userId = user.id;
   const browserMcpEnabledForTurn = browserTurnPolicy.chromeMcpEnabled && Boolean(browserConnection.chromeMcpUrl);
+  const browserGroundedLatestTask = isBrowserGroundedTask(latestUserMessage);
+  const exactBrowserLocationPresent = hasExactBrowserLocation(userRuntimeMetadata);
   const lines: string[] = [
     "Always return a final user-visible task outcome.",
     "If the task is blocked, failed, or ambiguous, still answer with: what was verified, what the blocker is, and the exact next step needed from the user.",
@@ -2600,6 +2786,7 @@ function buildRuntimeContext(
       lines.push(
         "A live browser MCP server is connected for this user session.",
         "When the task depends on logged-in browser state, use the browser MCP tools to do the work instead of giving setup instructions.",
+        "For this browser turn, do not use Shell/local command tools to inspect tabs, connect to the browser runtime, run scripts, or fetch pages. Use Chrome MCP browser tools directly.",
         "Browser MCP permissions are handled by the app runtime; do not ask the user to grant tool access in an external CLI.",
         "The currently active tab is only a starting point, not a limitation. If it is not the right service/page, use get_windows_and_tabs to find an existing relevant tab, chrome_switch_tab to activate it, or chrome_navigate to open the needed URL yourself.",
         "Do not continue a browser flow from an already-open tab unless the latest user message asks for that same flow. Treat open tabs from prior tasks as stale context when the latest message is about something else.",
@@ -2631,6 +2818,21 @@ function buildRuntimeContext(
         "For irreversible actions such as sending, deleting, archiving, purchasing, or placing an order, stop at the final confirmation screen and ask the user for explicit confirmation before the final action.",
         "Do not mention external CLI setup unless the user explicitly asks for implementation details."
       );
+      if (browserGroundedLatestTask) {
+        lines.push(
+          "The latest user message is browser-grounded for this turn. Start by using a browser MCP tool or by reporting one concrete missing input; do not answer only from prior knowledge or generic instructions.",
+          exactBrowserLocationPresent
+            ? "If the workflow needs the user's current physical location, exact browser location is already available. Use it as the current origin/context unless the latest user message gives a different one; do not ask for current location again."
+            : "If the workflow needs the user's current physical location and the latest message/memory/browser state does not provide it, ask one concise question for the missing location.",
+          "Before asking for missing inputs, inspect the relevant browser surface and available runtime/memory context. Ask only for the smallest concrete missing field that blocks the next safe browser step.",
+          "For transactional workflows such as sending, booking, ordering, purchasing, routing, scheduling, or account changes, prepare the draft/options in the browser, then stop before the irreversible final action for explicit confirmation.",
+        );
+        const workflowContext = buildBrowserWorkflowRuntimeContext({
+          latestUserMessage,
+          exactBrowserLocationPresent,
+        });
+        if (workflowContext) lines.push(workflowContext);
+      }
     } else if (browserConnection.chromeMcpUrl) {
       lines.push(
         `Chrome MCP is connected but intentionally not attached to this turn. Browser policy reason: ${browserTurnPolicy.reason}.`,
@@ -2653,7 +2855,10 @@ function buildRuntimeContext(
       (agent.capabilities.includes("web_fetch") || agent.capabilities.includes("web_search")));
 
   if (shouldExposeWebMemoryRoot) {
-    lines.push(buildWebMcpRuntimeContext(userId, browserMcpEnabledForTurn));
+    lines.push(buildWebMcpRuntimeContext(userId, {
+      autoRecording: browserMcpEnabledForTurn,
+      goal: browserTurnPolicy.chromeMcpEnabled ? latestUserMessage : "",
+    }));
   }
 
   return lines.join("\n");
@@ -2674,17 +2879,23 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
   if (!user) return unauthorizedJson();
 
   const { id } = await ctx.params;
-  abortActiveAgentRuns(user.id, id);
-  cancelActiveTaskRunsForAgent({ agentId: id, userId: user.id, reason: "chat_history_deleted" });
+  if (!getAgent(id, user.id)) {
+    return Response.json({ error: "agent_not_found" }, { status: 404 });
+  }
+  const thread = resolveRequestChatThread(req, id, user.id);
+  if (!thread) return Response.json({ error: "chat_thread_not_found" }, { status: 404 });
+
+  abortActiveAgentRuns(user.id, id, thread.id);
+  cancelActiveTaskRunsForAgent({ agentId: id, userId: user.id, chatId: thread.id, reason: "chat_history_deleted" });
 
   const fromMessageId = req.nextUrl.searchParams.get("fromMessageId");
   if (fromMessageId) {
-    const ok = truncateMessagesFrom(id, user.id, fromMessageId);
+    const ok = truncateMessagesFrom(id, user.id, fromMessageId, thread.id);
     if (!ok) return Response.json({ error: "message_not_found" }, { status: 404 });
     return new Response(null, { status: 204 });
   }
 
   const { clearMessages } = await import("@/server/db");
-  clearMessages(id, user.id);
+  clearMessages(id, user.id, thread.id);
   return new Response(null, { status: 204 });
 }

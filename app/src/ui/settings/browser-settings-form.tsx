@@ -65,8 +65,8 @@ export default function BrowserSettingsForm({
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Browser</h1>
           <p className="text-sm text-[var(--fg-muted)] mt-2 max-w-2xl leading-relaxed">
-            Один раз укажи MCP URL от Chrome MCP. После этого браузерные агенты смогут
-            использовать твою живую Chrome-сессию вместо ответов про внешнюю настройку.
+            По умолчанию meta использует локальный Chrome MCP на 127.0.0.1:12306/mcp и managed Chrome
+            из launch-процесса. Свой URL нужен только для кастомного браузерного рантайма.
           </p>
         </div>
 
@@ -83,6 +83,7 @@ export default function BrowserSettingsForm({
           <div className="text-xs text-[var(--fg-muted)] mt-1">
             {connection.source === "user" && "Используется твой сохранённый MCP URL."}
             {connection.source === "env" && "Сейчас используется глобальный MCP URL из окружения приложения."}
+            {connection.source === "auto" && "Используется автоматический локальный Chrome MCP URL."}
             {connection.source === "none" && "Без MCP URL агент не сможет открыть Gmail или работать с логинами в Chrome."}
           </div>
         </div>

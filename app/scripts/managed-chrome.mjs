@@ -6,12 +6,14 @@ import {
   CHROME_MCP_URL,
   MANAGED_CHROME_BIN,
   MANAGED_CHROME_DEBUG_PORT,
+  MANAGED_CHROME_LOADS_UNPACKED_EXTENSIONS,
   MANAGED_CHROME_PID_FILE,
   MANAGED_CHROME_PROFILE,
   ensureMetaHome,
   findChromeMcpExtensionPath,
   pingChromeMcp,
 } from "./browser-runtime.mjs";
+import { ensureChromeMcpAutoAcceptOnce } from "./chrome-mcp-auto-accept.mjs";
 
 function readPid() {
   if (!existsSync(MANAGED_CHROME_PID_FILE)) return null;
@@ -31,7 +33,12 @@ function isAlive(pid) {
 
 export function managedChromeStatus() {
   const pid = readPid();
-  return { pid, running: pid !== null && isAlive(pid) };
+  return {
+    pid,
+    running: pid !== null && isAlive(pid),
+    browserBin: MANAGED_CHROME_BIN,
+    loadsUnpackedExtensions: MANAGED_CHROME_LOADS_UNPACKED_EXTENSIONS,
+  };
 }
 
 export async function startManagedChrome() {
@@ -41,6 +48,15 @@ export async function startManagedChrome() {
   if (!existsSync(MANAGED_CHROME_BIN)) {
     throw new Error(
       `Managed Chrome binary not found at ${MANAGED_CHROME_BIN}. Set MANAGED_CHROME_BIN to override.`,
+    );
+  }
+
+  if (!MANAGED_CHROME_LOADS_UNPACKED_EXTENSIONS) {
+    throw new Error(
+      [
+        "Managed browser points to regular Google Chrome, which ignores --load-extension in current Chrome builds.",
+        "Install Chrome for Testing or Chromium, or set MANAGED_CHROME_BIN to an extension-load-capable browser.",
+      ].join(" "),
     );
   }
 
@@ -55,6 +71,7 @@ export async function startManagedChrome() {
 
   const args = [
     `--user-data-dir=${MANAGED_CHROME_PROFILE}`,
+    `--disable-extensions-except=${extensionPath}`,
     `--load-extension=${extensionPath}`,
     `--remote-debugging-port=${MANAGED_CHROME_DEBUG_PORT}`,
     "--no-first-run",
@@ -105,8 +122,17 @@ export async function waitForMcp({ timeoutMs = 20000, intervalMs = 500 } = {}) {
 export async function ensureManagedChrome({ wait = true } = {}) {
   const result = await startManagedChrome();
   if (wait) {
-    const ping = await waitForMcp();
-    return { ...result, mcp: ping };
+    let ping = await waitForMcp();
+    let autoAccept = null;
+
+    if (!ping.ok) {
+      autoAccept = await ensureChromeMcpAutoAcceptOnce({
+        reason: result.started ? "managed_chrome_started" : "managed_chrome_existing",
+      });
+      ping = autoAccept.mcp ?? (await waitForMcp({ timeoutMs: 3000 }));
+    }
+
+    return { ...result, autoAccept, mcp: ping };
   }
   return result;
 }

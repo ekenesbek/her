@@ -8,6 +8,7 @@ import type {
   AuthChallenge,
   AuthChallengeKind,
   BrowserSettings,
+  ChatThread,
   ChatMessage,
   CredentialRequestedAction,
   CredentialRequest,
@@ -53,21 +54,34 @@ type AgentRow = {
 type ChatMessageRow = {
   id: string;
   agent_id: string;
+  chat_id: string | null;
   role: "user" | "assistant";
   content: string;
   metadata: string | null;
   created_at: number;
 };
 
-type TaskRunRow = {
+type ChatThreadRow = {
   id: string;
   user_id: string;
   agent_id: string;
   title: string;
+  created_at: number;
+  updated_at: number;
+  message_count?: number;
+  last_message_at?: number | null;
+};
+
+type TaskRunRow = {
+  id: string;
+  user_id: string;
+  agent_id: string;
+  chat_id: string | null;
+  title: string;
   input: string;
   status: TaskRunStatus;
   provider: "claude" | "codex";
-  browser_source: "user" | "env" | "none";
+  browser_source: "user" | "env" | "auto" | "none";
   started_at: number;
   completed_at: number | null;
   input_tokens: number;
@@ -187,6 +201,96 @@ function ensureChatMessagesMetadataColumn(db: Database.Database) {
   if (!columns.some((column) => column.name === "metadata")) {
     db.exec("ALTER TABLE chat_messages ADD COLUMN metadata TEXT");
   }
+}
+
+function ensureChatThreadsSchema(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS chat_threads (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_threads_agent ON chat_threads(user_id, agent_id, updated_at DESC);
+  `);
+
+  const messageColumns = db.prepare("PRAGMA table_info(chat_messages)").all() as Array<{ name: string }>;
+  if (!messageColumns.some((column) => column.name === "chat_id")) {
+    db.exec("ALTER TABLE chat_messages ADD COLUMN chat_id TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(chat_id, created_at)");
+
+  const taskRunColumns = db.prepare("PRAGMA table_info(task_runs)").all() as Array<{ name: string }>;
+  if (!taskRunColumns.some((column) => column.name === "chat_id")) {
+    db.exec("ALTER TABLE task_runs ADD COLUMN chat_id TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_task_runs_chat ON task_runs(chat_id, started_at DESC)");
+
+  migrateLegacyChatRowsToThreads(db);
+}
+
+function migrateLegacyChatRowsToThreads(db: Database.Database) {
+  const rows = db
+    .prepare(
+      `SELECT agents.id AS agent_id, agents.owner_user_id AS user_id
+       FROM agents
+       WHERE agents.owner_user_id IS NOT NULL
+         AND (
+           EXISTS (SELECT 1 FROM chat_messages WHERE chat_messages.agent_id = agents.id AND chat_messages.chat_id IS NULL)
+           OR EXISTS (
+             SELECT 1 FROM task_runs
+             WHERE task_runs.agent_id = agents.id
+               AND task_runs.user_id = agents.owner_user_id
+               AND task_runs.chat_id IS NULL
+           )
+         )`,
+    )
+    .all() as Array<{ agent_id: string; user_id: string }>;
+
+  const findExisting = db.prepare(
+    "SELECT id FROM chat_threads WHERE user_id = ? AND agent_id = ? ORDER BY created_at ASC LIMIT 1",
+  );
+  const firstMessage = db.prepare(
+    "SELECT content FROM chat_messages WHERE agent_id = ? AND role = 'user' ORDER BY created_at ASC, rowid ASC LIMIT 1",
+  );
+  const lastMessageAt = db.prepare(
+    "SELECT MAX(created_at) AS ts FROM chat_messages WHERE agent_id = ?",
+  );
+  const lastTaskAt = db.prepare(
+    "SELECT MAX(started_at) AS ts FROM task_runs WHERE agent_id = ? AND user_id = ?",
+  );
+  const insertThread = db.prepare(
+    "INSERT INTO chat_threads (id, user_id, agent_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  const updateMessages = db.prepare("UPDATE chat_messages SET chat_id = ? WHERE agent_id = ? AND chat_id IS NULL");
+  const updateTasks = db.prepare(
+    "UPDATE task_runs SET chat_id = ? WHERE agent_id = ? AND user_id = ? AND chat_id IS NULL",
+  );
+
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      let threadId = (findExisting.get(row.user_id, row.agent_id) as { id: string } | undefined)?.id;
+      const now = Date.now();
+      const messageTs = (lastMessageAt.get(row.agent_id) as { ts: number | null } | undefined)?.ts ?? 0;
+      const taskTs = (lastTaskAt.get(row.agent_id, row.user_id) as { ts: number | null } | undefined)?.ts ?? 0;
+      const updatedAt = Math.max(messageTs, taskTs, now);
+
+      if (!threadId) {
+        threadId = randomUUID();
+        const first = firstMessage.get(row.agent_id) as { content: string } | undefined;
+        insertThread.run(threadId, row.user_id, row.agent_id, buildChatThreadTitle(first?.content), updatedAt, updatedAt);
+      }
+
+      updateMessages.run(threadId, row.agent_id);
+      updateTasks.run(threadId, row.agent_id, row.user_id);
+    }
+  });
+
+  tx();
 }
 
 function ensureTaskRunUsageColumns(db: Database.Database) {
@@ -317,9 +421,22 @@ export function getDb(): Database.Database {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS chat_threads (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_threads_agent ON chat_threads(user_id, agent_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS chat_messages (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
+      chat_id TEXT,
       role TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
@@ -331,6 +448,7 @@ export function getDb(): Database.Database {
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
       agent_id TEXT NOT NULL,
+      chat_id TEXT,
       title TEXT NOT NULL,
       input TEXT NOT NULL,
       status TEXT NOT NULL,
@@ -499,6 +617,7 @@ export function getDb(): Database.Database {
   ensureAgentsOwnerColumn(db);
   ensureChatMessagesMetadataColumn(db);
   ensureTaskRunUsageColumns(db);
+  ensureChatThreadsSchema(db);
   cleanupExpiredRecords(db);
   _db = db;
   return db;
@@ -516,6 +635,23 @@ function rowToAgent(row: AgentRow): Agent {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function rowToChatThread(row: ChatThreadRow): ChatThread {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    title: row.title || "New chat",
+    messageCount: Number(row.message_count ?? 0),
+    createdAt: row.created_at,
+    updatedAt: Math.max(row.updated_at, row.last_message_at ?? 0),
+  };
+}
+
+function buildChatThreadTitle(seed?: string) {
+  const normalized = seed?.replace(/\s+/g, " ").trim();
+  if (!normalized) return "New chat";
+  return normalized.length <= 48 ? normalized : `${normalized.slice(0, 45)}...`;
 }
 
 function parseJsonObject(raw: string | null): Record<string, unknown> {
@@ -790,6 +926,7 @@ function rowToTaskRunSnapshot(
   return {
     id: row.id,
     agentId: row.agent_id,
+    ...(row.chat_id ? { chatId: row.chat_id } : {}),
     status: row.status,
     title: row.title,
     input: row.input,
@@ -1432,6 +1569,7 @@ function getTaskRunRow(id: string, userId: string): TaskRunRow | null {
 export function createTaskRun({
   agentId,
   userId,
+  chatId,
   title,
   input,
   provider,
@@ -1439,13 +1577,18 @@ export function createTaskRun({
 }: {
   agentId: string;
   userId: string;
+  chatId?: string;
   title: string;
   input: string;
   provider: "claude" | "codex";
-  browserSource: "user" | "env" | "none";
+  browserSource: "user" | "env" | "auto" | "none";
 }): TaskRunSnapshot {
   if (!getAgent(agentId, userId)) {
     throw new Error("agent_not_found");
+  }
+  const thread = chatId ? getChatThread(agentId, userId, chatId) : getOrCreateLatestChatThread(agentId, userId);
+  if (!thread) {
+    throw new Error("chat_thread_not_found");
   }
 
   const db = getDb();
@@ -1454,16 +1597,18 @@ export function createTaskRun({
 
   db.prepare(
     `INSERT INTO task_runs (
-      id, user_id, agent_id, title, input, status, provider, browser_source, started_at, completed_at,
+      id, user_id, agent_id, chat_id, title, input, status, provider, browser_source, started_at, completed_at,
       input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, total_tokens, cost_usd
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, userId, agentId, title, input, "created", provider, browserSource, startedAt, null, 0, 0, 0, 0, 0, null);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, userId, agentId, thread.id, title, input, "created", provider, browserSource, startedAt, null, 0, 0, 0, 0, 0, null);
+  touchChatThread(db, thread.id, userId, startedAt);
 
   return rowToTaskRunSnapshot(
     {
       id,
       user_id: userId,
       agent_id: agentId,
+      chat_id: thread.id,
       title,
       input,
       status: "created",
@@ -1486,25 +1631,32 @@ export function createTaskRun({
 export function cancelActiveTaskRunsForAgent({
   agentId,
   userId,
+  chatId,
   reason = "superseded_by_new_message",
 }: {
   agentId: string;
   userId: string;
+  chatId?: string;
   reason?: string;
 }): TaskRunSnapshot[] {
   const db = getDb();
   const now = Date.now();
   const statusPlaceholders = ACTIVE_TASK_STATUSES.map(() => "?").join(", ");
+  const threadFilter = chatId ? "AND chat_id = ?" : "";
+  const params = chatId
+    ? [agentId, userId, chatId, ...ACTIVE_TASK_STATUSES]
+    : [agentId, userId, ...ACTIVE_TASK_STATUSES];
   const rows = db
     .prepare(
       `SELECT *
        FROM task_runs
        WHERE agent_id = ?
          AND user_id = ?
+         ${threadFilter}
          AND status IN (${statusPlaceholders})
        ORDER BY started_at ASC`,
     )
-    .all(agentId, userId, ...ACTIVE_TASK_STATUSES) as TaskRunRow[];
+    .all(...params) as TaskRunRow[];
 
   if (rows.length === 0) return [];
 
@@ -1777,7 +1929,104 @@ export function getTaskRunSnapshot(id: string, userId: string): TaskRunSnapshot 
   return rowToTaskRunSnapshot(row, events, artifacts);
 }
 
-export function listMessages(agentId: string, userId: string): ChatMessage[] {
+export function createChatThread(agentId: string, userId: string, title = "New chat"): ChatThread {
+  if (!getAgent(agentId, userId)) {
+    throw new Error("agent_not_found");
+  }
+
+  const db = getDb();
+  const id = randomUUID();
+  const now = Date.now();
+  db.prepare(
+    "INSERT INTO chat_threads (id, user_id, agent_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(id, userId, agentId, buildChatThreadTitle(title), now, now);
+
+  return {
+    id,
+    agentId,
+    title: buildChatThreadTitle(title),
+    messageCount: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function getChatThread(agentId: string, userId: string, chatId: string): ChatThread | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT chat_threads.*,
+              COUNT(chat_messages.id) AS message_count,
+              MAX(chat_messages.created_at) AS last_message_at
+       FROM chat_threads
+       LEFT JOIN chat_messages ON chat_messages.chat_id = chat_threads.id
+       WHERE chat_threads.id = ?
+         AND chat_threads.agent_id = ?
+         AND chat_threads.user_id = ?
+       GROUP BY chat_threads.id`,
+    )
+    .get(chatId, agentId, userId) as ChatThreadRow | undefined;
+
+  return row ? rowToChatThread(row) : null;
+}
+
+export function listChatThreads(agentId: string, userId: string): ChatThread[] {
+  if (!getAgent(agentId, userId)) return [];
+
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT chat_threads.*,
+              COUNT(chat_messages.id) AS message_count,
+              MAX(chat_messages.created_at) AS last_message_at
+       FROM chat_threads
+       LEFT JOIN chat_messages ON chat_messages.chat_id = chat_threads.id
+       WHERE chat_threads.agent_id = ?
+         AND chat_threads.user_id = ?
+       GROUP BY chat_threads.id
+       ORDER BY CASE
+         WHEN COALESCE(MAX(chat_messages.created_at), 0) > chat_threads.updated_at THEN MAX(chat_messages.created_at)
+         ELSE chat_threads.updated_at
+       END DESC, chat_threads.created_at DESC`,
+    )
+    .all(agentId, userId) as ChatThreadRow[];
+
+  return rows.map(rowToChatThread);
+}
+
+export function getOrCreateLatestChatThread(agentId: string, userId: string): ChatThread {
+  const [latest] = listChatThreads(agentId, userId);
+  return latest ?? createChatThread(agentId, userId);
+}
+
+function touchChatThread(db: Database.Database, chatId: string, userId: string, timestamp = Date.now()) {
+  db.prepare("UPDATE chat_threads SET updated_at = ? WHERE id = ? AND user_id = ?").run(timestamp, chatId, userId);
+}
+
+function maybeUpdateChatThreadTitle(
+  db: Database.Database,
+  chatId: string,
+  userId: string,
+  role: "user" | "assistant",
+  content: string,
+) {
+  if (role !== "user") return;
+  const row = db
+    .prepare("SELECT title FROM chat_threads WHERE id = ? AND user_id = ?")
+    .get(chatId, userId) as { title: string } | undefined;
+  if (!row || (row.title && row.title !== "New chat")) return;
+
+  db.prepare("UPDATE chat_threads SET title = ? WHERE id = ? AND user_id = ?").run(
+    buildChatThreadTitle(content),
+    chatId,
+    userId,
+  );
+}
+
+export function listMessages(agentId: string, userId: string, chatId?: string): ChatMessage[] {
+  const thread = chatId ? getChatThread(agentId, userId, chatId) : getOrCreateLatestChatThread(agentId, userId);
+  if (!thread) return [];
+
   const db = getDb();
   const rows = db
     .prepare(
@@ -1785,9 +2034,10 @@ export function listMessages(agentId: string, userId: string): ChatMessage[] {
        FROM chat_messages
        INNER JOIN agents ON agents.id = chat_messages.agent_id
        WHERE chat_messages.agent_id = ? AND agents.owner_user_id = ?
+         AND chat_messages.chat_id = ?
        ORDER BY chat_messages.created_at ASC, chat_messages.rowid ASC`,
     )
-    .all(agentId, userId) as ChatMessageRow[];
+    .all(agentId, userId, thread.id) as ChatMessageRow[];
 
   return rows.map((row) => {
     const metadata = parseMessageMetadata(row);
@@ -1796,6 +2046,7 @@ export function listMessages(agentId: string, userId: string): ChatMessage[] {
     return {
       id: row.id,
       agentId: row.agent_id,
+      ...(row.chat_id ? { chatId: row.chat_id } : {}),
       role: row.role,
       content: row.content,
       ...(metadata.toolTrace ? { toolTrace: metadata.toolTrace } : {}),
@@ -1811,9 +2062,14 @@ export function appendMessage(
   role: "user" | "assistant",
   content: string,
   metadata?: { toolTrace?: ToolTraceEntry[]; taskRunId?: string },
+  chatId?: string,
 ): ChatMessage {
   if (!getAgent(agentId, userId)) {
     throw new Error("agent_not_found");
+  }
+  const thread = chatId ? getChatThread(agentId, userId, chatId) : getOrCreateLatestChatThread(agentId, userId);
+  if (!thread) {
+    throw new Error("chat_thread_not_found");
   }
 
   const db = getDb();
@@ -1822,14 +2078,17 @@ export function appendMessage(
   const metadataJson = buildMessageMetadataJson(metadata);
 
   db.prepare(
-    `INSERT INTO chat_messages (id, agent_id, role, content, metadata, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(id, agentId, role, content, metadataJson, createdAt);
+    `INSERT INTO chat_messages (id, agent_id, chat_id, role, content, metadata, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, agentId, thread.id, role, content, metadataJson, createdAt);
+  maybeUpdateChatThreadTitle(db, thread.id, userId, role, content);
+  touchChatThread(db, thread.id, userId, createdAt);
 
   const taskRun = metadata?.taskRunId ? getTaskRunSnapshot(metadata.taskRunId, userId) : null;
   return {
     id,
     agentId,
+    chatId: thread.id,
     role,
     content,
     ...(metadata?.toolTrace && metadata.toolTrace.length > 0 ? { toolTrace: metadata.toolTrace } : {}),
@@ -1845,48 +2104,64 @@ export function updateMessage(
   role: "user" | "assistant",
   content: string,
   metadata?: { toolTrace?: ToolTraceEntry[]; taskRunId?: string },
+  chatId?: string,
 ): boolean {
   const db = getDb();
   const metadataJson = buildMessageMetadataJson(metadata);
+  const threadFilter = chatId ? "AND chat_messages.chat_id = ?" : "";
+  const params = chatId
+    ? [content, metadataJson, messageId, agentId, role, chatId, userId]
+    : [content, metadataJson, messageId, agentId, role, userId];
   const info = db.prepare(
     `UPDATE chat_messages
      SET content = ?, metadata = ?
      WHERE id = ?
        AND agent_id = ?
        AND role = ?
+       ${threadFilter}
        AND EXISTS (
          SELECT 1 FROM agents
          WHERE agents.id = chat_messages.agent_id
            AND agents.owner_user_id = ?
        )`,
-  ).run(content, metadataJson, messageId, agentId, role, userId);
+  ).run(...params);
+
+  if (info.changes > 0 && chatId) {
+    touchChatThread(db, chatId, userId);
+  }
 
   return info.changes > 0;
 }
 
-export function clearMessages(agentId: string, userId: string): void {
+export function clearMessages(agentId: string, userId: string, chatId?: string): void {
   if (!getAgent(agentId, userId)) {
     return;
   }
 
   const db = getDb();
-  db.prepare("DELETE FROM chat_messages WHERE agent_id = ?").run(agentId);
-  db.prepare("DELETE FROM task_runs WHERE agent_id = ? AND user_id = ?").run(agentId, userId);
+  const thread = chatId ? getChatThread(agentId, userId, chatId) : getOrCreateLatestChatThread(agentId, userId);
+  if (!thread) return;
+  db.prepare("DELETE FROM chat_messages WHERE agent_id = ? AND chat_id = ?").run(agentId, thread.id);
+  db.prepare("DELETE FROM task_runs WHERE agent_id = ? AND user_id = ? AND chat_id = ?").run(agentId, userId, thread.id);
+  touchChatThread(db, thread.id, userId);
 }
 
 export function truncateMessagesFrom(
   agentId: string,
   userId: string,
   messageId: string,
+  chatId?: string,
 ): boolean {
   if (!getAgent(agentId, userId)) return false;
+  const thread = chatId ? getChatThread(agentId, userId, chatId) : getOrCreateLatestChatThread(agentId, userId);
+  if (!thread) return false;
 
   const db = getDb();
   const anchor = db
     .prepare(
-      "SELECT created_at, rowid FROM chat_messages WHERE id = ? AND agent_id = ?",
+      "SELECT created_at, rowid FROM chat_messages WHERE id = ? AND agent_id = ? AND chat_id = ?",
     )
-    .get(messageId, agentId) as { created_at: number; rowid: number } | undefined;
+    .get(messageId, agentId, thread.id) as { created_at: number; rowid: number } | undefined;
 
   if (!anchor) return false;
 
@@ -1894,9 +2169,14 @@ export function truncateMessagesFrom(
     .prepare(
       `DELETE FROM chat_messages
        WHERE agent_id = ?
+         AND chat_id = ?
          AND (created_at > ? OR (created_at = ? AND rowid >= ?))`,
     )
-    .run(agentId, anchor.created_at, anchor.created_at, anchor.rowid);
+    .run(agentId, thread.id, anchor.created_at, anchor.created_at, anchor.rowid);
+
+  if (info.changes > 0) {
+    touchChatThread(db, thread.id, userId);
+  }
 
   return info.changes > 0;
 }

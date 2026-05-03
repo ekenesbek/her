@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import fs, { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -19,10 +20,77 @@ export const COMMON_EXTENSION_PATHS = [
 export const META_HOME = process.env.META_HOME || path.join(os.homedir(), ".meta");
 export const MANAGED_CHROME_PROFILE = path.join(META_HOME, "chrome-profile");
 export const MANAGED_CHROME_PID_FILE = path.join(META_HOME, "chrome.pid");
-export const MANAGED_CHROME_BIN =
-  process.env.MANAGED_CHROME_BIN ||
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+export const CHROME_MCP_AUTO_ACCEPT_FILE = path.join(META_HOME, "chrome-mcp-auto-accept.json");
+export const MANAGED_CHROME_BIN = process.env.MANAGED_CHROME_BIN || findManagedChromeBinary();
 export const MANAGED_CHROME_DEBUG_PORT = Number(process.env.MANAGED_CHROME_DEBUG_PORT || 9222);
+export const DEFAULT_CHROME_MCP_EXTENSION_ID = "hbdgbgagpkpjffpklnamcljpakneikee";
+export const CHROME_MCP_EXTENSION_ID =
+  process.env.CHROME_MCP_EXTENSION_ID || findChromeMcpExtensionId() || DEFAULT_CHROME_MCP_EXTENSION_ID;
+
+export const MANAGED_CHROME_LOADS_UNPACKED_EXTENSIONS = !/Google Chrome\.app\/Contents\/MacOS\/Google Chrome$/.test(
+  MANAGED_CHROME_BIN,
+);
+
+function findManagedChromeBinary() {
+  const candidates = [
+    path.join(
+      APP_ROOT,
+      ".data",
+      "browsers",
+      "chrome",
+      "mac_arm-*",
+      "chrome-mac-arm64",
+      "Google Chrome for Testing.app",
+      "Contents",
+      "MacOS",
+      "Google Chrome for Testing",
+    ),
+    "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  ];
+
+  for (const candidate of candidates) {
+    const resolved = resolveGlobCandidate(candidate);
+    if (resolved) return resolved;
+  }
+
+  return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+}
+
+function resolveGlobCandidate(candidate) {
+  if (!candidate.includes("*")) return existsSync(candidate) ? candidate : null;
+
+  const parts = candidate.split(path.sep);
+  const wildcardIndex = parts.findIndex((part) => part.includes("*"));
+  if (wildcardIndex < 0) return existsSync(candidate) ? candidate : null;
+
+  const base = parts.slice(0, wildcardIndex).join(path.sep) || path.sep;
+  const rest = parts.slice(wildcardIndex + 1);
+  if (!existsSync(base)) return null;
+
+  const pattern = new RegExp(`^${parts[wildcardIndex].replace(/\*/g, ".*")}$`);
+  const entries = fsReaddirSafe(base)
+    .filter((entry) => pattern.test(entry))
+    .sort()
+    .reverse();
+
+  for (const entry of entries) {
+    const resolved = path.join(base, entry, ...rest);
+    if (existsSync(resolved)) return resolved;
+  }
+
+  return null;
+}
+
+function fsReaddirSafe(dir) {
+  try {
+    return fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
 
 export function ensureMetaHome() {
   if (!existsSync(META_HOME)) mkdirSync(META_HOME, { recursive: true });
@@ -88,6 +156,33 @@ export function findChromeMcpExtensionPath() {
   return COMMON_EXTENSION_PATHS.find((extensionPath) =>
     existsSync(path.join(extensionPath, "manifest.json")),
   ) ?? null;
+}
+
+export function chromeExtensionIdFromKey(key) {
+  if (!key || typeof key !== "string") return null;
+  try {
+    const der = Buffer.from(key, "base64");
+    if (!der.length) return null;
+    const hash = createHash("sha256").update(der).digest("hex").slice(0, 32);
+    return hash
+      .split("")
+      .map((char) => String.fromCharCode("a".charCodeAt(0) + Number.parseInt(char, 16)))
+      .join("");
+  } catch {
+    return null;
+  }
+}
+
+export function findChromeMcpExtensionId() {
+  const extensionPath = findChromeMcpExtensionPath();
+  if (!extensionPath) return null;
+
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(extensionPath, "manifest.json"), "utf8"));
+    return chromeExtensionIdFromKey(manifest.key);
+  } catch {
+    return null;
+  }
 }
 
 export async function pingChromeMcp(url = CHROME_MCP_URL) {

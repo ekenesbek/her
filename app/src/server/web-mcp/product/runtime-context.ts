@@ -7,11 +7,25 @@ import {
   summarizeWebSiteFlowHints,
   summarizeWebSitePagePatterns,
 } from "./storage";
+import { rankWebSitesForGoal } from "./runtime-context-ranking.mjs";
 
-export function buildWebMcpRuntimeContext(userId: string, autoRecording: boolean) {
+type WebMcpRuntimeContextOptions = {
+  autoRecording: boolean;
+  goal?: string;
+};
+
+export function buildWebMcpRuntimeContext(
+  userId: string,
+  options: boolean | WebMcpRuntimeContextOptions,
+) {
+  const { autoRecording, goal } =
+    typeof options === "boolean" ? { autoRecording: options, goal: "" } : options;
   const sites = listWebSites(userId).slice(0, 10);
+  const detailedSites = rankWebSitesForGoal(sites, goal, 3);
+  const detailedSiteKeys = new Set(detailedSites.map((site) => site.siteKey));
   const commonMemory = clipWebMemoryForPrompt(
-    extractTimestampedMemoryEntries(readOrInitCommonWebMemory(userId)) || "(none yet)",
+    extractTimestampedMemoryEntries(readOrInitCommonWebMemory(userId), 8) || "(none yet)",
+    1_500,
   );
   const lines = [
     "Web MCP memory is available for browser/web tasks.",
@@ -24,7 +38,7 @@ export function buildWebMcpRuntimeContext(userId: string, autoRecording: boolean
     "Goal-directed browser loop: set a short milestone goal, observe the page with screenshot/read_page, identify visible semantic actions, choose the action most likely to move toward the final page, execute it, then repeat on the next page.",
     "Before clicking, semantic-search the current page actions and known flow hints by goal terms, action label, role, href, and previous target page. Prefer known observed flows, but verify the current page before acting.",
     "If a remembered flow fails because the action is missing, disabled, stale, or the destination is different, fallback to screenshot + interactive read_page, make a new page plan, and update the flow through normal recording.",
-    "Before revisiting a site, use the known Web MCP site index below to avoid rediscovering the same navigation and facts.",
+    "Before revisiting a site, use the goal-focused Web MCP hints below to avoid rediscovering the same navigation and facts.",
     "Use each site's category and tags to choose likely flows, tools, and safety rules. For example taxi/maps tasks are route/ETA/price flows, shopping/delivery tasks are commerce flows, and mail/calendar/chat tasks are logged-in account flows.",
     "Known page patterns are canonical instructions, not a log of every URL. Treat URLs that differ only by volatile route/map/search state as the same page pattern and update the existing snapshot.",
     "Use common Web MCP memory for durable cross-site facts such as home/work address, city, transport preferences, preferred services, and recurring constraints.",
@@ -34,15 +48,16 @@ export function buildWebMcpRuntimeContext(userId: string, autoRecording: boolean
     "To update common Web MCP memory, include a hidden tagged block in the final answer: <remember-web-common>short durable fact</remember-web-common>. The app strips the tag and mirrors the fact into identity user.md.",
     "To update per-site memory, include: <remember-web-site url=\"https://example.com\" title=\"short label\">short site-specific fact</remember-web-site>. Use the site's origin or current page URL.",
     "Do not store passwords, tokens, cookies, MFA codes, payment card data, or one-time page state in Web MCP memory.",
+    goal ? `Current task goal for Web MCP retrieval: ${goal.slice(0, 500)}` : null,
     "=== common.md durable entries ===",
     commonMemory,
     "=== end common.md durable entries ===",
-  ];
+  ].filter(Boolean);
 
   if (sites.length === 0) {
     lines.push("Known Web MCP sites: none yet.");
   } else {
-    lines.push("Known Web MCP sites:");
+    lines.push("Known Web MCP site index (compact):");
     for (const site of sites) {
       lines.push(
         [
@@ -54,24 +69,32 @@ export function buildWebMcpRuntimeContext(userId: string, autoRecording: boolean
           `edges=${site.edgeCount}`,
           `notes=${site.noteCount}`,
           `lastVisit=${site.lastVisitAt ? new Date(site.lastVisitAt).toISOString() : "never"}`,
-          `seed=${site.seedUrl}`,
-          `memoryFile=${site.memoryFile}`,
+          detailedSiteKeys.has(site.siteKey) ? "detail=below" : null,
         ].join("; "),
       );
+    }
+
+    if (detailedSites.length > 0) {
+      lines.push("Goal-focused Web MCP details for likely relevant sites:");
+    }
+
+    for (const site of detailedSites) {
+      lines.push(`Site: ${site.primaryHost}; label=${site.label}; category=${site.category}; siteKey=${site.siteKey}`);
       const siteMemory = site.siteKey
-        ? extractTimestampedMemoryEntries(readOrInitWebSiteMemory(userId, site.siteKey) ?? "", 8)
+        ? extractTimestampedMemoryEntries(readOrInitWebSiteMemory(userId, site.siteKey) ?? "", 4)
         : "";
       if (siteMemory) {
-        lines.push(clipWebMemoryForPrompt(indentBlock(siteMemory), 2_000));
+        lines.push("  Durable site memory:");
+        lines.push(clipWebMemoryForPrompt(indentBlock(siteMemory), 700));
       }
-      const pagePatterns = summarizeWebSitePagePatterns(userId, site.siteKey, 5);
+      const pagePatterns = summarizeWebSitePagePatterns(userId, site.siteKey, 3);
       if (pagePatterns.length > 0) {
         lines.push("  Known page patterns:");
         for (const pattern of pagePatterns) {
           lines.push(`  - ${pattern}`);
         }
       }
-      const flowHints = summarizeWebSiteFlowHints(userId, site.siteKey, 6);
+      const flowHints = summarizeWebSiteFlowHints(userId, site.siteKey, 4);
       if (flowHints.length > 0) {
         lines.push("  Known flow hints:");
         for (const hint of flowHints) {
