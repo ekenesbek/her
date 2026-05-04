@@ -46,6 +46,7 @@ def summarize_locally(transcript: str) -> SummaryResponse:
     return SummaryResponse(
         title=make_title(transcript),
         overview=overview or "No transcript content was available to summarize.",
+        keyTopics=make_key_topics(transcript, sentences),
         decisions=extract(sentences, DECISION_KEYWORDS) or ["No explicit decisions detected."],
         actionItems=extract(sentences, ACTION_KEYWORDS) or ["No explicit action items detected."],
         followUps=extract(sentences, FOLLOW_UP_KEYWORDS) or ["No follow-ups detected."],
@@ -85,3 +86,17 @@ def make_title(transcript: str) -> str:
     words = transcript.split()
     return " ".join(words[:6]) if words else "Meeting summary"
 
+
+def make_key_topics(transcript: str, sentences: list[str]) -> list[str]:
+    counts: dict[str, int] = {}
+    for raw_word in transcript.lower().replace("\n", " ").split():
+        word = "".join(char for char in raw_word if char.isalnum())
+        if len(word) <= 3:
+            continue
+        counts[word] = counts.get(word, 0) + 1
+
+    topics = [
+        word
+        for word, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:4]
+    ]
+    return topics or sentences[:3]

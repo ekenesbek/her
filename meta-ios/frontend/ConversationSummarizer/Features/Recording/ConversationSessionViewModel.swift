@@ -9,12 +9,16 @@ final class ConversationSessionViewModel: ObservableObject {
     @Published var transcript = ""
     @Published private(set) var summary: MeetingSummary?
     @Published private(set) var errorMessage: String?
+    @Published private(set) var transcriptLanguage: String?
+    @Published private(set) var transcriptDurationSeconds: Double?
+    @Published private(set) var audioLevel: Double = 0
 
     private let recorder: MeetingRecorder
     private let transcriber: SpeechTranscriber
     private let summaryService: SummaryService
     private let meetingProcessor: MeetingProcessingService?
     private var timer: Timer?
+    private var meterTimer: Timer?
 
     init(
         recorder: MeetingRecorder,
@@ -30,10 +34,10 @@ final class ConversationSessionViewModel: ObservableObject {
 
     var primaryButtonTitle: String {
         switch phase {
-        case .idle, .completed, .failed:
+        case .idle, .transcriptReady, .completed, .failed:
             return "Start Recording"
         case .recording:
-            return "Stop and Summarize"
+            return "Stop Recording"
         case .transcribing:
             return "Transcribing..."
         case .summarizing:
@@ -45,8 +49,21 @@ final class ConversationSessionViewModel: ObservableObject {
         switch phase {
         case .transcribing, .summarizing:
             return false
-        case .idle, .recording, .completed, .failed:
+        case .idle, .recording, .transcriptReady, .completed, .failed:
             return true
+        }
+    }
+
+    var canGenerateSummary: Bool {
+        !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && summary == nil && phase != .recording && phase != .transcribing && phase != .summarizing
+    }
+
+    var summaryButtonTitle: String {
+        switch phase {
+        case .summarizing:
+            return "Generating summary..."
+        default:
+            return summary == nil ? "Generate summary" : "Summary ready"
         }
     }
 
@@ -58,60 +75,83 @@ final class ConversationSessionViewModel: ObservableObject {
 
     func primaryAction() {
         switch phase {
-        case .idle, .completed, .failed:
+        case .idle, .transcriptReady, .completed, .failed:
             Task { await startRecording() }
         case .recording:
-            Task { await stopAndSummarize() }
+            Task { await stopAndTranscribe() }
         case .transcribing, .summarizing:
             break
         }
     }
 
-    private func startRecording() async {
+    @discardableResult
+    func startRecording() async -> Bool {
         errorMessage = nil
         summary = nil
         transcript = ""
+        transcriptLanguage = nil
+        transcriptDurationSeconds = nil
 
         let micAllowed = await recorder.requestPermission()
         guard micAllowed else {
             fail("Microphone permission is required to record meetings.")
-            return
+            return false
         }
 
         if meetingProcessor == nil {
             let speechAllowed = await transcriber.requestAuthorization()
             guard speechAllowed else {
                 fail("Speech Recognition permission is required to transcribe meetings.")
-                return
+                return false
             }
         }
 
         do {
             _ = try recorder.start()
             activeInputName = recorder.activeInputName
+            audioLevel = 0
             elapsedSeconds = 0
             phase = .recording
             startTimer()
+            return true
         } catch {
             fail(error.localizedDescription)
+            return false
         }
     }
 
-    private func stopAndSummarize() async {
+    func stopAndTranscribe() async {
         stopTimer()
 
         do {
             let recordingURL = try recorder.stop()
             phase = .transcribing
             if let meetingProcessor {
-                let result = try await meetingProcessor.process(recordingURL: recordingURL)
+                let result = try await meetingProcessor.transcribe(recordingURL: recordingURL)
                 transcript = result.transcript
-                summary = result.summary
+                transcriptLanguage = result.language
+                transcriptDurationSeconds = result.durationSeconds
             } else {
                 transcript = try await transcriber.transcribe(fileURL: recordingURL)
-                phase = .summarizing
-                summary = try await summaryService.summarize(transcript: transcript)
             }
+            if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                fail("Transcription finished, but no speech was detected.")
+                return
+            }
+            phase = .transcriptReady
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    func generateSummary() async {
+        guard canGenerateSummary else {
+            return
+        }
+
+        do {
+            phase = .summarizing
+            summary = try await summaryService.summarize(transcript: transcript)
             phase = .completed
         } catch {
             fail(error.localizedDescription)
@@ -125,11 +165,24 @@ final class ConversationSessionViewModel: ObservableObject {
                 self?.elapsedSeconds += 1
             }
         }
+
+        meterTimer?.invalidate()
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else {
+                    return
+                }
+                self.audioLevel = self.recorder.currentAudioLevel
+            }
+        }
     }
 
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        audioLevel = 0
     }
 
     private func fail(_ message: String) {
@@ -143,6 +196,7 @@ enum RecordingPhase: Equatable {
     case idle
     case recording
     case transcribing
+    case transcriptReady
     case summarizing
     case completed
     case failed
@@ -155,6 +209,8 @@ enum RecordingPhase: Equatable {
             return "Recording"
         case .transcribing:
             return "Transcribing"
+        case .transcriptReady:
+            return "Transcript ready"
         case .summarizing:
             return "Summarizing"
         case .completed:

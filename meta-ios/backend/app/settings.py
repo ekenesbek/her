@@ -11,13 +11,14 @@ class Settings(BaseSettings):
     port: int = 8787
     data_dir: Path = Path("./data")
 
-    whisper_model: str = "base"
+    whisper_model: str = "turbo"
     whisper_device: str = "auto"
     whisper_compute_type: str = "default"
     whisper_language: str | None = None
 
     openai_api_key: str | None = None
-    openai_summary_model: str = "gpt-5-nano"
+    openai_base_url: str | None = None
+    openai_summary_model: str = "gpt-oss"
 
 
 @lru_cache

@@ -93,11 +93,17 @@ final class WearablesBridge: ObservableObject {
     }
 
     func refreshAudioRoute() {
-        do {
-            try configureAudioSessionForDiscovery(activate: false)
-        } catch {
-            state = .failed(error.localizedDescription)
-            return
+        refreshAudioRoute(configureSession: true)
+    }
+
+    func refreshAudioRoute(configureSession: Bool) {
+        if configureSession {
+            do {
+                try configureAudioSessionForDiscovery(activate: false)
+            } catch {
+                state = .failed(error.localizedDescription)
+                return
+            }
         }
 
         audioRoute = Self.makeAudioRouteSnapshot()
@@ -233,19 +239,12 @@ final class WearablesBridge: ObservableObject {
 
     func connectDetectedAudioRoute() {
         do {
-            try configureAudioSessionForDiscovery(activate: true)
-
-            let session = AVAudioSession.sharedInstance()
-            if let input = Self.preferredBluetoothInput(in: session) {
-                try session.setPreferredInput(input)
-            }
+            try configureAudioSessionForDiscovery(activate: false)
 
             audioRoute = Self.makeAudioRouteSnapshot()
 
-            if let device = audioRoute.primaryDetectedDevice, device.supportsInput {
-                state = .sessionStarted(device)
-            } else if let device = audioRoute.primaryDetectedDevice {
-                state = .failed("\(device.name) is connected as audio output only. Select the hands-free Bluetooth route for microphone input.")
+            if let device = audioRoute.primaryDetectedDevice {
+                state = .detected(device)
             } else {
                 state = .failed("No glasses audio route detected. Pair the glasses in iOS Bluetooth, then refresh.")
             }
@@ -261,7 +260,7 @@ final class WearablesBridge: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshAudioRoute()
+                self?.refreshAudioRoute(configureSession: false)
             }
         }
     }
@@ -407,15 +406,6 @@ final class WearablesBridge: ObservableObject {
         )
     }
 
-    private static func preferredBluetoothInput(in session: AVAudioSession) -> AVAudioSessionPortDescription? {
-        let inputs = session.availableInputs ?? []
-        return inputs.first { input in
-            isBluetooth(input.portType) && isLikelyGlassesName(input.portName)
-        } ?? inputs.first { input in
-            isBluetooth(input.portType)
-        }
-    }
-
     private static func isBluetooth(_ portType: AVAudioSession.Port) -> Bool {
         switch portType {
         case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE:
@@ -528,9 +518,9 @@ enum WearablesState: Equatable {
             return "Finish the Meta AI app flow and return to this app."
         case let .sessionStarted(device):
             if let device {
-                return "Recording will use \(device.name) when iOS keeps it as the active microphone route."
+                return "\(device.name) session is active. Recording uses the glasses microphone when Bluetooth input is available."
             }
-            return "Recording will use the current iOS audio route."
+            return "Glasses session is active. Recording uses glasses when Bluetooth input is available."
         case let .failed(message):
             return message
         }

@@ -236,8 +236,10 @@ struct ContentView: View {
     @ObservedObject var settings: AppSettingsStore
     @StateObject private var viewModel: ConversationSessionViewModel
     @StateObject private var liveContext = LiveContextStore()
+    @StateObject private var meetingsStore = MeetingsStore()
     @State private var route: MainRoute = .home
     @State private var recordingMuted = false
+    @State private var selectedMeeting: StoredMeeting?
 
     init(wearablesBridge: WearablesBridge, settings: AppSettingsStore) {
         self.wearablesBridge = wearablesBridge
@@ -264,6 +266,7 @@ struct ContentView: View {
                         bridge: wearablesBridge,
                         settings: settings,
                         liveContext: liveContext,
+                        meetings: meetingsStore.meetings,
                         onSettings: {
                             route = .meta
                         },
@@ -277,6 +280,15 @@ struct ContentView: View {
                         },
                         onMeta: {
                             route = .meta
+                        },
+                        onSelectConversation: { meeting in
+                            selectedMeeting = meeting
+                            route = .detail
+                        },
+                        onGenerateSummary: {
+                            Task { @MainActor in
+                                await viewModel.generateSummary()
+                            }
                         }
                     )
                 case .pair:
@@ -297,14 +309,19 @@ struct ContentView: View {
                     )
                 case .conversations:
                     ExactConversationsScreen(
+                        meetings: meetingsStore.meetings,
                         onBackHome: { route = .home },
-                        onSelect: { route = .detail },
+                        onSelect: { meeting in
+                            selectedMeeting = meeting
+                            route = .detail
+                        },
                         onRecord: showRecording,
                         onMemory: { route = .memory },
                         onMeta: { route = .meta }
                     )
                 case .detail:
                     ExactConversationDetailScreen(
+                        meeting: selectedMeeting,
                         onBack: { route = .conversations }
                     )
                 case .memory:
@@ -320,7 +337,12 @@ struct ContentView: View {
                         viewModel: viewModel,
                         liveContext: liveContext,
                         muted: $recordingMuted,
-                        onStop: stopRecordingAndReturnHome,
+                        onStop: stopRecordingAndStay,
+                        onGenerateSummary: {
+                            Task { @MainActor in
+                                await viewModel.generateSummary()
+                            }
+                        },
                         onDismiss: { route = .home }
                     )
                 case .meta:
@@ -342,15 +364,33 @@ struct ContentView: View {
         .navigationViewStyle(.stack)
         .onAppear {
             liveContext.refreshIfAuthorized()
+            Task { @MainActor in
+                await meetingsStore.refresh()
+            }
         }
     }
 
     private func showRecording() {
-        if viewModel.phase != .recording, viewModel.canTapPrimaryButton {
-            viewModel.primaryAction()
+        if viewModel.phase == .recording {
+            recordingMuted = false
+            route = .recording
+            return
         }
-        recordingMuted = false
-        route = .recording
+
+        guard viewModel.canTapPrimaryButton else {
+            return
+        }
+
+        Task { @MainActor in
+            wearablesBridge.refreshAudioRoute()
+            let didStart = await viewModel.startRecording()
+            guard didStart else {
+                return
+            }
+
+            recordingMuted = false
+            route = .recording
+        }
     }
 
     private func showDeviceFlow() {
@@ -362,11 +402,14 @@ struct ContentView: View {
         }
     }
 
-    private func stopRecordingAndReturnHome() {
-        if viewModel.phase == .recording {
-            viewModel.primaryAction()
+    private func stopRecordingAndStay() {
+        guard viewModel.phase == .recording else {
+            return
         }
-        route = .home
+
+        Task { @MainActor in
+            await viewModel.stopAndTranscribe()
+        }
     }
 }
 
@@ -396,17 +439,15 @@ private struct ExactHomeScreen: View {
     @ObservedObject var bridge: WearablesBridge
     @ObservedObject var settings: AppSettingsStore
     @ObservedObject var liveContext: LiveContextStore
+    let meetings: [StoredMeeting]
     let onSettings: () -> Void
     let onPair: () -> Void
     let onConversations: () -> Void
     let onRecord: () -> Void
     let onMemory: () -> Void
     let onMeta: () -> Void
-
-    private let recent = [
-        ("14:22", "Standup with eng team", "Office · Almaty", "32m", "glasses"),
-        ("11:08", "Walk to the bakery", "Dostyk Ave", "7m", "phone")
-    ]
+    let onSelectConversation: (StoredMeeting) -> Void
+    let onGenerateSummary: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -429,28 +470,27 @@ private struct ExactHomeScreen: View {
                         .minimumScaleFactor(0.8)
                         .padding(.top, 6)
 
-                    Text(isRecording ? "Capturing audio. Tap the centre button again to stop." : "Two new conversations since yesterday. One ask waiting.")
+                    Text(homeDetailText)
                         .font(.system(size: 14, weight: .regular, design: .serif))
                         .italic()
                         .foregroundColor(AppTheme.muted)
                         .lineSpacing(4)
                         .padding(.top, 8)
 
-                    ExactGlassesStatusCard(bridge: bridge, onPair: onPair)
-                        .padding(.top, 18)
-
                     if let errorMessage = viewModel.errorMessage {
                         ErrorBanner(message: errorMessage)
-                            .padding(.top, 14)
+                            .padding(.top, 18)
                     }
 
-                    ExactTodaySnapshot()
+                    if shouldShowCurrentSession {
+                        ExactCurrentSessionCard(viewModel: viewModel, onGenerateSummary: onGenerateSummary)
+                            .padding(.top, 18)
+                    }
+
+                    ExactTodaySnapshot(meetings: meetings, activeElapsedSeconds: isRecording ? viewModel.elapsedSeconds : 0)
                         .padding(.top, 18)
 
-                    ExactRecentList(items: recent, onSelect: onConversations)
-                        .padding(.top, 20)
-
-                    ExactAskSuggestions()
+                    ExactRecentList(items: Array(meetings.prefix(2)), onSelect: onSelectConversation, onSeeAll: onConversations)
                         .padding(.top, 20)
                 }
                 .padding(.horizontal, 22)
@@ -464,6 +504,28 @@ private struct ExactHomeScreen: View {
 
     private var isRecording: Bool {
         viewModel.phase == .recording
+    }
+
+    private var shouldShowCurrentSession: Bool {
+        viewModel.phase == .recording
+            || viewModel.phase == .transcribing
+            || viewModel.phase == .transcriptReady
+            || viewModel.phase == .summarizing
+            || viewModel.summary != nil
+            || !viewModel.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var homeDetailText: String {
+        if isRecording {
+            return "Capturing audio. Stop when the conversation ends."
+        }
+        if viewModel.phase == .transcriptReady {
+            return "Transcript is ready. Generate a summary when you need it."
+        }
+        if meetings.isEmpty {
+            return "No conversations saved yet."
+        }
+        return "\(meetings.count) saved conversation\(meetings.count == 1 ? "" : "s")."
     }
 }
 
@@ -573,25 +635,123 @@ private struct ExactGlassesStatusCard: View {
     }
 }
 
+private struct ExactCurrentSessionCard: View {
+    @ObservedObject var viewModel: ConversationSessionViewModel
+    let onGenerateSummary: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            MonoLabel("current session")
+            WwCard(background: AppTheme.bgSoft, showsBorder: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(title)
+                        .font(.system(size: 18, weight: .medium, design: .serif))
+                        .foregroundColor(AppTheme.fg)
+                    Text(detail)
+                        .font(.system(size: 14, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.muted)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if viewModel.canGenerateSummary || viewModel.phase == .summarizing {
+                        WwPrimaryButton(viewModel.summaryButtonTitle, disabled: !viewModel.canGenerateSummary) {
+                            onGenerateSummary()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var title: String {
+        if let summary = viewModel.summary {
+            return summary.title
+        }
+        switch viewModel.phase {
+        case .recording:
+            return "Recording in progress"
+        case .transcribing:
+            return "Preparing transcript"
+        case .transcriptReady:
+            return "Transcript ready"
+        case .summarizing:
+            return "Generating summary"
+        case .completed:
+            return "Summary ready"
+        case .failed:
+            return "Session needs attention"
+        case .idle:
+            return "No active session"
+        }
+    }
+
+    private var detail: String {
+        if let summary = viewModel.summary {
+            return summary.overview
+        }
+        let trimmedTranscript = viewModel.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTranscript.isEmpty {
+            return trimmedTranscript
+        }
+        if viewModel.phase == .recording {
+            return "Recording through \(viewModel.activeInputName)."
+        }
+        return "Transcript will appear here after recording stops."
+    }
+}
+
 private struct ExactTodaySnapshot: View {
+    let meetings: [StoredMeeting]
+    let activeElapsedSeconds: Int
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             MonoLabel("today, so far")
             WwCard(background: AppTheme.bgSoft, showsBorder: false) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("You spoke with \(Text("3 people").italic()) across 39 minutes. Eng standup landed Q2 priorities — one item is for you.")
+                    Text(summaryText)
                         .font(.system(size: 16, weight: .regular, design: .serif))
                         .foregroundColor(AppTheme.fg)
                         .lineSpacing(5)
                     DividerLine()
                     HStack(spacing: 14) {
-                        ExactMetric(value: "39m", label: "recorded")
-                        ExactMetric(value: "3", label: "people")
-                        ExactMetric(value: "1", label: "follow-up")
+                        ExactMetric(value: durationText, label: "recorded")
+                        ExactMetric(value: "\(todayMeetings.count)", label: "saved")
+                        ExactMetric(value: "\(followUpCount)", label: "follow-up")
                     }
                 }
             }
         }
+    }
+
+    private var todayMeetings: [StoredMeeting] {
+        meetings.filter { Calendar.current.isDateInToday($0.createdAt) }
+    }
+
+    private var recordedSeconds: Int {
+        todayMeetings.reduce(activeElapsedSeconds) { total, meeting in
+            total + Int((meeting.durationSeconds ?? 0).rounded())
+        }
+    }
+
+    private var followUpCount: Int {
+        todayMeetings.reduce(0) { $0 + $1.summary.followUps.count }
+    }
+
+    private var durationText: String {
+        guard recordedSeconds > 0 else {
+            return "0m"
+        }
+        let minutes = recordedSeconds / 60
+        return minutes > 0 ? "\(minutes)m" : "\(recordedSeconds)s"
+    }
+
+    private var summaryText: String {
+        if todayMeetings.isEmpty && activeElapsedSeconds == 0 {
+            return "No conversations recorded today."
+        }
+        return "\(todayMeetings.count) saved conversation\(todayMeetings.count == 1 ? "" : "s") today across \(durationText)."
     }
 }
 
@@ -610,15 +770,16 @@ private struct ExactMetric: View {
 }
 
 private struct ExactRecentList: View {
-    let items: [(String, String, String, String, String)]
-    let onSelect: () -> Void
+    let items: [StoredMeeting]
+    let onSelect: (StoredMeeting) -> Void
+    let onSeeAll: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 MonoLabel("recent")
                 Spacer()
-                Button(action: onSelect) {
+                Button(action: onSeeAll) {
                     Text("see all →")
                         .font(.system(size: 12, weight: .regular, design: .serif))
                         .italic()
@@ -629,74 +790,27 @@ private struct ExactRecentList: View {
 
             WwCard(padding: 0) {
                 VStack(spacing: 0) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                        Button(action: onSelect) {
-                            HStack(alignment: .center, spacing: 12) {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(item.0)
-                                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                                        .foregroundColor(AppTheme.fg)
-                                    Text(item.4.uppercased())
-                                        .font(.system(size: 9, weight: .regular, design: .monospaced))
-                                        .foregroundColor(AppTheme.dim)
-                                }
-                                .frame(width: 50, alignment: .leading)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.1)
-                                        .font(.system(size: 14, weight: .medium, design: .serif))
-                                        .foregroundColor(AppTheme.fg)
-                                    Text("\(item.2) · \(item.3)")
-                                        .font(.system(size: 12, weight: .regular, design: .serif))
-                                        .italic()
-                                        .foregroundColor(AppTheme.dim)
-                                }
-                                Spacer()
-                                Image(systemName: "arrow.right")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundColor(AppTheme.fg)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 12)
-                        }
-                        .buttonStyle(PlainButtonStyle())
-
-                        if index < items.count - 1 {
-                            DividerLine()
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct ExactAskSuggestions: View {
-    private let suggestions = [
-        "what did anya decide yesterday?",
-        "remind me about mom's birthday on saturday",
-        "summarize today's standup in 3 lines"
-    ]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            MonoLabel("ask meta")
-            VStack(spacing: 8) {
-                ForEach(suggestions, id: \.self) { suggestion in
-                    HStack(spacing: 10) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(AppTheme.fg)
-                        Text(suggestion)
-                            .font(.system(size: 13.5, weight: .regular, design: .serif))
+                    if items.isEmpty {
+                        Text("No saved conversations yet.")
+                            .font(.system(size: 14, weight: .regular, design: .serif))
                             .italic()
                             .foregroundColor(AppTheme.muted)
-                        Spacer()
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            Button(action: { onSelect(item) }) {
+                                ConversationListRow(item: item)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 12)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+
+                            if index < items.count - 1 {
+                                DividerLine()
+                            }
+                        }
                     }
-                    .padding(.horizontal, 14)
-                    .frame(minHeight: 42)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bg))
-                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(AppTheme.border, lineWidth: 1))
                 }
             }
         }
@@ -912,19 +1026,12 @@ private struct ExactDeviceConnectedScreen: View {
 }
 
 private struct ExactConversationsScreen: View {
+    let meetings: [StoredMeeting]
     let onBackHome: () -> Void
-    let onSelect: () -> Void
+    let onSelect: (StoredMeeting) -> Void
     let onRecord: () -> Void
     let onMemory: () -> Void
     let onMeta: () -> Void
-
-    private let items: [ConversationMock] = [
-        .init(time: "14:22", date: "today", title: "Standup with eng team", loc: "Office · Almaty", dur: "32m", src: "glasses", tags: ["work", "q2 plan"]),
-        .init(time: "11:08", date: "today", title: "Walk to the bakery", loc: "Dostyk Ave", dur: "7m", src: "phone", tags: ["voice note"]),
-        .init(time: "20:45", date: "yesterday", title: "Coffee with Anya", loc: "Coffee Boom", dur: "21m", src: "glasses", tags: ["friend", "gift idea"]),
-        .init(time: "09:12", date: "yesterday", title: "Morning thoughts", loc: "Home", dur: "4m", src: "phone", tags: ["journal"]),
-        .init(time: "16:30", date: "apr 29", title: "Doctor Karimov", loc: "Mediker clinic", dur: "18m", src: "phone", tags: ["health", "sensitive"])
-    ]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -946,7 +1053,7 @@ private struct ExactConversationsScreen: View {
 
             HStack(spacing: 10) {
                 MetaOrb(size: 16)
-                Text("ask meta about any of these...")
+                Text(items.isEmpty ? "record a conversation to start the log." : "open a conversation to review transcript, summary, and chat.")
                     .font(.system(size: 13.5, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.muted)
@@ -960,22 +1067,27 @@ private struct ExactConversationsScreen: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    ForEach(groupedItems.indices, id: \.self) { groupIndex in
-                        let group = groupedItems[groupIndex]
-                        Text(group.date)
-                            .font(.system(size: 13, weight: .regular, design: .serif))
-                            .italic()
-                            .foregroundColor(AppTheme.dim)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 14)
-                            .padding(.bottom, 6)
-                            .overlay(alignment: .bottom) { DividerLine() }
+                    if items.isEmpty {
+                        ConversationEmptyState()
+                            .padding(.top, 18)
+                    } else {
+                        ForEach(groupedItems.indices, id: \.self) { groupIndex in
+                            let group = groupedItems[groupIndex]
+                            Text(group.date)
+                                .font(.system(size: 13, weight: .regular, design: .serif))
+                                .italic()
+                                .foregroundColor(AppTheme.dim)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 14)
+                                .padding(.bottom, 6)
+                                .overlay(alignment: .bottom) { DividerLine() }
 
-                        ForEach(group.items) { item in
-                            Button(action: onSelect) {
-                                ConversationListRow(item: item)
+                            ForEach(group.items) { item in
+                                Button(action: { onSelect(item) }) {
+                                    ConversationListRow(item: item)
+                                }
+                                .buttonStyle(PlainButtonStyle())
                             }
-                            .buttonStyle(PlainButtonStyle())
                         }
                     }
                 }
@@ -986,40 +1098,52 @@ private struct ExactConversationsScreen: View {
         }
     }
 
-    private var groupedItems: [(date: String, items: [ConversationMock])] {
-        var result: [(String, [ConversationMock])] = []
+    private var items: [StoredMeeting] {
+        meetings
+    }
+
+    private var groupedItems: [(date: String, items: [StoredMeeting])] {
+        var result: [(String, [StoredMeeting])] = []
         for item in items {
-            if result.last?.0 == item.date {
+            let date = item.displayDate
+            if result.last?.0 == date {
                 result[result.count - 1].1.append(item)
             } else {
-                result.append((item.date, [item]))
+                result.append((date, [item]))
             }
         }
         return result
     }
 }
 
-private struct ConversationMock: Identifiable {
-    let id = UUID()
-    let time: String
-    let date: String
-    let title: String
-    let loc: String
-    let dur: String
-    let src: String
-    let tags: [String]
+private struct ConversationEmptyState: View {
+    var body: some View {
+        WwCard {
+            VStack(alignment: .leading, spacing: 8) {
+                MonoLabel("empty")
+                Text("No backend conversations yet.")
+                    .font(.system(size: 16, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                Text("Saved meetings from the backend will appear here when the database is not empty.")
+                    .font(.system(size: 14, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.muted)
+                    .lineSpacing(4)
+            }
+        }
+    }
 }
 
 private struct ConversationListRow: View {
-    let item: ConversationMock
+    let item: StoredMeeting
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.time)
+                Text(item.displayTime)
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundColor(AppTheme.fg)
-                Text(item.src.uppercased())
+                Text(item.sourceLabel.uppercased())
                     .font(.system(size: 9, weight: .regular, design: .monospaced))
                     .foregroundColor(AppTheme.dim)
             }
@@ -1029,18 +1153,20 @@ private struct ConversationListRow: View {
                 Text(item.title)
                     .font(.system(size: 15, weight: .medium, design: .serif))
                     .foregroundColor(AppTheme.fg)
-                Text("\(item.loc) · \(item.dur)")
+                Text("\(item.displayLocation) · \(item.durationText)")
                     .font(.system(size: 12, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.dim)
-                HStack(spacing: 6) {
-                    ForEach(item.tags, id: \.self) { tag in
-                        Text(tag.uppercased())
-                            .font(.system(size: 9, weight: .regular, design: .monospaced))
-                            .foregroundColor(AppTheme.fg)
-                            .padding(.horizontal, 9)
-                            .frame(height: 20)
-                            .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
+                if !item.tags.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(item.tags, id: \.self) { tag in
+                            Text(tag.uppercased())
+                                .font(.system(size: 9, weight: .regular, design: .monospaced))
+                                .foregroundColor(AppTheme.fg)
+                                .padding(.horizontal, 9)
+                                .frame(height: 20)
+                                .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
+                        }
                     }
                 }
             }
@@ -1055,95 +1181,139 @@ private struct ConversationListRow: View {
     }
 }
 
+private extension StoredMeeting {
+    var displayTime: String {
+        Self.timeFormatter.string(from: createdAt)
+    }
+
+    var displayDate: String {
+        if Calendar.current.isDateInToday(createdAt) {
+            return "today"
+        }
+        if Calendar.current.isDateInYesterday(createdAt) {
+            return "yesterday"
+        }
+        return Self.dateFormatter.string(from: createdAt).lowercased()
+    }
+
+    var tags: [String] {
+        [language, source]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(2)
+            .map { String($0) }
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter
+    }()
+}
+
 private struct ExactConversationDetailScreen: View {
+    let meeting: StoredMeeting?
     let onBack: () -> Void
     private let tabs = ["summary", "transcript", "chat"]
+    @State private var selectedTab = 0
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 10) {
-                    Button(action: onBack) {
-                        Text("←")
-                            .font(.system(size: 22, weight: .regular, design: .serif))
-                            .foregroundColor(AppTheme.fg)
+            detailHeader
+
+            if let meeting {
+                ExactSegmentedTabs(tabs: tabs, selectedIndex: $selectedTab)
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 14)
+
+                if selectedTab == 2 {
+                    ConversationChatPanel(meeting: meeting)
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            if selectedTab == 0 {
+                                SummaryPanel(summary: meeting.summary)
+                            } else {
+                                TranscriptPanel(transcript: meeting.transcript)
+                            }
+                        }
+                        .padding(.horizontal, 22)
+                        .padding(.bottom, 14)
                     }
-                    .buttonStyle(PlainButtonStyle())
-                    MonoLabel("● ray-ban · yesterday 20:45")
                 }
+            } else {
+                ConversationEmptyState()
+                    .padding(.horizontal, 22)
+                Spacer()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var detailHeader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Button(action: onBack) {
+                    Text("←")
+                        .font(.system(size: 22, weight: .regular, design: .serif))
+                        .foregroundColor(AppTheme.fg)
+                }
+                .buttonStyle(PlainButtonStyle())
+                MonoLabel(meeting?.sourceLabel ?? "conversation")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 8)
+
+            Text(meeting?.title ?? "No conversation selected")
+                .font(.system(size: 28, weight: .medium, design: .serif))
+                .italic()
+                .foregroundColor(AppTheme.fg)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 8)
 
-                Text("Coffee with Anya")
-                    .font(.system(size: 28, weight: .medium, design: .serif))
-                    .italic()
-                    .foregroundColor(AppTheme.fg)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
+            if let meeting {
                 HStack(spacing: 14) {
-                    Text("Coffee Boom")
-                        .font(.system(size: 13, weight: .regular, design: .serif))
+                    Text(meeting.displayLocation)
                         .italic()
-                        .foregroundColor(AppTheme.dim)
-                    Text("21 min")
-                        .font(.system(size: 13, weight: .regular, design: .serif))
+                    Text(meeting.durationText)
                         .italic()
-                        .foregroundColor(AppTheme.dim)
-                    Text("3 speakers")
-                        .font(.system(size: 13, weight: .regular, design: .serif))
+                    Text(meeting.displayDate)
                         .italic()
-                        .foregroundColor(AppTheme.dim)
                 }
+                .font(.system(size: 13, weight: .regular, design: .serif))
+                .foregroundColor(AppTheme.dim)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
             }
-            .padding(.horizontal, 22)
-            .padding(.top, 6)
-            .padding(.bottom, 14)
-
-            ExactSegmentedTabs(tabs: tabs)
-                .padding(.horizontal, 22)
-                .padding(.bottom, 14)
-
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 16) {
-                    WwCard(background: AppTheme.bgSoft, showsBorder: false) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            MonoLabel("tldr")
-                            Text("Anya is leaving Yandex for a small startup. She's \(Text("nervous about money.").italic()) Her mom's birthday is Saturday — she wants to give an enamel pin from that shop on Pushkin.")
-                                .font(.system(size: 16, weight: .regular, design: .serif))
-                                .foregroundColor(AppTheme.fg)
-                                .lineSpacing(5)
-                        }
-                    }
-
-                    ExactKeyPoints()
-                    ExactMemoryChips()
-                    ExactTranscriptPreview()
-                }
-                .padding(.horizontal, 22)
-                .padding(.bottom, 14)
-            }
-
-            ExactAskInput()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 22)
+        .padding(.top, 6)
+        .padding(.bottom, 14)
     }
 }
 
 private struct ExactSegmentedTabs: View {
     let tabs: [String]
+    @Binding var selectedIndex: Int
 
     var body: some View {
         HStack(spacing: 0) {
             ForEach(Array(tabs.enumerated()), id: \.offset) { index, tab in
-                Text(tab)
-                    .font(.system(size: 13, weight: .medium, design: .serif))
-                    .italic()
-                    .foregroundColor(index == 0 ? AppTheme.bg : AppTheme.muted)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 34)
-                    .background(Capsule().fill(index == 0 ? AppTheme.fg : Color.clear))
+                Button(action: { selectedIndex = index }) {
+                    Text(tab)
+                        .font(.system(size: 13, weight: .medium, design: .serif))
+                        .italic()
+                        .foregroundColor(index == selectedIndex ? AppTheme.bg : AppTheme.muted)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                        .background(Capsule().fill(index == selectedIndex ? AppTheme.fg : Color.clear))
+                }
+                .buttonStyle(PlainButtonStyle())
             }
         }
         .padding(4)
@@ -1151,117 +1321,137 @@ private struct ExactSegmentedTabs: View {
     }
 }
 
-private struct ExactKeyPoints: View {
-    let points = [
-        ("career", "Anya → startup, joins May 15"),
-        ("money", "worried about runway"),
-        ("gift", "enamel pin shop, Pushkin street"),
-        ("next", "remind you Saturday morning")
-    ]
+private struct ConversationChatPanel: View {
+    let meeting: StoredMeeting
+    @State private var draft = ""
+    @State private var messages: [ConversationChatMessage] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            MonoLabel("key points")
-            WwCard(padding: 0) {
-                VStack(spacing: 0) {
-                    ForEach(Array(points.enumerated()), id: \.offset) { index, point in
-                        HStack(alignment: .top, spacing: 12) {
-                            Text(point.0.uppercased())
-                                .font(.system(size: 10, weight: .regular, design: .monospaced))
-                                .foregroundColor(AppTheme.dim)
-                                .tracking(1.5)
-                                .frame(width: 78, alignment: .leading)
-                            Text(point.1)
-                                .font(.system(size: 13, weight: .regular, design: .serif))
-                                .foregroundColor(AppTheme.fg)
-                                .lineSpacing(3)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 11)
-                        if index < points.count - 1 {
-                            DividerLine()
+        VStack(spacing: 0) {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if messages.isEmpty {
+                        ChatEmptyState()
+                    } else {
+                        ForEach(messages) { message in
+                            ConversationChatBubble(message: message)
                         }
                     }
                 }
+                .padding(.horizontal, 22)
+                .padding(.bottom, 14)
             }
-        }
-    }
-}
 
-private struct ExactMemoryChips: View {
-    let memories = ["anya · changing job", "anya · mom bday saturday", "place · enamel pins on pushkin"]
+            HStack(spacing: 10) {
+                TextField("Ask about this conversation", text: $draft)
+                    .font(.system(size: 14, weight: .regular, design: .serif))
+                    .textFieldStyle(.plain)
+                    .padding(.leading, 16)
+                    .frame(height: 46)
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            MonoLabel("added to memory")
-            FlowWrap(items: memories) { memory in
-                Text("+ \(memory)")
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundColor(AppTheme.fg)
-                    .padding(.horizontal, 11)
-                    .frame(height: 28)
-                    .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
-            }
-        }
-    }
-}
-
-private struct ExactTranscriptPreview: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                MonoLabel("transcript")
-                Spacer()
-                Text("open full →")
-                    .font(.system(size: 12, weight: .regular, design: .serif))
-                    .italic()
-                    .foregroundColor(AppTheme.fg)
-            }
-            WwCard {
-                VStack(alignment: .leading, spacing: 2) {
-                    MonoLabel("20:46 anya")
-                    Text("\"Honestly, I think I'm going to do it. I told them yes this morning.\"")
-                        .font(.system(size: 13.5, weight: .regular, design: .serif))
-                        .foregroundColor(AppTheme.fg)
-                        .lineSpacing(5)
-                    MonoLabel("20:46 you")
-                        .padding(.top, 12)
-                    Text("\"Wait — really? Tell me everything...\"")
-                        .font(.system(size: 13.5, weight: .regular, design: .serif))
-                        .foregroundColor(AppTheme.fg)
-                        .lineSpacing(5)
-                }
-            }
-        }
-    }
-}
-
-private struct ExactAskInput: View {
-    var body: some View {
-        HStack(spacing: 10) {
-            MetaOrb(size: 16)
-            Text("ask about this conversation...")
-                .font(.system(size: 13.5, weight: .regular, design: .serif))
-                .italic()
-                .foregroundColor(AppTheme.dim)
-            Spacer()
-            Circle()
-                .fill(AppTheme.fg)
-                .frame(width: 36, height: 36)
-                .overlay(
-                    Image(systemName: "paperplane")
+                Button(action: send) {
+                    Image(systemName: "paperplane.fill")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(AppTheme.bg)
-                )
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(canSend ? AppTheme.fg : AppTheme.dim))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(!canSend)
+                .padding(.trailing, 6)
+            }
+            .background(Capsule().fill(AppTheme.bgSoft).overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1)))
+            .padding(.horizontal, 22)
+            .padding(.vertical, 12)
+            .overlay(alignment: .top) { DividerLine() }
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 6)
-        .frame(height: 46)
-        .background(Capsule().fill(AppTheme.bgSoft).overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1)))
-        .padding(.horizontal, 22)
-        .padding(.vertical, 12)
-        .overlay(alignment: .top) { DividerLine() }
+    }
+
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func send() {
+        let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else {
+            return
+        }
+
+        messages.append(ConversationChatMessage(role: .user, text: question))
+        messages.append(ConversationChatMessage(role: .assistant, text: answer(for: question)))
+        draft = ""
+    }
+
+    private func answer(for question: String) -> String {
+        let lowercased = question.lowercased()
+        if lowercased.contains("action") || lowercased.contains("todo") || lowercased.contains("зада") {
+            return meeting.summary.actionItems.isEmpty ? "No action items were found in this conversation." : meeting.summary.actionItems.joined(separator: "\n")
+        }
+        if lowercased.contains("decision") || lowercased.contains("реш") {
+            return meeting.summary.decisions.isEmpty ? "No decisions were found in this conversation." : meeting.summary.decisions.joined(separator: "\n")
+        }
+        if lowercased.contains("follow") || lowercased.contains("напом") || lowercased.contains("след") {
+            return meeting.summary.followUps.isEmpty ? "No follow-ups were found in this conversation." : meeting.summary.followUps.joined(separator: "\n")
+        }
+        if lowercased.contains("transcript") || lowercased.contains("транск") {
+            return meeting.transcript
+        }
+        return meeting.summary.overview
+    }
+}
+
+private struct ConversationChatMessage: Identifiable, Equatable {
+    let id = UUID()
+    let role: Role
+    let text: String
+
+    enum Role: Equatable {
+        case user
+        case assistant
+    }
+}
+
+private struct ConversationChatBubble: View {
+    let message: ConversationChatMessage
+
+    var body: some View {
+        HStack {
+            if message.role == .user {
+                Spacer(minLength: 36)
+            }
+            Text(message.text)
+                .font(.system(size: 14, weight: .regular, design: .serif))
+                .foregroundColor(message.role == .user ? AppTheme.bg : AppTheme.fg)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(message.role == .user ? AppTheme.fg : AppTheme.bgSoft)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(message.role == .user ? Color.clear : AppTheme.borderStrong, lineWidth: 1)
+                )
+            if message.role == .assistant {
+                Spacer(minLength: 36)
+            }
+        }
+    }
+}
+
+private struct ChatEmptyState: View {
+    var body: some View {
+        WwCard {
+            VStack(alignment: .leading, spacing: 8) {
+                MonoLabel("chat")
+                Text("Ask a question about the transcript or summary.")
+                    .font(.system(size: 15, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.muted)
+            }
+        }
     }
 }
 
@@ -1271,37 +1461,6 @@ private struct ExactMemoryScreen: View {
     let onConversations: () -> Void
     let onRecord: () -> Void
     let onMeta: () -> Void
-
-    private let pinned = [
-        ("name", "Ersultan Kenesbek"),
-        ("based in", "Almaty · often works late"),
-        ("health", "prefers not to discuss medication in public"),
-        ("work", "building meta personal AI for Ray-Ban"),
-        ("people", "Anya is a close friend")
-    ]
-
-    private let topics = [
-        ("work", "124", "projects, teams, decisions"),
-        ("health", "38", "appointments, preferences"),
-        ("relationships", "61", "friends, family, reminders"),
-        ("places", "42", "shops, routes, meetings"),
-        ("tastes", "74", "coffee, music, gifts"),
-        ("routines", "63", "wake time, errands, habits")
-    ]
-
-    private let people = [
-        ("A", "Anya", "friend · 17 memories", "startup, enamel pins, mom bday"),
-        ("N", "Nazym", "family · 9 memories", "calls sunday, likes green tea"),
-        ("M", "Мама", "family · 12 memories", "birthday reminders, health"),
-        ("D", "Daulet", "work · 7 memories", "backend, launch checklist"),
-        ("S", "Sasha", "friend · 6 memories", "football, late dinners")
-    ]
-
-    private let learned = [
-        ("today", "Anya accepted the startup offer."),
-        ("yesterday", "Ray-Ban pairing should stay optional in setup."),
-        ("apr 29", "Doctor Karimov appointment was at Mediker clinic.")
-    ]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1318,105 +1477,30 @@ private struct ExactMemoryScreen: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 6)
 
-                    Text("Facts, people, places, and preferences that meta can use to answer better. You can forget anything.")
+                    Text("Memory will show backend facts, people, places, and preferences when the database has saved entries.")
                         .font(.system(size: 14, weight: .regular, design: .serif))
                         .italic()
                         .foregroundColor(AppTheme.muted)
                         .lineSpacing(5)
                         .padding(.top, 10)
 
-                    MemoryMetricStrip()
-                        .padding(.top, 18)
-
                     MemorySearchCapsule()
                         .padding(.top, 14)
 
-                    SettingsSectionHeader(title: "essentials", hint: "6 pinned")
-                    WwCard(padding: 0) {
-                        VStack(spacing: 0) {
-                            ForEach(Array(pinned.enumerated()), id: \.offset) { index, item in
-                                MemoryPinRow(label: item.0, value: item.1)
-                                if index < pinned.count - 1 {
-                                    DividerLine()
-                                }
-                            }
-                            DividerLine()
-                            HStack {
-                                Text("+ 1 more pinned")
-                                    .font(.system(size: 13, weight: .regular, design: .serif))
-                                    .italic()
-                                    .foregroundColor(AppTheme.dim)
-                                Spacer()
-                                Text("see all →")
-                                    .font(.system(size: 12, weight: .regular, design: .serif))
-                                    .italic()
-                                    .foregroundColor(AppTheme.fg)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 12)
+                    WwCard {
+                        VStack(alignment: .leading, spacing: 8) {
+                            MonoLabel("empty")
+                            Text("No memory entries loaded.")
+                                .font(.system(size: 16, weight: .medium, design: .serif))
+                                .foregroundColor(AppTheme.fg)
+                            Text("When backend memory endpoints are connected, this screen will render real facts and controls here.")
+                                .font(.system(size: 14, weight: .regular, design: .serif))
+                                .italic()
+                                .foregroundColor(AppTheme.muted)
+                                .lineSpacing(4)
                         }
+                        .padding(.top, 18)
                     }
-
-                    SettingsSectionHeader(title: "by topic")
-                    WwCard(padding: 0) {
-                        VStack(spacing: 0) {
-                            ForEach(Array(topics.enumerated()), id: \.offset) { index, topic in
-                                MemoryTopicRow(title: topic.0, count: topic.1, detail: topic.2)
-                                if index < topics.count - 1 {
-                                    DividerLine()
-                                }
-                            }
-                        }
-                    }
-
-                    SettingsSectionHeader(title: "people", hint: "38 in mind")
-                    WwCard(padding: 0) {
-                        VStack(spacing: 0) {
-                            ForEach(Array(people.enumerated()), id: \.offset) { index, person in
-                                MemoryPersonRow(initial: person.0, name: person.1, subtitle: person.2, detail: person.3)
-                                if index < people.count - 1 {
-                                    DividerLine()
-                                }
-                            }
-                        }
-                    }
-
-                    SettingsSectionHeader(title: "recently learned", hint: "last 7 days")
-                    WwCard(padding: 0) {
-                        VStack(spacing: 0) {
-                            ForEach(Array(learned.enumerated()), id: \.offset) { index, item in
-                                MemoryLearnedRow(time: item.0, text: item.1)
-                                if index < learned.count - 1 {
-                                    DividerLine()
-                                }
-                            }
-                        }
-                    }
-
-                    SettingsSectionHeader(title: "forget")
-                    Text("Remove memories by topic, person, place, or time range. Forgotten items stop appearing in summaries and answers.")
-                        .font(.system(size: 13, weight: .regular, design: .serif))
-                        .italic()
-                        .foregroundColor(AppTheme.muted)
-                        .lineSpacing(4)
-                        .padding(.horizontal, 4)
-                        .padding(.bottom, 10)
-
-                    FlowWrap(items: ["forget anya", "clear health", "delete last 24h", "export memory"]) { item in
-                        Text(item)
-                            .font(.system(size: 11, weight: .regular, design: .monospaced))
-                            .foregroundColor(AppTheme.fg)
-                            .padding(.horizontal, 12)
-                            .frame(height: 30)
-                            .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
-                    }
-
-                    Text("memory is yours — never sold, never shared, ever.")
-                        .font(.system(size: 12, weight: .regular, design: .serif))
-                        .italic()
-                        .foregroundColor(AppTheme.dim)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 28)
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 4)
@@ -1424,33 +1508,6 @@ private struct ExactMemoryScreen: View {
             }
 
             ExactTabBar(activeIndex: 2, recording: recording, onHome: onHome, onRecord: onRecord, onLog: onConversations, onMemory: {}, onMeta: onMeta)
-        }
-    }
-}
-
-private struct MemoryMetricStrip: View {
-    private let metrics = [
-        ("402", "facts"),
-        ("38", "people"),
-        ("12", "places"),
-        ("62d", "memory")
-    ]
-
-    var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
-            ForEach(Array(metrics.enumerated()), id: \.offset) { _, metric in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(metric.0)
-                        .font(.system(size: 24, weight: .medium, design: .serif))
-                        .foregroundColor(AppTheme.fg)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                    MonoLabel(metric.1)
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bgSoft))
-            }
         }
     }
 }
@@ -1618,14 +1675,8 @@ private struct ExactRecordingScreen: View {
     @ObservedObject var liveContext: LiveContextStore
     @Binding var muted: Bool
     let onStop: () -> Void
+    let onGenerateSummary: () -> Void
     let onDismiss: () -> Void
-
-    private let transcript = [
-        RecordingTranscriptEntry(time: "07:10", speaker: "Dana", initial: "D", text: "Let's lock the onboarding flow first. Pairing should feel optional, but not hidden.", active: false, unknown: false),
-        RecordingTranscriptEntry(time: "07:18", speaker: "You", initial: "Y", text: "Agree. The phone MVP works without glasses, then Ray-Ban becomes the better input.", active: false, unknown: false),
-        RecordingTranscriptEntry(time: "07:31", speaker: "Unknown", initial: "?", text: "Can we show live transcript only after recording starts?", active: false, unknown: true),
-        RecordingTranscriptEntry(time: "07:42", speaker: "Dana", initial: "D", text: "Yes. Add muted state too so users understand capture is paused.", active: true, unknown: false)
-    ]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1638,35 +1689,59 @@ private struct ExactRecordingScreen: View {
                         .foregroundColor(AppTheme.fg)
                         .monospacedDigit()
                     Spacer()
-                    Text(muted ? "muted" : "3 voices")
+                    Text(recordingStatusText)
                         .font(.system(size: 13, weight: .regular, design: .serif))
                         .italic()
                         .foregroundColor(AppTheme.dim)
                 }
 
-                RecordingWaveform(muted: muted)
-                    .frame(height: 68)
+                SpeechActivityMeter(level: muted ? 0 : viewModel.audioLevel, active: viewModel.phase == .recording && !muted)
+                    .frame(height: 58)
+
+                HStack {
+                    MonoLabel(viewModel.activeInputName)
+                    Spacer()
+                    if viewModel.phase == .recording {
+                        MonoLabel("speech input", color: AppTheme.dim)
+                    }
+                }
             }
             .padding(.horizontal, 22)
             .padding(.bottom, 14)
 
-            RecordingInsightChip(muted: muted)
+            RecordingInsightChip(message: insightText)
                 .padding(.horizontal, 22)
                 .padding(.bottom, 14)
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 10) {
-                    MonoLabel(muted ? "paused transcript" : "live transcript")
+                    if viewModel.phase == .transcribing {
+                        TranscriptionProgressCard()
+                    }
+
+                    MonoLabel(transcriptTitle)
                         .padding(.horizontal, 4)
-                    ForEach(transcript) { entry in
+                    if transcriptEntries.isEmpty {
+                        RecordingTranscriptEmptyState(message: transcriptPlaceholder)
+                    }
+                    ForEach(transcriptEntries) { entry in
                         RecordingTranscriptRow(entry: entry, muted: muted)
+                    }
+
+                    if let summary = viewModel.summary {
+                        SummaryPanel(summary: summary)
+                            .padding(.top, 8)
                     }
                 }
                 .padding(.horizontal, 22)
                 .padding(.bottom, 18)
             }
 
-            RecordingControlDock(muted: $muted, onStop: onStop)
+            if viewModel.phase == .recording {
+                RecordingControlDock(muted: $muted, onStop: onStop)
+            } else {
+                RecordingPostProcessDock(viewModel: viewModel, onGenerateSummary: onGenerateSummary)
+            }
         }
     }
 
@@ -1676,7 +1751,7 @@ private struct ExactRecordingScreen: View {
                 .frame(width: 104, alignment: .leading)
 
             VStack(spacing: 2) {
-                Text("Standup")
+                Text(headerTitle)
                     .font(.system(size: 15, weight: .medium, design: .serif))
                     .foregroundColor(AppTheme.fg)
                 Text(liveContext.recordingLocationLabel)
@@ -1703,6 +1778,97 @@ private struct ExactRecordingScreen: View {
         .padding(.top, 8)
         .padding(.bottom, 16)
     }
+
+    private var transcriptEntries: [RecordingTranscriptEntry] {
+        RecordingTranscriptEntry.fromTranscript(viewModel.transcript)
+    }
+
+    private var recordingStatusText: String {
+        if muted {
+            return "muted"
+        }
+        switch viewModel.phase {
+        case .recording:
+            return "listening"
+        case .transcribing:
+            return "transcribing"
+        case .transcriptReady:
+            return "transcript ready"
+        case .summarizing:
+            return "summarizing"
+        case .completed:
+            return "saved"
+        case .failed:
+            return "failed"
+        case .idle:
+            return "ready"
+        }
+    }
+
+    private var headerTitle: String {
+        switch viewModel.phase {
+        case .recording:
+            return "Recording"
+        case .transcribing:
+            return "Transcribing"
+        case .transcriptReady:
+            return "Transcript ready"
+        case .summarizing:
+            return "Summarizing"
+        case .completed:
+            return viewModel.summary?.title ?? "Summary ready"
+        case .failed:
+            return "Recording failed"
+        case .idle:
+            return "Ready"
+        }
+    }
+
+    private var insightText: String {
+        if let errorMessage = viewModel.errorMessage {
+            return errorMessage
+        }
+        if muted {
+            return "Capture is paused. Unmute before continuing the recording."
+        }
+        switch viewModel.phase {
+        case .recording:
+            return "Recording through \(viewModel.activeInputName). Transcript will appear after stop."
+        case .transcribing:
+            return "The saved audio is being converted into transcript text."
+        case .transcriptReady:
+            return "Transcript is ready. Generate summary when you need it."
+        case .summarizing:
+            return "The transcript is being summarized with the configured backend model."
+        case .completed:
+            return viewModel.summary?.overview ?? "Transcript and summary are ready."
+        case .failed:
+            return "Check microphone permission and backend health."
+        case .idle:
+            return "Start a recording to capture a real transcript."
+        }
+    }
+
+    private var transcriptTitle: String {
+        viewModel.transcript.isEmpty ? "transcript" : "saved transcript"
+    }
+
+    private var transcriptPlaceholder: String {
+        switch viewModel.phase {
+        case .recording:
+            return "No live transcript yet. This build records audio first, then transcribes it through the backend when you stop."
+        case .transcribing:
+            return "Waiting for backend transcription."
+        case .transcriptReady:
+            return "Transcript is ready."
+        case .summarizing:
+            return "Generating summary from the transcript."
+        case .failed:
+            return viewModel.errorMessage ?? "Recording failed before transcript was created."
+        default:
+            return "No transcript has been created yet."
+        }
+    }
 }
 
 private struct RecordingStatusPill: View {
@@ -1725,40 +1891,99 @@ private struct RecordingStatusPill: View {
     }
 }
 
-private struct RecordingWaveform: View {
-    let muted: Bool
+private struct SpeechActivityMeter: View {
+    let level: Double
+    let active: Bool
+    private let barCount = 32
 
     var body: some View {
-        HStack(alignment: .center, spacing: 2) {
-            ForEach(0..<64, id: \.self) { index in
-                Capsule()
-                    .fill(muted ? AppTheme.dim.opacity(0.34) : AppTheme.fg)
-                    .frame(width: 2.2, height: height(for: index))
+        TimelineView(.animation) { timeline in
+            HStack(alignment: .center, spacing: 3) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule()
+                        .fill(active ? AppTheme.fg : AppTheme.dim.opacity(0.35))
+                        .frame(width: 3, height: height(for: index, at: timeline.date))
+                }
             }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 12)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bgSoft))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(AppTheme.bgSoft))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(AppTheme.border, lineWidth: 1))
     }
 
-    private func height(for index: Int) -> CGFloat {
-        if muted {
-            return 7
+    private func height(for index: Int, at date: Date) -> CGFloat {
+        guard active else {
+            return 5
         }
-        let wave = abs(sin(Double(index) * 0.47 + 0.7))
-        let accent = index % 9 == 0 ? 14.0 : 0.0
-        return CGFloat(12.0 + wave * 42.0 + accent)
+
+        let clampedLevel = min(max(level, 0), 1)
+        let time = date.timeIntervalSinceReferenceDate
+        let wave = abs(sin(time * 7.0 + Double(index) * 0.72))
+        let accent = index % 7 == 0 ? 0.22 : 0
+        let amplitude = max(clampedLevel, 0.08)
+        return CGFloat(5 + (amplitude + accent) * (13 + wave * 34))
+    }
+}
+
+private struct TranscriptionProgressCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(AppTheme.fg)
+                Text("Transcribing audio")
+                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                Spacer()
+            }
+
+            TranscriptionLoadingBar()
+                .frame(height: 5)
+
+            Text("The backend is turning the recording into transcript text.")
+                .font(.system(size: 13, weight: .regular, design: .serif))
+                .italic()
+                .foregroundColor(AppTheme.muted)
+                .lineSpacing(4)
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(AppTheme.bgSoft))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+    }
+}
+
+private struct TranscriptionLoadingBar: View {
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            GeometryReader { geometry in
+                let width = geometry.size.width
+                let progress = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.4) / 1.4
+                let segmentWidth = max(width * 0.34, 44)
+                let xOffset = CGFloat(progress) * (width + segmentWidth) - segmentWidth
+
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(AppTheme.bgDeep)
+                    Capsule()
+                        .fill(AppTheme.fg)
+                        .frame(width: segmentWidth)
+                        .offset(x: xOffset)
+                }
+                .clipShape(Capsule())
+            }
+        }
     }
 }
 
 private struct RecordingInsightChip: View {
-    let muted: Bool
+    let message: String
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             MetaOrb(size: 18)
-            Text(muted ? "capture paused — transcript will continue when unmuted." : "I heard two action items. One sounds assigned to you.")
+            Text(message)
                 .font(.system(size: 13.5, weight: .regular, design: .serif))
                 .italic()
                 .foregroundColor(AppTheme.muted)
@@ -1780,6 +2005,40 @@ private struct RecordingTranscriptEntry: Identifiable {
     let text: String
     let active: Bool
     let unknown: Bool
+
+    static func fromTranscript(_ transcript: String) -> [RecordingTranscriptEntry] {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return []
+        }
+
+        return [
+            RecordingTranscriptEntry(
+                time: "saved",
+                speaker: "Transcript",
+                initial: "T",
+                text: trimmed,
+                active: false,
+                unknown: false
+            )
+        ]
+    }
+}
+
+private struct RecordingTranscriptEmptyState: View {
+    let message: String
+
+    var body: some View {
+        Text(message)
+            .font(.system(size: 14, weight: .regular, design: .serif))
+            .foregroundColor(AppTheme.muted)
+            .lineSpacing(5)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(AppTheme.bgSoft))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+    }
 }
 
 private struct RecordingTranscriptRow: View {
@@ -1836,7 +2095,7 @@ private struct RecordingControlDock: View {
     let onStop: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 28) {
+        HStack(alignment: .center, spacing: 42) {
             Button(action: { muted.toggle() }) {
                 VStack(spacing: 6) {
                     Image(systemName: muted ? "mic" : "mic.slash")
@@ -1852,31 +2111,63 @@ private struct RecordingControlDock: View {
 
             Button(action: onStop) {
                 Circle()
-                    .fill(AppTheme.fg)
+                    .fill(AppTheme.danger)
                     .frame(width: 72, height: 72)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(AppTheme.bg)
+                            .fill(Color.white)
                             .frame(width: 22, height: 22)
                     )
-                    .shadow(color: Color.black.opacity(0.16), radius: 12, x: 0, y: 6)
+                    .shadow(color: AppTheme.danger.opacity(0.24), radius: 12, x: 0, y: 6)
             }
             .buttonStyle(PlainButtonStyle())
 
-            Button(action: {}) {
-                VStack(spacing: 6) {
-                    Image(systemName: "note.text")
-                        .font(.system(size: 18, weight: .medium))
-                    Text("note")
-                        .font(.system(size: 11, weight: .regular, design: .serif))
-                        .italic()
-                }
-                .foregroundColor(AppTheme.fg)
+            Spacer()
                 .frame(width: 70, height: 58)
-            }
-            .buttonStyle(PlainButtonStyle())
         }
         .frame(maxWidth: .infinity)
+        .padding(.top, 12)
+        .padding(.bottom, 24)
+        .background(AppTheme.bg)
+        .overlay(alignment: .top) { DividerLine() }
+    }
+}
+
+private struct RecordingPostProcessDock: View {
+    @ObservedObject var viewModel: ConversationSessionViewModel
+    let onGenerateSummary: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if viewModel.phase == .transcribing || viewModel.phase == .summarizing {
+                HStack(spacing: 9) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(AppTheme.fg)
+                    Text(viewModel.phase == .transcribing ? "Transcribing..." : "Generating summary...")
+                        .font(.system(size: 14, weight: .medium, design: .serif))
+                        .foregroundColor(AppTheme.fg)
+                    Spacer()
+                }
+                .padding(.horizontal, 22)
+            } else if viewModel.canGenerateSummary || viewModel.summary != nil {
+                Button(action: onGenerateSummary) {
+                    HStack(spacing: 8) {
+                        Image(systemName: viewModel.summary == nil ? "sparkles" : "checkmark")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(viewModel.summaryButtonTitle)
+                            .font(.system(size: 16, weight: .medium, design: .serif))
+                    }
+                    .foregroundColor(AppTheme.bg)
+                    .frame(maxWidth: .infinity, minHeight: 54)
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.fg))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(!viewModel.canGenerateSummary)
+                .opacity(viewModel.canGenerateSummary ? 1 : 0.55)
+                .padding(.horizontal, 22)
+            }
+        }
         .padding(.top, 12)
         .padding(.bottom, 24)
         .background(AppTheme.bg)
@@ -1956,9 +2247,9 @@ private struct ExactSettingsMetaScreen: View {
                     SettingsSectionHeader(title: "memory & data")
                     WwCard(padding: 0) {
                         VStack(spacing: 0) {
-                            SettingsValueRow(icon: "brain.head.profile", label: "What meta knows", subtitle: "402 facts · 38 people · 12 places", value: "manage")
+                            SettingsValueRow(icon: "brain.head.profile", label: "What meta knows", subtitle: "connect backend memory to populate", value: "empty")
                             DividerLine()
-                            SettingsValueRow(icon: "square.stack.3d.up", label: "Conversations", subtitle: "218 recordings · 47h total", value: "218")
+                            SettingsValueRow(icon: "square.stack.3d.up", label: "Conversations", subtitle: "loaded from backend meetings", value: "sync")
                             DividerLine()
                             SettingsValueRow(icon: "clock", label: "Auto-delete after", value: "90 days")
                             DividerLine()
@@ -1984,11 +2275,11 @@ private struct ExactSettingsMetaScreen: View {
                     SettingsSectionHeader(title: "voice & capture")
                     WwCard(padding: 0) {
                         VStack(spacing: 0) {
-                            SettingsValueRow(icon: "globe", label: "Language", value: "english · ru")
+                            SettingsValueRow(icon: "globe", label: "Language", value: "auto")
                             DividerLine()
                             SettingsValueRow(icon: "mic", label: "Wake word", subtitle: "\"hey \(settings.aiDisplayName.lowercased())\"", value: "custom")
                             DividerLine()
-                            SettingsValueRow(icon: "sparkles", label: "Sensitivity", subtitle: "how easily I start listening", value: "medium")
+                            SettingsValueRow(icon: "sparkles", label: "Sensitivity", subtitle: "how easily I start listening", value: "default")
                             DividerLine()
                             SettingsToggleRow(icon: "waveform", label: "Silence trim", isOn: $silenceTrim)
                         }
@@ -1997,7 +2288,7 @@ private struct ExactSettingsMetaScreen: View {
                     SettingsSectionHeader(title: "notifications")
                     WwCard(padding: 0) {
                         VStack(spacing: 0) {
-                            SettingsToggleRow(icon: "sparkles", label: "Daily summary", subtitle: "9:30 every morning", isOn: $dailySummary)
+                            SettingsToggleRow(icon: "sparkles", label: "Daily summary", subtitle: "disabled until backend schedule is connected", isOn: $dailySummary)
                             DividerLine()
                             SettingsToggleRow(icon: "pin", label: "Follow-ups", subtitle: "when meta finds an action item", isOn: $followUps)
                             DividerLine()
@@ -2102,7 +2393,7 @@ private struct SettingsProfileCard: View {
 
                 HStack(spacing: 12) {
                     SettingsProfileMetric(label: "plan", value: "mvp")
-                    SettingsProfileMetric(label: "storage", value: "2.4 / 10 gb")
+                    SettingsProfileMetric(label: "storage", value: "local")
                     SettingsProfileMetric(label: "agent", value: settings.aiDisplayName.lowercased())
                 }
                 .padding(.horizontal, 16)
@@ -2123,9 +2414,9 @@ private struct SettingsProfileCard: View {
                     .frame(height: 4)
 
                     HStack {
-                        MonoLabel("used 2.4 gb")
+                        MonoLabel("storage unavailable")
                         Spacer()
-                        Text("upgrade plan →")
+                        Text("manage →")
                             .font(.system(size: 11, weight: .regular, design: .serif))
                             .italic()
                             .foregroundColor(AppTheme.fg)
@@ -2723,6 +3014,8 @@ private struct WarmHomeHeader: View {
             return "REC"
         case .transcribing:
             return "TRANSCRIBING"
+        case .transcriptReady:
+            return "TRANSCRIPT"
         case .summarizing:
             return "SUMMARIZING"
         case .completed:
@@ -2738,7 +3031,7 @@ private struct WarmHomeHeader: View {
         switch viewModel.phase {
         case .recording, .transcribing, .summarizing:
             return AppTheme.fg
-        case .completed:
+        case .transcriptReady, .completed:
             return AppTheme.success
         case .failed:
             return AppTheme.danger
@@ -2780,6 +3073,8 @@ private struct WarmGreeting: View {
             return "Listening, \(settings.ownerDisplayName)..."
         case .transcribing:
             return "Preparing transcript."
+        case .transcriptReady:
+            return "Transcript is ready."
         case .summarizing:
             return "Writing summary."
         case .completed:
@@ -2794,17 +3089,19 @@ private struct WarmGreeting: View {
     private var detail: String {
         switch viewModel.phase {
         case .recording:
-            return "Recording through \(viewModel.activeInputName). Stop when the meeting ends and \(settings.aiDisplayName) will summarize it."
+            return "Recording through \(viewModel.activeInputName). Stop when the meeting ends to create a transcript."
         case .transcribing:
             return "The audio is being turned into a clean transcript."
+        case .transcriptReady:
+            return "Review the transcript or generate a summary when needed."
         case .summarizing:
             return "Decisions, action items, follow-ups, and memory are being extracted."
         case .completed:
             return "Review the notes below or ask \(settings.aiDisplayName) about the conversation."
         case .failed:
-            return "Check permissions, audio route, or the summary endpoint before trying again."
+            return "Check microphone permission or the backend endpoint before trying again."
         case .idle:
-            return "Tap to record or speak through the glasses."
+            return "Tap to record a real meeting."
         }
     }
 }
@@ -2964,30 +3261,11 @@ private struct WarmRecordControl: View {
                     .foregroundColor(AppTheme.fg)
                     .lineLimit(1)
 
-                if viewModel.phase == .recording {
-                    WarmWaveform()
-                        .frame(height: 28)
-                } else {
-                    MonoLabel(viewModel.primaryButtonTitle)
-                }
+                MonoLabel(viewModel.phase == .recording ? viewModel.activeInputName : viewModel.primaryButtonTitle)
             }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 6)
-    }
-}
-
-private struct WarmWaveform: View {
-    private let bars: [CGFloat] = [10, 18, 24, 14, 28, 20, 12, 26, 18]
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 5) {
-            ForEach(Array(bars.enumerated()), id: \.offset) { _, height in
-                Capsule()
-                    .fill(AppTheme.fg)
-                    .frame(width: 3, height: height)
-            }
-        }
     }
 }
 
@@ -3030,6 +3308,8 @@ private struct WarmRecentConversationCard: View {
             return "Recording in progress"
         case .transcribing:
             return "Transcript is being prepared"
+        case .transcriptReady:
+            return "Transcript is ready"
         case .summarizing:
             return "Summary is being prepared"
         case .failed:
@@ -3144,6 +3424,8 @@ private struct AppHeader: View {
             return "Recording meeting audio from \(viewModel.activeInputName)."
         case .transcribing:
             return "Turning the recording into a clean transcript."
+        case .transcriptReady:
+            return "Transcript is ready for review."
         case .summarizing:
             return "Extracting decisions, actions, and follow-ups."
         case .completed:
@@ -3204,6 +3486,8 @@ private struct RecordingStatusView: View {
             return "record.circle"
         case .transcribing:
             return "waveform"
+        case .transcriptReady:
+            return "text.quote"
         case .summarizing:
             return "sparkles"
         case .completed:
@@ -3219,7 +3503,7 @@ private struct RecordingStatusView: View {
         switch viewModel.phase {
         case .recording, .transcribing, .summarizing:
             return AppTheme.accent
-        case .completed:
+        case .transcriptReady, .completed:
             return AppTheme.success
         case .failed:
             return AppTheme.danger
@@ -3292,7 +3576,7 @@ private struct WearablesPanel: View {
                     OutlineButton(title: "Refresh", icon: "arrow.clockwise") {
                         bridge.refreshAudioRoute()
                     }
-                    OutlineButton(title: bridge.audioRoute.primaryDetectedDevice == nil ? "Scan" : "Use Audio", icon: "dot.radiowaves.left.and.right") {
+                    OutlineButton(title: "Scan", icon: "dot.radiowaves.left.and.right") {
                         bridge.connectDetectedAudioRoute()
                     }
                 }
@@ -3389,6 +3673,7 @@ private struct SummaryPanel: View {
             VStack(alignment: .leading, spacing: 16) {
                 SectionTitle(label: "SUMMARY", title: summary.title, icon: "doc.text.magnifyingglass")
 
+                MonoLabel("overview")
                 Text(summary.overview)
                     .font(.system(size: 15, weight: .regular))
                     .foregroundColor(AppTheme.fg)
@@ -3397,11 +3682,21 @@ private struct SummaryPanel: View {
 
                 DividerLine()
 
+                SummaryList(title: "Key Topics", items: keyTopics, icon: "number")
                 SummaryList(title: "Decisions", items: summary.decisions, icon: "checkmark.seal")
                 SummaryList(title: "Action Items", items: summary.actionItems, icon: "checklist")
                 SummaryList(title: "Follow-ups", items: summary.followUps, icon: "arrow.clockwise")
             }
         }
+    }
+
+    private var keyTopics: [String] {
+        if !summary.keyTopics.isEmpty {
+            return summary.keyTopics
+        }
+
+        let candidates = [summary.title] + summary.decisions + summary.actionItems + summary.followUps
+        return Array(candidates.prefix(4)).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 }
 

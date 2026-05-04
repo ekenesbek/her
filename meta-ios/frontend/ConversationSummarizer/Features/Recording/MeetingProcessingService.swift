@@ -1,17 +1,18 @@
 import Foundation
 
 protocol MeetingProcessingService {
-    func process(recordingURL: URL) async throws -> MeetingProcessingResult
+    func transcribe(recordingURL: URL) async throws -> MeetingProcessingResult
 }
 
 struct MeetingProcessingResult {
     let transcript: String
-    let summary: MeetingSummary
+    let language: String?
+    let durationSeconds: Double?
 }
 
 enum MeetingProcessingServiceFactory {
     static func make() -> MeetingProcessingService? {
-        guard let endpoint = AppConfig.meetingProcessEndpoint else {
+        guard let endpoint = AppConfig.transcriptionEndpoint else {
             return nil
         }
 
@@ -28,7 +29,7 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         self.session = session
     }
 
-    func process(recordingURL: URL) async throws -> MeetingProcessingResult {
+    func transcribe(recordingURL: URL) async throws -> MeetingProcessingResult {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -42,7 +43,10 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw MeetingProcessingError.backendFailed(statusCode: httpResponse.statusCode)
+            throw MeetingProcessingError.backendFailed(
+                statusCode: httpResponse.statusCode,
+                detail: Self.backendErrorDetail(from: data)
+            )
         }
 
         let decoder = JSONDecoder()
@@ -58,10 +62,11 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO8601 date.")
         }
 
-        let decoded = try decoder.decode(BackendMeetingResponse.self, from: data)
+        let decoded = try decoder.decode(BackendTranscriptResponse.self, from: data)
         return MeetingProcessingResult(
             transcript: decoded.transcript,
-            summary: decoded.summary.asMeetingSummary()
+            language: decoded.language,
+            durationSeconds: decoded.durationSeconds
         )
     }
 
@@ -72,64 +77,95 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
 
         body.appendString("--\(boundary)\r\n")
         body.appendString("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n")
-        body.appendString("Content-Type: audio/mp4\r\n\r\n")
+        body.appendString("Content-Type: \(contentType(for: fileURL))\r\n\r\n")
         body.append(fileData)
         body.appendString("\r\n")
         body.appendString("--\(boundary)--\r\n")
         return body
     }
+
+    private func contentType(for fileURL: URL) -> String {
+        switch fileURL.pathExtension.lowercased() {
+        case "m4a", "mp4":
+            return "audio/mp4"
+        case "caf":
+            return "audio/x-caf"
+        case "wav":
+            return "audio/wav"
+        default:
+            return "application/octet-stream"
+        }
+    }
+
+    private static func backendErrorDetail(from data: Data) -> String? {
+        guard !data.isEmpty else {
+            return nil
+        }
+
+        if let payload = try? JSONDecoder().decode(BackendErrorResponse.self, from: data) {
+            if let detail = payload.detailText, !detail.isEmpty {
+                return detail
+            }
+        }
+
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
-private struct BackendMeetingResponse: Decodable {
+private struct BackendErrorResponse: Decodable {
+    let detail: Detail
+
+    var detailText: String? {
+        switch detail {
+        case .text(let value):
+            return value
+        case .items(let items):
+            return items.compactMap(\.message).joined(separator: " ")
+        }
+    }
+
+    enum Detail: Decodable {
+        case text(String)
+        case items([BackendErrorItem])
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let value = try? container.decode(String.self) {
+                self = .text(value)
+                return
+            }
+            self = .items((try? container.decode([BackendErrorItem].self)) ?? [])
+        }
+    }
+}
+
+private struct BackendErrorItem: Decodable {
+    let msg: String?
+
+    var message: String? {
+        msg
+    }
+}
+
+private struct BackendTranscriptResponse: Decodable {
     let transcript: String
-    let title: String
-    let overview: String
-    let decisions: [String]
-    let actionItems: [String]
-    let followUps: [String]
-    let generatedAt: Date
-
-    var summary: BackendSummaryPayload {
-        BackendSummaryPayload(
-            title: title,
-            overview: overview,
-            decisions: decisions,
-            actionItems: actionItems,
-            followUps: followUps,
-            generatedAt: generatedAt
-        )
-    }
-}
-
-private struct BackendSummaryPayload: Decodable {
-    let title: String
-    let overview: String
-    let decisions: [String]
-    let actionItems: [String]
-    let followUps: [String]
-    let generatedAt: Date
-
-    func asMeetingSummary() -> MeetingSummary {
-        MeetingSummary(
-            title: title,
-            overview: overview,
-            decisions: decisions,
-            actionItems: actionItems,
-            followUps: followUps,
-            generatedAt: generatedAt
-        )
-    }
+    let language: String?
+    let durationSeconds: Double?
 }
 
 enum MeetingProcessingError: LocalizedError {
     case invalidResponse
-    case backendFailed(statusCode: Int)
+    case backendFailed(statusCode: Int, detail: String?)
 
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
             return "Meeting backend returned an invalid response."
-        case .backendFailed(let statusCode):
+        case let .backendFailed(statusCode, detail):
+            if let detail, !detail.isEmpty {
+                return "Meeting backend returned HTTP \(statusCode): \(detail)"
+            }
             return "Meeting backend returned HTTP \(statusCode)."
         }
     }

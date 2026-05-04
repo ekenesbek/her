@@ -1,6 +1,6 @@
 # Meta iOS Backend
 
-Local API for the iOS app. It receives meeting audio, transcribes it with local Whisper, summarizes the transcript with OpenAI when `OPENAI_API_KEY` is configured, and persists meetings in SQLite.
+Local API for the iOS app. It receives meeting audio, transcribes it with local Whisper, summarizes the transcript with an OpenAI-compatible chat endpoint when `OPENAI_API_KEY` is configured, and persists meetings in SQLite.
 
 ## Run
 
@@ -41,4 +41,12 @@ Older JSON-blob databases are migrated automatically on startup.
 
 ## Notes
 
-`faster-whisper` runs locally and downloads the configured model on first use. `base` is a practical MVP default. Use `tiny` for faster tests or `small` for better quality.
+`faster-whisper` runs locally and downloads the configured model on first use. `turbo` is the practical free default for this MVP because it is close to `large-v3` quality while being much faster. Use `base` or `small` for weaker CPU-only machines, and `large-v3` when quality matters more than speed.
+
+For the current Alem-compatible summary model, keep secrets in `.env`:
+
+```bash
+OPENAI_API_KEY=<your key>
+OPENAI_BASE_URL=https://llm.alem.ai
+OPENAI_SUMMARY_MODEL=gpt-oss
+```

@@ -15,6 +15,7 @@
 		00000000000000000000B204 /* SpeechTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F204 /* SpeechTranscriber.swift */; };
 		00000000000000000000B205 /* SummaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F205 /* SummaryService.swift */; };
 		00000000000000000000B206 /* MeetingProcessingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F206 /* MeetingProcessingService.swift */; };
+		00000000000000000000B207 /* MeetingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F207 /* MeetingsStore.swift */; };
 		00000000000000000000B301 /* WearablesBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F301 /* WearablesBridge.swift */; };
 		00000000000000000000B401 /* MeetingSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F401 /* MeetingSummary.swift */; };
 		00000000000000000000B502 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F502 /* Assets.xcassets */; };
@@ -31,6 +32,7 @@
 		00000000000000000000F204 /* SpeechTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechTranscriber.swift; sourceTree = "<group>"; };
 		00000000000000000000F205 /* SummaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummaryService.swift; sourceTree = "<group>"; };
 		00000000000000000000F206 /* MeetingProcessingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingProcessingService.swift; sourceTree = "<group>"; };
+		00000000000000000000F207 /* MeetingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingsStore.swift; sourceTree = "<group>"; };
 		00000000000000000000F301 /* WearablesBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WearablesBridge.swift; sourceTree = "<group>"; };
 		00000000000000000000F401 /* MeetingSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingSummary.swift; sourceTree = "<group>"; };
 		00000000000000000000F501 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -103,6 +105,7 @@
 				00000000000000000000F204 /* SpeechTranscriber.swift */,
 				00000000000000000000F205 /* SummaryService.swift */,
 				00000000000000000000F206 /* MeetingProcessingService.swift */,
+				00000000000000000000F207 /* MeetingsStore.swift */,
 			);
 			path = Recording;
 			sourceTree = "<group>";
@@ -215,6 +218,7 @@
 				00000000000000000000B204 /* SpeechTranscriber.swift in Sources */,
 				00000000000000000000B205 /* SummaryService.swift in Sources */,
 				00000000000000000000B206 /* MeetingProcessingService.swift in Sources */,
+				00000000000000000000B207 /* MeetingsStore.swift in Sources */,
 				00000000000000000000B301 /* WearablesBridge.swift in Sources */,
 				00000000000000000000B401 /* MeetingSummary.swift in Sources */,
 			);

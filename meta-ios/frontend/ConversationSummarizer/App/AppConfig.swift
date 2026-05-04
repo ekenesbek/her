@@ -30,6 +30,18 @@ enum AppConfig {
         return URL(string: rawValue)
     }
 
+    static var backendSummaryEndpoint: URL? {
+        backendBaseURL?.appendingPathComponent("v1/summaries")
+    }
+
+    static var transcriptionEndpoint: URL? {
+        backendBaseURL?.appendingPathComponent("v1/transcriptions")
+    }
+
+    static var meetingsEndpoint: URL? {
+        backendBaseURL?.appendingPathComponent("v1/meetings")
+    }
+
     static var backendBaseURL: URL? {
         guard
             let rawValue = Bundle.main.object(forInfoDictionaryKey: "BackendAPIURL") as? String,
@@ -42,7 +54,4 @@ enum AppConfig {
         return URL(string: rawValue)
     }
 
-    static var meetingProcessEndpoint: URL? {
-        backendBaseURL?.appendingPathComponent("v1/meetings/process")
-    }
 }

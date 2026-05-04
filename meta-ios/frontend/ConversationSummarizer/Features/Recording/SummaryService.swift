@@ -6,7 +6,7 @@ protocol SummaryService {
 
 enum SummaryServiceFactory {
     static func make() -> SummaryService {
-        if let endpoint = AppConfig.summaryEndpoint {
+        if let endpoint = AppConfig.summaryEndpoint ?? AppConfig.backendSummaryEndpoint {
             return BackendSummaryService(endpoint: endpoint)
         }
 
@@ -38,6 +38,7 @@ struct LocalSummaryService: SummaryService {
         return MeetingSummary(
             title: makeTitle(from: transcript),
             overview: overview.isEmpty ? "No transcript content was available to summarize." : overview,
+            keyTopics: makeKeyTopics(from: transcript, sentences: sentences),
             decisions: decisions.isEmpty ? ["No explicit decisions detected."] : decisions,
             actionItems: actionItems.isEmpty ? ["No explicit action items detected."] : actionItems,
             followUps: followUps.isEmpty ? ["No follow-ups detected."] : followUps,
@@ -63,6 +64,33 @@ struct LocalSummaryService: SummaryService {
 
         return words.isEmpty ? "Meeting summary" : String(words)
     }
+
+    private func makeKeyTopics(from transcript: String, sentences: [String]) -> [String] {
+        let words = transcript
+            .lowercased()
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+            .filter { $0.count > 3 }
+
+        var counts: [String: Int] = [:]
+        for word in words {
+            counts[word, default: 0] += 1
+        }
+
+        let ranked = counts.sorted { left, right in
+            if left.value == right.value {
+                return left.key < right.key
+            }
+            return left.value > right.value
+        }
+        .prefix(4)
+        .map(\.key)
+
+        if ranked.isEmpty {
+            return Array(sentences.prefix(3))
+        }
+        return Array(ranked)
+    }
 }
 
 struct BackendSummaryService: SummaryService {
@@ -85,14 +113,28 @@ struct BackendSummaryService: SummaryService {
             throw SummaryError.backendFailed
         }
 
-        let decoded = try JSONDecoder().decode(BackendSummaryResponse.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let rawValue = try container.decode(String.self)
+            if let date = ISO8601DateFormatter.withFractionalSeconds.date(from: rawValue) {
+                return date
+            }
+            if let date = ISO8601DateFormatter.standard.date(from: rawValue) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO8601 date.")
+        }
+
+        let decoded = try decoder.decode(BackendSummaryResponse.self, from: data)
         return MeetingSummary(
             title: decoded.title,
             overview: decoded.overview,
+            keyTopics: decoded.keyTopics ?? [],
             decisions: decoded.decisions,
             actionItems: decoded.actionItems,
             followUps: decoded.followUps,
-            generatedAt: Date()
+            generatedAt: decoded.generatedAt
         )
     }
 }
@@ -104,9 +146,11 @@ private struct SummaryRequest: Encodable {
 private struct BackendSummaryResponse: Decodable {
     let title: String
     let overview: String
+    let keyTopics: [String]?
     let decisions: [String]
     let actionItems: [String]
     let followUps: [String]
+    let generatedAt: Date
 }
 
 enum SummaryError: LocalizedError {
@@ -120,3 +164,12 @@ enum SummaryError: LocalizedError {
     }
 }
 
+private extension ISO8601DateFormatter {
+    static let standard = ISO8601DateFormatter()
+
+    static let withFractionalSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+}

@@ -26,6 +26,7 @@ class SummaryRequest(BaseModel):
 class SummaryResponse(BaseModel):
     title: str
     overview: str
+    keyTopics: list[str] = []
     decisions: list[str]
     actionItems: list[str]
     followUps: list[str]

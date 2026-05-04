@@ -69,6 +69,7 @@ async def process_meeting(audio: UploadFile = File(...)) -> MeetingResponse:
             durationSeconds=transcript.durationSeconds,
             title=summary.title,
             overview=summary.overview,
+            keyTopics=summary.keyTopics,
             decisions=summary.decisions,
             actionItems=summary.actionItems,
             followUps=summary.followUps,
