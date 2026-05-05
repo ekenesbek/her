@@ -1,0 +1,12 @@
+# Agent Handoff
+
+Use this file for short runtime handoff notes that help the next agent resume safely.
+
+## Current State
+
+- `DOC-1` initialized the repo-level task workflow and is waiting for human review.
+- Existing unrelated `meta-ios/*` worktree changes were present before `DOC-1` and should not be reverted.
+
+## Open Review Gates
+
+- `DOC-1`: review root workflow files and task stream structure before commit/push/PR/archive.
