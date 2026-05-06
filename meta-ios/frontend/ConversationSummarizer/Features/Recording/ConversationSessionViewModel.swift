@@ -1,5 +1,7 @@
+import AVFoundation
 import Combine
 import Foundation
+import UIKit
 
 @MainActor
 final class ConversationSessionViewModel: ObservableObject {
@@ -14,22 +16,81 @@ final class ConversationSessionViewModel: ObservableObject {
     @Published private(set) var audioLevel: Double = 0
 
     private let recorder: MeetingRecorder
-    private let transcriber: SpeechTranscriber
     private let summaryService: SummaryService
     private let meetingProcessor: MeetingProcessingService?
+    private let meetingsService: MeetingsService?
     private var timer: Timer?
     private var meterTimer: Timer?
 
+    private let speechSynthesizer = AVSpeechSynthesizer()
+    private var intentObservers: [NSObjectProtocol] = []
+
     init(
         recorder: MeetingRecorder,
-        transcriber: SpeechTranscriber,
         summaryService: SummaryService,
-        meetingProcessor: MeetingProcessingService? = nil
+        meetingProcessor: MeetingProcessingService? = nil,
+        meetingsService: MeetingsService? = nil
     ) {
         self.recorder = recorder
-        self.transcriber = transcriber
         self.summaryService = summaryService
         self.meetingProcessor = meetingProcessor
+        self.meetingsService = meetingsService
+        registerIntentObservers()
+    }
+
+    deinit {
+        intentObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    private func registerIntentObservers() {
+        let center = NotificationCenter.default
+        let start = center.addObserver(
+            forName: Notification.Name("meta.recording.startRequested"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.phase != .recording {
+                    _ = await self.startRecording()
+                }
+            }
+        }
+        let stop = center.addObserver(
+            forName: Notification.Name("meta.recording.stopRequested"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.phase == .recording {
+                    await self.stopAndTranscribe()
+                }
+            }
+        }
+        let toggle = center.addObserver(
+            forName: Notification.Name("meta.recording.toggleRequested"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.phase == .recording {
+                    await self.stopAndTranscribe()
+                } else if self.canTapPrimaryButton {
+                    _ = await self.startRecording()
+                }
+            }
+        }
+        intentObservers = [start, stop, toggle]
+    }
+
+    private func playFeedback(_ phrase: String, success: Bool) {
+        UINotificationFeedbackGenerator().notificationOccurred(success ? .success : .warning)
+        let utterance = AVSpeechUtterance(string: phrase)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        utterance.volume = 0.85
+        speechSynthesizer.speak(utterance)
     }
 
     var primaryButtonTitle: String {
@@ -98,12 +159,9 @@ final class ConversationSessionViewModel: ObservableObject {
             return false
         }
 
-        if meetingProcessor == nil {
-            let speechAllowed = await transcriber.requestAuthorization()
-            guard speechAllowed else {
-                fail("Speech Recognition permission is required to transcribe meetings.")
-                return false
-            }
+        guard meetingProcessor != nil else {
+            fail("Transcription backend is not configured. Set BackendAPIURL in Info.plist.")
+            return false
         }
 
         do {
@@ -113,6 +171,7 @@ final class ConversationSessionViewModel: ObservableObject {
             elapsedSeconds = 0
             phase = .recording
             startTimer()
+            playFeedback("Recording.", success: true)
             return true
         } catch {
             fail(error.localizedDescription)
@@ -120,20 +179,51 @@ final class ConversationSessionViewModel: ObservableObject {
         }
     }
 
+    func recoverIfNeeded() async {
+        guard phase == .idle, let recovery = MeetingRecorder.recoverOrphanedRecording() else {
+            return
+        }
+        guard let meetingProcessor else {
+            errorMessage = "Found an unfinished recording but the backend is not configured."
+            return
+        }
+
+        phase = .transcribing
+        do {
+            let result = try await meetingProcessor.transcribe(recordingURL: recovery.url)
+            transcript = result.transcript
+            transcriptLanguage = result.language
+            transcriptDurationSeconds = result.durationSeconds
+            if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                phase = .failed
+                errorMessage = "Recovered recording but no speech was detected."
+            } else {
+                phase = .transcriptReady
+            }
+        } catch {
+            phase = .failed
+            errorMessage = "Recovered recording could not be transcribed: \(error.localizedDescription)"
+            return
+        }
+
+        MeetingRecorder.clearActiveRecording()
+    }
+
     func stopAndTranscribe() async {
         stopTimer()
+        playFeedback("Stopped, transcribing.", success: true)
 
         do {
             let recordingURL = try recorder.stop()
             phase = .transcribing
-            if let meetingProcessor {
-                let result = try await meetingProcessor.transcribe(recordingURL: recordingURL)
-                transcript = result.transcript
-                transcriptLanguage = result.language
-                transcriptDurationSeconds = result.durationSeconds
-            } else {
-                transcript = try await transcriber.transcribe(fileURL: recordingURL)
+            guard let meetingProcessor else {
+                fail("Transcription backend is not configured. Set BackendAPIURL in Info.plist.")
+                return
             }
+            let result = try await meetingProcessor.transcribe(recordingURL: recordingURL)
+            transcript = result.transcript
+            transcriptLanguage = result.language
+            transcriptDurationSeconds = result.durationSeconds
             if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 fail("Transcription finished, but no speech was detected.")
                 return
@@ -151,7 +241,22 @@ final class ConversationSessionViewModel: ObservableObject {
 
         do {
             phase = .summarizing
-            summary = try await summaryService.summarize(transcript: transcript)
+            let generated = try await summaryService.summarize(transcript: transcript)
+            summary = generated
+
+            if let meetingsService {
+                let payload = MeetingSavePayload(
+                    transcript: transcript,
+                    language: transcriptLanguage,
+                    durationSeconds: transcriptDurationSeconds,
+                    source: nil,
+                    deviceName: activeInputName == "Not recording" ? nil : activeInputName,
+                    locationName: nil,
+                    summary: generated
+                )
+                _ = try? await meetingsService.saveMeeting(payload)
+            }
+
             phase = .completed
         } catch {
             fail(error.localizedDescription)

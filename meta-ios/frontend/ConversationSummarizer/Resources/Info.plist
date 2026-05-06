@@ -30,7 +30,19 @@
 				<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>google-oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.974292390528-1ebrtf8fqjjuh6q0apkp478co6vqr8u0</string>
+			</array>
+		</dict>
 	</array>
+    <key>GoogleClientID</key>
+    <string>974292390528-1ebrtf8fqjjuh6q0apkp478co6vqr8u0.apps.googleusercontent.com</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key>
@@ -61,8 +73,6 @@
     <string>Location is used to add optional city-level context to conversation summaries.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Local network access is needed to reach the meeting backend running on your Mac during MVP testing.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Speech Recognition is needed to transcribe recorded meetings.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
@@ -96,6 +106,7 @@
     <dict/>
     <key>UIBackgroundModes</key>
     <array>
+        <string>audio</string>
         <string>bluetooth-peripheral</string>
         <string>external-accessory</string>
     </array>

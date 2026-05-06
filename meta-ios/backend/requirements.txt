@@ -1,7 +1,10 @@
 fastapi>=0.115.0
 faster-whisper>=1.0.0
 openai>=1.99.0
+pyannote.audio>=3.3.0
 pydantic-settings>=2.4.0
+pyjwt[crypto]>=2.9.0
 python-multipart>=0.0.9
 uvicorn[standard]>=0.30.0
+whisperx>=3.1.5
 

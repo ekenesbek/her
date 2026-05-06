@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     openai_base_url: str | None = None
     openai_summary_model: str = "gpt-oss"
 
+    auth_jwt_secret: str = "dev-secret-change-me-in-production"
+    apple_client_id: str = "com.ekenesbek.metaagent"
+    google_client_ids: str = ""
+
+    huggingface_token: str | None = None
+    diarization_enabled: bool = True
+    voice_profile_match_threshold: float = 0.62
+
+    @property
+    def google_client_id_list(self) -> list[str]:
+        return [c.strip() for c in self.google_client_ids.split(",") if c.strip()]
+
 
 @lru_cache
 def get_settings() -> Settings:
