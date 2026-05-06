@@ -74,8 +74,19 @@ final class MeetingsStore: ObservableObject {
     }
 }
 
+struct MeetingSavePayload {
+    let transcript: String
+    let language: String?
+    let durationSeconds: Double?
+    let source: String?
+    let deviceName: String?
+    let locationName: String?
+    let summary: MeetingSummary
+}
+
 protocol MeetingsService {
     func listMeetings() async throws -> [StoredMeeting]
+    func saveMeeting(_ payload: MeetingSavePayload) async throws -> StoredMeeting
 }
 
 enum MeetingsServiceFactory {
@@ -97,11 +108,39 @@ struct BackendMeetingsService: MeetingsService {
     }
 
     func listMeetings() async throws -> [StoredMeeting] {
-        let (data, response) = try await session.data(from: endpoint)
+        var request = URLRequest(url: endpoint)
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
             throw MeetingsServiceError.backendFailed
         }
 
+        return try Self.decoder().decode(BackendMeetingListResponse.self, from: data).meetings.map(\.storedMeeting)
+    }
+
+    func saveMeeting(_ payload: MeetingSavePayload) async throws -> StoredMeeting {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        request.httpBody = try encoder.encode(BackendMeetingSaveBody(payload: payload))
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw MeetingsServiceError.backendFailed
+        }
+
+        return try Self.decoder().decode(BackendMeetingRecord.self, from: data).storedMeeting
+    }
+
+    private static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
@@ -114,8 +153,39 @@ struct BackendMeetingsService: MeetingsService {
             }
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO8601 date.")
         }
+        return decoder
+    }
+}
 
-        return try decoder.decode(BackendMeetingListResponse.self, from: data).meetings.map(\.storedMeeting)
+private struct BackendMeetingSaveBody: Encodable {
+    let transcript: String
+    let language: String?
+    let durationSeconds: Double?
+    let source: String?
+    let deviceName: String?
+    let locationName: String?
+    let title: String
+    let overview: String
+    let keyTopics: [String]
+    let decisions: [String]
+    let actionItems: [String]
+    let followUps: [String]
+    let generatedAt: Date
+
+    init(payload: MeetingSavePayload) {
+        transcript = payload.transcript
+        language = payload.language
+        durationSeconds = payload.durationSeconds
+        source = payload.source
+        deviceName = payload.deviceName
+        locationName = payload.locationName
+        title = payload.summary.title
+        overview = payload.summary.overview
+        keyTopics = payload.summary.keyTopics
+        decisions = payload.summary.decisions
+        actionItems = payload.summary.actionItems
+        followUps = payload.summary.followUps
+        generatedAt = payload.summary.generatedAt
     }
 }
 

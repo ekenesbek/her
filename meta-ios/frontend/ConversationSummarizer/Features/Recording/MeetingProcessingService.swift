@@ -35,6 +35,9 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         request.httpMethod = "POST"
         request.timeoutInterval = 300
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try makeMultipartBody(fileURL: recordingURL, boundary: boundary)
 
         let (data, response) = try await session.data(for: request)

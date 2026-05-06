@@ -1,18 +1,18 @@
 import AVFoundation
 import CoreLocation
-import Speech
 import SwiftUI
 import UserNotifications
 
 struct RootView: View {
     @ObservedObject var wearablesBridge: WearablesBridge
     @StateObject private var settings = AppSettingsStore()
+    @StateObject private var authStore = AuthStore()
 
     var body: some View {
         if settings.onboardingCompleted {
-            ContentView(wearablesBridge: wearablesBridge, settings: settings)
+            ContentView(wearablesBridge: wearablesBridge, settings: settings, authStore: authStore)
         } else {
-            OnboardingView(wearablesBridge: wearablesBridge, settings: settings)
+            OnboardingView(wearablesBridge: wearablesBridge, settings: settings, authStore: authStore)
         }
     }
 }
@@ -234,6 +234,7 @@ private enum MainRoute {
 struct ContentView: View {
     @ObservedObject var wearablesBridge: WearablesBridge
     @ObservedObject var settings: AppSettingsStore
+    @ObservedObject var authStore: AuthStore
     @StateObject private var viewModel: ConversationSessionViewModel
     @StateObject private var liveContext = LiveContextStore()
     @StateObject private var meetingsStore = MeetingsStore()
@@ -241,15 +242,16 @@ struct ContentView: View {
     @State private var recordingMuted = false
     @State private var selectedMeeting: StoredMeeting?
 
-    init(wearablesBridge: WearablesBridge, settings: AppSettingsStore) {
+    init(wearablesBridge: WearablesBridge, settings: AppSettingsStore, authStore: AuthStore) {
         self.wearablesBridge = wearablesBridge
         self.settings = settings
+        self.authStore = authStore
         _viewModel = StateObject(
             wrappedValue: ConversationSessionViewModel(
                 recorder: MeetingRecorder(),
-                transcriber: SpeechTranscriber(),
                 summaryService: SummaryServiceFactory.make(),
-                meetingProcessor: MeetingProcessingServiceFactory.make()
+                meetingProcessor: MeetingProcessingServiceFactory.make(),
+                meetingsService: MeetingsServiceFactory.make()
             )
         )
     }
@@ -350,6 +352,7 @@ struct ContentView: View {
                         settings: settings,
                         bridge: wearablesBridge,
                         viewModel: viewModel,
+                        authStore: authStore,
                         onHome: { route = .home },
                         onConversations: { route = .conversations },
                         onRecord: showRecording,
@@ -366,6 +369,14 @@ struct ContentView: View {
             liveContext.refreshIfAuthorized()
             Task { @MainActor in
                 await meetingsStore.refresh()
+                await viewModel.recoverIfNeeded()
+            }
+        }
+        .onChange(of: viewModel.phase) { newPhase in
+            if newPhase == .completed {
+                Task { @MainActor in
+                    await meetingsStore.refresh()
+                }
             }
         }
     }
@@ -2179,6 +2190,7 @@ private struct ExactSettingsMetaScreen: View {
     @ObservedObject var settings: AppSettingsStore
     @ObservedObject var bridge: WearablesBridge
     @ObservedObject var viewModel: ConversationSessionViewModel
+    @ObservedObject var authStore: AuthStore
 
     let onHome: () -> Void
     let onConversations: () -> Void
@@ -2189,6 +2201,9 @@ private struct ExactSettingsMetaScreen: View {
     @State private var editingProfile = false
     @State private var aiName: String
     @State private var ownerName: String
+    @State private var voiceProfiles: [VoiceProfile] = []
+    @State private var voiceProfilesLoading = false
+    @State private var presentingVoiceEnrollment = false
     @State private var processOnDevice = true
     @State private var redactPII = true
     @State private var glassesIndicator = true
@@ -2202,6 +2217,7 @@ private struct ExactSettingsMetaScreen: View {
         settings: AppSettingsStore,
         bridge: WearablesBridge,
         viewModel: ConversationSessionViewModel,
+        authStore: AuthStore,
         onHome: @escaping () -> Void,
         onConversations: @escaping () -> Void,
         onRecord: @escaping () -> Void,
@@ -2211,6 +2227,7 @@ private struct ExactSettingsMetaScreen: View {
         self.settings = settings
         self.bridge = bridge
         self.viewModel = viewModel
+        self.authStore = authStore
         self.onHome = onHome
         self.onConversations = onConversations
         self.onRecord = onRecord
@@ -2243,6 +2260,45 @@ private struct ExactSettingsMetaScreen: View {
 
                     SettingsSectionHeader(title: "glasses", hint: bridge.audioRoute.primaryDetectedDevice == nil ? "not connected" : "connected")
                     SettingsGlassesCard(bridge: bridge, onPair: onPair)
+
+                    SettingsSectionHeader(title: "voice profile", hint: voiceProfiles.isEmpty ? "not enrolled" : "\(voiceProfiles.count) enrolled")
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            ForEach(voiceProfiles) { profile in
+                                VoiceProfileRow(profile: profile) {
+                                    Task { await deleteVoiceProfile(profile) }
+                                }
+                                DividerLine()
+                            }
+                            Button(action: { presentingVoiceEnrollment = true }) {
+                                HStack(spacing: 14) {
+                                    Image(systemName: "waveform.badge.plus")
+                                        .font(.system(size: 16))
+                                        .frame(width: 24)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Teach meta your voice")
+                                            .font(.system(size: 14.5, weight: .medium, design: .serif))
+                                        Text("60-second sample so meta can label you in transcripts")
+                                            .font(.system(size: 12, design: .serif))
+                                            .italic()
+                                            .foregroundColor(AppTheme.dim)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .foregroundColor(AppTheme.dim)
+                                }
+                                .foregroundColor(AppTheme.fg)
+                                .padding(16)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                    }
+                    .onAppear { Task { await loadVoiceProfiles() } }
+                    .sheet(isPresented: $presentingVoiceEnrollment) {
+                        VoiceEnrollmentView(isPresented: $presentingVoiceEnrollment) { newProfile in
+                            voiceProfiles.insert(newProfile, at: 0)
+                        }
+                    }
 
                     SettingsSectionHeader(title: "memory & data")
                     WwCard(padding: 0) {
@@ -2311,9 +2367,15 @@ private struct ExactSettingsMetaScreen: View {
                         }
                     }
 
-                    SettingsDangerFooter {
-                        settings.resetOnboarding()
-                    }
+                    SettingsDangerFooter(
+                        signOut: {
+                            authStore.clear()
+                            settings.resetOnboarding()
+                        },
+                        restartSetup: {
+                            settings.resetOnboarding()
+                        }
+                    )
                     .padding(.top, 26)
 
                     Text("made carefully · almaty · 2026")
@@ -2344,6 +2406,61 @@ private struct ExactSettingsMetaScreen: View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
         return "\(version) (\(build))"
+    }
+
+    @MainActor
+    private func loadVoiceProfiles() async {
+        guard !voiceProfilesLoading, let service = VoiceProfilesService() else { return }
+        voiceProfilesLoading = true
+        defer { voiceProfilesLoading = false }
+        do {
+            voiceProfiles = try await service.list()
+        } catch {
+            // Soft fail; show empty list.
+        }
+    }
+
+    @MainActor
+    private func deleteVoiceProfile(_ profile: VoiceProfile) async {
+        guard let service = VoiceProfilesService() else { return }
+        do {
+            try await service.delete(id: profile.id)
+            voiceProfiles.removeAll { $0.id == profile.id }
+        } catch {
+            // Stay quiet; could surface error if needed.
+        }
+    }
+}
+
+private struct VoiceProfileRow: View {
+    let profile: VoiceProfile
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "person.wave.2")
+                .font(.system(size: 16))
+                .foregroundColor(AppTheme.fg)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(profile.name)
+                    .font(.system(size: 14.5, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                if let duration = profile.durationSeconds {
+                    Text(String(format: "%.0fs sample", duration))
+                        .font(.system(size: 12, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.dim)
+                }
+            }
+            Spacer()
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .foregroundColor(AppTheme.danger)
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+        .padding(16)
     }
 }
 
@@ -2680,10 +2797,24 @@ private struct SettingsToggleRow: View {
 }
 
 private struct SettingsDangerFooter: View {
+    let signOut: () -> Void
     let restartSetup: () -> Void
 
     var body: some View {
         VStack(spacing: 14) {
+            Button(action: signOut) {
+                HStack(spacing: 8) {
+                    Image(systemName: "rectangle.portrait.and.arrow.right")
+                        .font(.system(size: 14, weight: .medium))
+                    Text("sign out")
+                        .font(.system(size: 16, weight: .medium, design: .serif))
+                }
+                .foregroundColor(AppTheme.fg)
+                .frame(maxWidth: .infinity, minHeight: 52)
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+            }
+            .buttonStyle(PlainButtonStyle())
+
             Button(action: restartSetup) {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.counterclockwise")
@@ -3759,6 +3890,7 @@ private struct ErrorBanner: View {
 private enum OnboardingStep: Int, CaseIterable, Hashable {
     case account
     case ownerName
+    case voiceProfile
     case aiName
     case permissions
     case glasses
@@ -3769,6 +3901,8 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
             return "ACCOUNT"
         case .ownerName:
             return "YOU"
+        case .voiceProfile:
+            return "VOICE"
         case .aiName:
             return "AI"
         case .permissions:
@@ -3784,6 +3918,8 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
             return "One mind"
         case .ownerName:
             return "Your name"
+        case .voiceProfile:
+            return "Teach meta your voice"
         case .aiName:
             return "Assistant name"
         case .permissions:
@@ -3799,6 +3935,8 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
             return "Sign in to keep conversations, settings, and summaries in one workspace."
         case .ownerName:
             return "This is how the app addresses the main owner."
+        case .voiceProfile:
+            return "Optional. Speak for ~60 seconds so meta can label you in transcripts automatically."
         case .aiName:
             return "This is the assistant name you will see across recordings and summaries."
         case .permissions:
@@ -3814,6 +3952,8 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
             return "person.crop.circle"
         case .ownerName, .aiName:
             return "text.cursor"
+        case .voiceProfile:
+            return "waveform.badge.plus"
         case .permissions:
             return "checkmark.seal"
         case .glasses:
@@ -3863,22 +4003,30 @@ private final class LocationPermissionController: NSObject, ObservableObject, CL
 private struct OnboardingView: View {
     @ObservedObject var wearablesBridge: WearablesBridge
     @ObservedObject var settings: AppSettingsStore
+    @ObservedObject var authStore: AuthStore
 
     @StateObject private var locationPermission = LocationPermissionController()
-    @State private var step: OnboardingStep = .account
+    @State private var step: OnboardingStep
     @State private var selectedProvider: SignInProvider?
     @State private var aiName: String
     @State private var ownerName: String
     @State private var microphonePermission: PermissionState = .unknown
-    @State private var speechPermission: PermissionState = .unknown
     @State private var notificationPermission: PermissionState = .unknown
 
-    init(wearablesBridge: WearablesBridge, settings: AppSettingsStore) {
+    init(wearablesBridge: WearablesBridge, settings: AppSettingsStore, authStore: AuthStore) {
         self.wearablesBridge = wearablesBridge
         self.settings = settings
+        self.authStore = authStore
+        _step = State(initialValue: authStore.isAuthenticated ? .ownerName : .account)
         _selectedProvider = State(initialValue: settings.signInProvider)
         _aiName = State(initialValue: settings.aiDisplayName)
-        _ownerName = State(initialValue: settings.ownerName)
+        let prefilledName: String
+        if !settings.ownerName.isEmpty {
+            prefilledName = settings.ownerName
+        } else {
+            prefilledName = authStore.session?.user.name ?? ""
+        }
+        _ownerName = State(initialValue: prefilledName)
     }
 
     var body: some View {
@@ -3887,8 +4035,14 @@ private struct OnboardingView: View {
                 AppTheme.bg.ignoresSafeArea()
 
                 if step == .account {
-                    SetupAccountPage(selectedProvider: $selectedProvider) { provider in
+                    SetupAccountPage(
+                        authStore: authStore,
+                        selectedProvider: $selectedProvider
+                    ) { provider in
                         selectedProvider = provider
+                        if ownerName.isEmpty, let name = authStore.session?.user.name {
+                            ownerName = name
+                        }
                         go(to: .ownerName)
                     }
                     .padding(.horizontal, 22)
@@ -3905,38 +4059,56 @@ private struct OnboardingView: View {
         .navigationViewStyle(.stack)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear(perform: refreshPermissionStates)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissionStates()
+        }
+    }
+
+    private var currentProvider: SignInProvider? {
+        switch authStore.session?.user.provider {
+        case "google": return .google
+        case "apple": return .apple
+        default: return selectedProvider
+        }
     }
 
     @ViewBuilder
     private var currentPage: some View {
         switch step {
         case .account:
-            SetupAccountPage(selectedProvider: $selectedProvider) { provider in
-                selectedProvider = provider
-                go(to: .ownerName)
-            }
+            EmptyView()
         case .ownerName:
-            SetupOwnerNamePage(ownerName: $ownerName) {
-                go(to: .aiName)
+            SetupOwnerNamePage(
+                ownerName: $ownerName,
+                provider: currentProvider,
+                onBack: authStore.isAuthenticated ? nil : goBack
+            ) {
+                go(to: .voiceProfile)
             }
+        case .voiceProfile:
+            SetupVoiceProfilePage(
+                ownerName: ownerName,
+                onBack: goBack,
+                onContinue: { go(to: .aiName) }
+            )
         case .aiName:
-            SetupAgentNamePage(aiName: $aiName) {
+            SetupAgentNamePage(
+                aiName: $aiName,
+                onBack: goBack
+            ) {
                 go(to: .permissions)
             }
         case .permissions:
             SetupPermissionsPage(
                 microphonePermission: microphonePermission,
-                speechPermission: speechPermission,
                 locationPermission: locationPermission.state,
                 notificationPermission: notificationPermission,
-                localDataPermission: .granted,
                 bluetoothPermission: bluetoothPermission,
                 onMicrophone: requestMicrophonePermission,
-                onSpeech: requestSpeechPermission,
                 onLocation: requestLocationPermission,
                 onNotifications: requestNotificationPermission,
-                onLocalData: {},
-                onBluetooth: wearablesBridge.refreshAudioRoute
+                onBluetooth: wearablesBridge.refreshAudioRoute,
+                onBack: goBack
             ) {
                 go(to: .glasses)
             }
@@ -3968,15 +4140,12 @@ private struct OnboardingView: View {
     }
 
     private func finish(glassesSkipped: Bool) {
-        guard let selectedProvider else {
-            go(to: .account)
-            return
-        }
+        let provider: SignInProvider = (authStore.session?.user.provider == "google") ? .google : .apple
 
         settings.completeOnboarding(
             aiName: aiName,
             ownerName: ownerName,
-            signInProvider: selectedProvider,
+            signInProvider: provider,
             glassesSetupSkipped: glassesSkipped
         )
     }
@@ -3991,17 +4160,6 @@ private struct OnboardingView: View {
             microphonePermission = .unknown
         @unknown default:
             microphonePermission = .unknown
-        }
-
-        switch SFSpeechRecognizer.authorizationStatus() {
-        case .authorized:
-            speechPermission = .granted
-        case .denied, .restricted:
-            speechPermission = .denied
-        case .notDetermined:
-            speechPermission = .unknown
-        @unknown default:
-            speechPermission = .unknown
         }
 
         UNUserNotificationCenter.current().getNotificationSettings { settings in
@@ -4026,14 +4184,6 @@ private struct OnboardingView: View {
         AVAudioSession.sharedInstance().requestRecordPermission { granted in
             DispatchQueue.main.async {
                 microphonePermission = granted ? .granted : .denied
-            }
-        }
-    }
-
-    private func requestSpeechPermission() {
-        SFSpeechRecognizer.requestAuthorization { status in
-            DispatchQueue.main.async {
-                speechPermission = status == .authorized ? .granted : .denied
             }
         }
     }
@@ -4157,8 +4307,14 @@ private struct SetupPageShell<Content: View>: View {
 }
 
 private struct SetupAccountPage: View {
+    @ObservedObject var authStore: AuthStore
     @Binding var selectedProvider: SignInProvider?
     let onSelect: (SignInProvider) -> Void
+
+    @State private var isWorking = false
+    @State private var errorMessage: String?
+    private let appleService = AppleSignInService()
+    private let googleService = GoogleSignInService()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -4218,32 +4374,102 @@ private struct SetupAccountPage: View {
                     selected: selectedProvider == .apple,
                     primary: true
                 ) {
-                    onSelect(.apple)
+                    Task { await runApple() }
                 }
                 SetupProviderButton(
                     provider: .google,
                     selected: selectedProvider == .google,
                     primary: false
                 ) {
-                    onSelect(.google)
+                    Task { await runGoogle() }
                 }
+            }
+            .disabled(isWorking)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 12.5, weight: .regular, design: .serif))
+                    .foregroundColor(.red)
+                    .padding(.top, 12)
+                    .multilineTextAlignment(.leading)
             }
 
             WarmAuthTerms()
                 .padding(.top, 14)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .overlay {
+            if isWorking {
+                ZStack {
+                    Color.black.opacity(0.18).ignoresSafeArea()
+                    ProgressView().progressViewStyle(.circular)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func runApple() async {
+        guard let client = AuthClient() else {
+            errorMessage = "Backend is not configured. Set BackendAPIURL in Info.plist."
+            return
+        }
+
+        errorMessage = nil
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            let result = try await appleService.signIn()
+            let session = try await client.signInWithApple(
+                identityToken: result.identityToken,
+                fullName: result.fullName,
+                email: result.email
+            )
+            authStore.setSession(session)
+            selectedProvider = .apple
+            onSelect(.apple)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func runGoogle() async {
+        guard let client = AuthClient() else {
+            errorMessage = "Backend is not configured. Set BackendAPIURL in Info.plist."
+            return
+        }
+
+        errorMessage = nil
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            let result = try await googleService.signIn()
+            let session = try await client.signInWithGoogle(idToken: result.idToken)
+            authStore.setSession(session)
+            selectedProvider = .google
+            onSelect(.google)
+        } catch GoogleSignInError.authorizationCancelled {
+            // User cancelled the picker; stay silent.
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
 private struct SetupOwnerNamePage: View {
     @Binding var ownerName: String
+    let provider: SignInProvider?
+    let onBack: (() -> Void)?
     let onContinue: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            WwSteps(step: 1, total: 4, label: "you")
-            WwHeader(pre: "from your apple id", title: "What should I call you?", italic: true)
+            OnboardingBackBar(onBack: onBack)
+            WwSteps(step: 1, total: 5, label: "you")
+            WwHeader(pre: prefixText, title: "What should I call you?", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
                 WwCard(padding: 20) {
@@ -4271,11 +4497,11 @@ private struct SetupOwnerNamePage: View {
                 }
 
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "apple.logo")
+                    Image(systemName: captionIcon)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(AppTheme.muted)
                         .padding(.top, 2)
-                    Text("Pulled from Apple ID. Editable anytime in Settings › Profile.")
+                    Text(captionText)
                         .font(.system(size: 12.5, weight: .regular, design: .serif))
                         .foregroundColor(AppTheme.muted)
                         .lineSpacing(4)
@@ -4297,17 +4523,238 @@ private struct SetupOwnerNamePage: View {
     private var displayName: String {
         ownerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Ersultan" : ownerName
     }
+
+    private var prefixText: String {
+        switch provider {
+        case .google: return "from your google account"
+        case .apple, nil: return "from your apple id"
+        }
+    }
+
+    private var captionText: String {
+        switch provider {
+        case .google:
+            return "Pulled from your Google account. Editable anytime in Settings › Profile."
+        case .apple, nil:
+            return "Pulled from Apple ID. Editable anytime in Settings › Profile."
+        }
+    }
+
+    private var captionIcon: String {
+        switch provider {
+        case .google: return "g.circle"
+        case .apple, nil: return "apple.logo"
+        }
+    }
+}
+
+private struct SetupVoiceProfilePage: View {
+    let ownerName: String
+    let onBack: () -> Void
+    let onContinue: () -> Void
+
+    @StateObject private var recorder = VoiceEnrollmentRecorder()
+    @State private var errorMessage: String?
+    @State private var saving = false
+    @State private var saved = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            OnboardingBackBar(onBack: onBack)
+            WwSteps(step: 2, total: 5, label: "voice")
+            WwHeader(pre: "your voice", title: "Teach meta your voice.", italic: true)
+
+            VStack(alignment: .leading, spacing: 16) {
+                WwCard(padding: 20) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        MonoLabel(saved ? "voice profile saved" : "tap record · ~60 seconds")
+                        Text(prompt)
+                            .font(.system(size: 14, weight: .regular, design: .serif))
+                            .foregroundColor(AppTheme.muted)
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        statusRow
+                    }
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 12.5, weight: .regular, design: .serif))
+                        .foregroundColor(.red)
+                }
+
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "shield")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(AppTheme.muted)
+                        .padding(.top, 2)
+                    Text("Stored privately. You can re-record or delete this anytime in Settings › Voice profile.")
+                        .font(.system(size: 12.5, weight: .regular, design: .serif))
+                        .foregroundColor(AppTheme.muted)
+                        .lineSpacing(4)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bgSoft))
+
+                Spacer()
+
+                primaryButton
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 18)
+            .padding(.bottom, 22)
+        }
+    }
+
+    private var prompt: String {
+        "Speak naturally for about a minute — describe your day, read something out loud, anything works. We'll use this to label you as \(ownerName.isEmpty ? "you" : ownerName) in future transcripts."
+    }
+
+    @ViewBuilder
+    private var statusRow: some View {
+        switch recorder.phase {
+        case .idle:
+            Button(action: { Task { await recorder.start() } }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "record.circle")
+                        .foregroundColor(.red)
+                    Text("Record")
+                        .font(.system(size: 16, weight: .medium, design: .serif))
+                }
+                .frame(maxWidth: .infinity, minHeight: 50)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.borderStrong, lineWidth: 1))
+                .foregroundColor(AppTheme.fg)
+            }
+            .buttonStyle(PlainButtonStyle())
+        case let .recording(elapsed):
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Recording… \(elapsed)s / 60s")
+                    .font(.system(size: 14, weight: .medium, design: .monospaced))
+                ProgressView(value: Double(elapsed), total: 60)
+                    .tint(.red)
+                Button(action: { recorder.stop() }) {
+                    Text(recorder.canStop ? "Stop" : "Hold (≥ 5s)")
+                        .font(.system(size: 14, weight: .medium, design: .serif))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.borderStrong, lineWidth: 1))
+                        .foregroundColor(AppTheme.fg)
+                }
+                .disabled(!recorder.canStop)
+                .buttonStyle(PlainButtonStyle())
+            }
+        case .ready(let url):
+            VStack(spacing: 8) {
+                Label("Sample captured", systemImage: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                HStack(spacing: 10) {
+                    Button("Re-record") { recorder.reset() }
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.borderStrong, lineWidth: 1))
+                    Button(action: { Task { await save(url: url) } }) {
+                        Text("Save")
+                            .font(.system(size: 14, weight: .semibold, design: .serif))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(saving ? Color.gray : Color.black)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                    }
+                    .disabled(saving)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+        case .uploading:
+            ProgressView("Saving…")
+                .frame(maxWidth: .infinity, minHeight: 50)
+        case .failed(let detail):
+            Label(detail, systemImage: "exclamationmark.triangle")
+                .foregroundColor(.red)
+        }
+    }
+
+    @ViewBuilder
+    private var primaryButton: some View {
+        if saved {
+            WwPrimaryButton("continue →", action: onContinue)
+        } else {
+            VStack(spacing: 8) {
+                WwPrimaryButton("continue →", disabled: !canContinueWithoutSaving, action: onContinue)
+                Button("Skip for now", action: onContinue)
+                    .font(.system(size: 13, weight: .regular, design: .serif).italic())
+                    .foregroundColor(AppTheme.muted)
+            }
+        }
+    }
+
+    private var canContinueWithoutSaving: Bool {
+        if case .uploading = recorder.phase { return false }
+        if case .recording = recorder.phase { return false }
+        return true
+    }
+
+    @MainActor
+    private func save(url: URL) async {
+        guard let service = VoiceProfilesService() else {
+            errorMessage = "Backend not configured."
+            return
+        }
+        let trimmedName = ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            errorMessage = "Please go back and set your name first."
+            return
+        }
+        errorMessage = nil
+        saving = true
+        recorder.setUploading()
+        defer { saving = false }
+        do {
+            _ = try await service.enroll(name: trimmedName, audioURL: url)
+            try? FileManager.default.removeItem(at: url)
+            saved = true
+            recorder.reset()
+        } catch {
+            errorMessage = error.localizedDescription
+            recorder.setFailed(error.localizedDescription)
+        }
+    }
+}
+
+private struct OnboardingBackBar: View {
+    let onBack: (() -> Void)?
+
+    var body: some View {
+        HStack {
+            if let onBack {
+                Button(action: onBack) {
+                    Image(systemName: "arrow.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(AppTheme.fg)
+                        .frame(width: 40, height: 40)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(AppTheme.bgSoft))
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 8)
+        .frame(height: onBack == nil ? 0 : 48)
+        .opacity(onBack == nil ? 0 : 1)
+    }
 }
 
 private struct SetupAgentNamePage: View {
     @Binding var aiName: String
+    let onBack: () -> Void
     let onContinue: () -> Void
 
     private let suggestions = ["meta", "iris", "echo", "mira", "atlas", "wren", "lior"]
 
     var body: some View {
         VStack(spacing: 0) {
-            WwSteps(step: 2, total: 4, label: "agent")
+            OnboardingBackBar(onBack: onBack)
+            WwSteps(step: 3, total: 5, label: "agent")
             WwHeader(pre: "your agent", title: "And what shall I call myself?", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
@@ -4492,22 +4939,20 @@ private struct SetupLanguagePage: View {
 
 private struct SetupPermissionsPage: View {
     let microphonePermission: PermissionState
-    let speechPermission: PermissionState
     let locationPermission: PermissionState
     let notificationPermission: PermissionState
-    let localDataPermission: PermissionState
     let bluetoothPermission: PermissionState
     let onMicrophone: () -> Void
-    let onSpeech: () -> Void
     let onLocation: () -> Void
     let onNotifications: () -> Void
-    let onLocalData: () -> Void
     let onBluetooth: () -> Void
+    let onBack: () -> Void
     let onContinue: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            WwSteps(step: 3, total: 4, label: "access")
+            OnboardingBackBar(onBack: onBack)
+            WwSteps(step: 4, total: 5, label: "access")
             WwHeader(pre: "permissions", title: "Let me help.", italic: true)
 
             ScrollView(showsIndicators: false) {
@@ -4545,15 +4990,6 @@ private struct SetupPermissionsPage: View {
                                 state: notificationPermission,
                                 defaultOn: true,
                                 action: onNotifications
-                            )
-                            DividerLine()
-                            ExactPermissionRow(
-                                icon: "square.stack.3d.up",
-                                title: "Local data",
-                                subtitle: "photos, contacts, calendar",
-                                state: localDataPermission,
-                                defaultOn: false,
-                                action: onLocalData
                             )
                             DividerLine()
                             ExactPermissionRow(

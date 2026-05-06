@@ -106,6 +106,9 @@ struct BackendSummaryService: SummaryService {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try JSONEncoder().encode(SummaryRequest(transcript: transcript))
 
         let (data, response) = try await session.data(for: request)

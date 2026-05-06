@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
+from uuid import uuid4
 
-from app.schemas import MeetingResponse
+from app.schemas import MeetingResponse, UserResponse, VoiceProfileResponse
 
 
 SUMMARY_ITEM_KINDS = ("decision", "action", "follow_up")
@@ -16,31 +18,93 @@ class MeetingStore:
         self.db_path = data_dir / "meetings.sqlite3"
         self._init_db()
 
-    def save(self, meeting: MeetingResponse) -> None:
+    def save(self, meeting: MeetingResponse, user_id: str | None = None) -> None:
         with self._connect() as connection:
-            self._save_with_connection(connection, meeting)
+            self._save_with_connection(connection, meeting, user_id)
 
-    def list(self, limit: int = 50) -> list[MeetingResponse]:
+    def list(self, user_id: str | None = None, limit: int = 50) -> list[MeetingResponse]:
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM meetings
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if user_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM meetings ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM meetings WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (user_id, limit),
+                ).fetchall()
             return [self._meeting_from_row(connection, row) for row in rows]
 
-    def get(self, meeting_id: str) -> MeetingResponse | None:
+    def get(self, meeting_id: str, user_id: str | None = None) -> MeetingResponse | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM meetings WHERE id = ?",
-                (meeting_id,),
-            ).fetchone()
+            if user_id is None:
+                row = connection.execute(
+                    "SELECT * FROM meetings WHERE id = ?",
+                    (meeting_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM meetings WHERE id = ? AND user_id = ?",
+                    (meeting_id, user_id),
+                ).fetchone()
             if row is None:
                 return None
             return self._meeting_from_row(connection, row)
+
+    def find_or_create_user(
+        self,
+        provider: str,
+        provider_user_id: str,
+        email: str | None,
+        name: str | None,
+    ) -> UserResponse:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE provider = ? AND provider_user_id = ?",
+                (provider, provider_user_id),
+            ).fetchone()
+
+            if row is not None:
+                if (email and not row["email"]) or (name and not row["name"]):
+                    connection.execute(
+                        "UPDATE users SET email = COALESCE(email, ?), name = COALESCE(name, ?) WHERE id = ?",
+                        (email, name, row["id"]),
+                    )
+                    row = connection.execute(
+                        "SELECT * FROM users WHERE id = ?", (row["id"],)
+                    ).fetchone()
+                return self._user_from_row(row)
+
+            user_id = str(uuid4())
+            now = datetime.now(UTC).isoformat()
+            connection.execute(
+                """
+                INSERT INTO users (id, provider, provider_user_id, email, name, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, provider, provider_user_id, email, name, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            return self._user_from_row(row)
+
+    def get_user(self, user_id: str) -> UserResponse | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            return self._user_from_row(row) if row else None
+
+    def _user_from_row(self, row: sqlite3.Row) -> UserResponse:
+        return UserResponse(
+            id=row["id"],
+            provider=row["provider"],
+            email=row["email"],
+            name=row["name"],
+            createdAt=row["created_at"],
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -55,6 +119,128 @@ class MeetingStore:
                 self._migrate_json_blob_store(connection)
             else:
                 self._create_tables(connection)
+
+            self._ensure_users_table(connection)
+            self._ensure_meetings_user_id_column(connection)
+            self._ensure_voice_profiles_table(connection)
+
+    def _ensure_users_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                provider_user_id TEXT NOT NULL,
+                email TEXT,
+                name TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(provider, provider_user_id)
+            )
+            """
+        )
+
+    def _ensure_meetings_user_id_column(self, connection: sqlite3.Connection) -> None:
+        columns = self._table_columns(connection, "meetings")
+        if "user_id" not in columns:
+            connection.execute("ALTER TABLE meetings ADD COLUMN user_id TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_meetings_user_id ON meetings (user_id)"
+            )
+
+    def _ensure_voice_profiles_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS voice_profiles (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                duration_seconds REAL,
+                embedding BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_voice_profiles_user_id ON voice_profiles (user_id)"
+        )
+
+    def save_voice_profile(
+        self,
+        user_id: str,
+        name: str,
+        duration_seconds: float | None,
+        embedding: bytes,
+    ) -> VoiceProfileResponse:
+        from datetime import UTC as _UTC
+
+        profile_id = str(uuid4())
+        created_at = datetime.now(_UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO voice_profiles (id, user_id, name, duration_seconds, embedding, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (profile_id, user_id, name, duration_seconds, embedding, created_at),
+            )
+        return VoiceProfileResponse(
+            id=profile_id,
+            name=name,
+            durationSeconds=duration_seconds,
+            createdAt=created_at,
+        )
+
+    def list_voice_profiles(self, user_id: str) -> list[VoiceProfileResponse]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, name, duration_seconds, created_at FROM voice_profiles
+                WHERE user_id = ? ORDER BY created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+            return [
+                VoiceProfileResponse(
+                    id=row["id"],
+                    name=row["name"],
+                    durationSeconds=row["duration_seconds"],
+                    createdAt=row["created_at"],
+                )
+                for row in rows
+            ]
+
+    def list_voice_profile_embeddings(
+        self, user_id: str
+    ) -> list[tuple[VoiceProfileResponse, bytes]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, name, duration_seconds, created_at, embedding
+                FROM voice_profiles WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchall()
+            return [
+                (
+                    VoiceProfileResponse(
+                        id=row["id"],
+                        name=row["name"],
+                        durationSeconds=row["duration_seconds"],
+                        createdAt=row["created_at"],
+                    ),
+                    row["embedding"],
+                )
+                for row in rows
+            ]
+
+    def delete_voice_profile(self, user_id: str, profile_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM voice_profiles WHERE id = ? AND user_id = ?",
+                (profile_id, user_id),
+            )
+            return cursor.rowcount > 0
 
     def _create_tables(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -133,11 +319,13 @@ class MeetingStore:
         self,
         connection: sqlite3.Connection,
         meeting: MeetingResponse,
+        user_id: str | None = None,
     ) -> None:
         connection.execute(
             """
             INSERT OR REPLACE INTO meetings (
                 id,
+                user_id,
                 created_at,
                 generated_at,
                 title,
@@ -149,10 +337,11 @@ class MeetingStore:
                 device_name,
                 location_name
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 meeting.id,
+                user_id,
                 meeting.createdAt.isoformat(),
                 meeting.generatedAt.isoformat(),
                 meeting.title,

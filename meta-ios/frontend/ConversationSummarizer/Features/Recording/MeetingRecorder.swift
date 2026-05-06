@@ -2,6 +2,9 @@ import AVFoundation
 import Foundation
 
 final class MeetingRecorder {
+    private static let activeRecordingDefaultsKey = "app.recording.activeURL"
+    private static let activeRecordingStartedAtKey = "app.recording.activeStartedAt"
+
     private var recorder: AVAudioRecorder?
     private var currentRecordingURL: URL?
     private var selectedInputName = "iPhone microphone"
@@ -60,6 +63,7 @@ final class MeetingRecorder {
             currentRecordingURL = attempt.fileURL
             selectedInputName = Self.activeInputName(in: audioSession, fallback: route.inputName)
             didStart = true
+            Self.persistActiveRecording(url: attempt.fileURL)
             return attempt.fileURL
         }
 
@@ -78,7 +82,43 @@ final class MeetingRecorder {
         self.currentRecordingURL = nil
         try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         selectedInputName = "iPhone microphone"
+        Self.clearActiveRecording()
         return currentRecordingURL
+    }
+
+    static func persistActiveRecording(url: URL) {
+        let defaults = UserDefaults.standard
+        defaults.set(url.path, forKey: activeRecordingDefaultsKey)
+        defaults.set(Date(), forKey: activeRecordingStartedAtKey)
+    }
+
+    static func clearActiveRecording() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: activeRecordingDefaultsKey)
+        defaults.removeObject(forKey: activeRecordingStartedAtKey)
+    }
+
+    static func recoverOrphanedRecording() -> (url: URL, startedAt: Date?)? {
+        let defaults = UserDefaults.standard
+        guard let path = defaults.string(forKey: activeRecordingDefaultsKey) else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            clearActiveRecording()
+            return nil
+        }
+
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+        let size = attributes[.size] as? Int64 ?? 0
+        guard size > 4_096 else {
+            try? FileManager.default.removeItem(at: url)
+            clearActiveRecording()
+            return nil
+        }
+
+        let startedAt = defaults.object(forKey: activeRecordingStartedAtKey) as? Date
+        return (url, startedAt)
     }
 
     private static func configurePreferredRecordingRoute(in session: AVAudioSession) throws -> RecordingRoute {
@@ -99,7 +139,7 @@ final class MeetingRecorder {
         try session.setActive(false, options: .notifyOthersOnDeactivation)
         try session.setCategory(
             .record,
-            mode: .measurement,
+            mode: .default,
             options: []
         )
 
@@ -124,17 +164,9 @@ final class MeetingRecorder {
         return formatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
     }
 
-    private static func recordingSampleRate(from session: AVAudioSession) -> Double {
-        let sampleRate = session.sampleRate
-        guard sampleRate.isFinite, sampleRate >= 8_000 else {
-            return 16_000
-        }
-        return min(sampleRate, 48_000)
-    }
-
     private static func recordingAttempts(in directory: URL, session: AVAudioSession) -> [RecordingAttempt] {
         let baseName = "meeting-\(timestamp())"
-        let sampleRate = recordingSampleRate(from: session)
+        let sampleRate: Double = 16_000
         return [
             RecordingAttempt(
                 name: "AAC m4a",
@@ -144,7 +176,7 @@ final class MeetingRecorder {
                     AVSampleRateKey: sampleRate,
                     AVNumberOfChannelsKey: 1,
                     AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-                    AVEncoderBitRateKey: 64_000
+                    AVEncoderBitRateKey: 96_000
                 ]
             ),
             RecordingAttempt(
