@@ -37,6 +37,48 @@
 
 **Альтернатива дешевле (pipeline):** Whisper STT → Claude → TTS. Турн-ответ 2-4 секунды (не realtime feel), но в 5-7 раз дешевле. Нужен ANTHROPIC_API_KEY.
 
+### 1.1. Custom wake word «Hey [имя]» — детальный план
+
+**Что одноразовое (установка ~10 мин):**
+1. Регистрация на [picovoice.ai/console](https://console.picovoice.ai) — бесплатно для personal
+2. Тренировка custom keyword `.ppn` файла — выбираешь iOS платформу + фразу + язык, ждёшь 5-10 минут, скачиваешь
+3. Создание Access Key на странице AccessKeys
+4. Добавление файла в bundle iOS приложения
+5. Настройка SDK через SPM (`https://github.com/Picovoice/porcupine.git`)
+6. Включение `Always listening` в Settings приложения
+
+**Что постоянно работает после установки:**
+- `.ppn` файл не expires, никогда не пере-тренируется
+- Picovoice SDK работает локально на устройстве, без интернета для wake-detection
+- Slu listener живёт пока приложение активно (foreground или background с audio session)
+
+**Что требует периодических действий:**
+- После **force-kill** приложения (свайп-up) — listener умирает, нужно открыть meta один раз
+- После **перезагрузки телефона** — то же
+- На **free tier Picovoice** — лимит ~50 wake events/мес/устройство; при превышении нужен Standard план $15/мес
+
+**Что не нужно:**
+- Не нужно «продлевать» лицензию `.ppn`
+- Не нужно пере-обучать модель если не меняешь фразу
+- Не нужно держать интернет-соединение для самого wake-detection
+
+**Battery cost (важно для UX):**
+- Always-on listening: ~30-40% дополнительная разрядка в день
+- Smart mode (только когда телефон не заблокирован И BT-устройство подключено): ~10%
+- Ручной режим (только Hey Siri): 0% extra
+
+**Lifecycle table:**
+| Состояние app | Custom wake работает? |
+|---|---|
+| Foreground (открыто) | Да |
+| Background с audio session | Да |
+| Lock screen | Да |
+| Force-killed (swipe-up в app switcher) | Нет — нужно открыть meta |
+| После перезагрузки телефона | Нет — нужно открыть meta один раз |
+| Low Power Mode (<20% батареи) | iOS может приостановить |
+
+**Альтернатива Picovoice:** [OpenWakeWord](https://github.com/dscripka/openWakeWord) — open-source, бесплатно навсегда, но нужно тренировать самому, точность ниже на 5-10%.
+
 ---
 
 ## 2. MWDAT audio API (когда Meta откроет)
