@@ -12,6 +12,7 @@ import type {
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON,
 } from "@simplewebauthn/server";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLang, t } from "@/client/i18n";
@@ -509,6 +510,15 @@ export default function PasskeyAuth() {
             style={{ fontSize: 9, letterSpacing: "0.05em" }}
           >
             {t(lang, "login.strapline")}
+          </div>
+          <div className="flex items-center gap-2 text-[11px] text-[var(--fg-dim)]">
+            <Link href="/terms" className="hover:text-[var(--fg)]">
+              Terms
+            </Link>
+            <span aria-hidden>/</span>
+            <Link href="/privacy" className="hover:text-[var(--fg)]">
+              Privacy
+            </Link>
           </div>
         </div>
       </div>
