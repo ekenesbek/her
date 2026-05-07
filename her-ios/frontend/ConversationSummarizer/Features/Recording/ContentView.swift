@@ -2204,6 +2204,7 @@ private struct ExactSettingsHerScreen: View {
     @State private var voiceProfiles: [VoiceProfile] = []
     @State private var voiceProfilesLoading = false
     @State private var presentingVoiceEnrollment = false
+    @State private var presentingLegal: LegalDocument?
     @State private var processOnDevice = true
     @State private var redactPII = true
     @State private var glassesIndicator = true
@@ -2299,6 +2300,9 @@ private struct ExactSettingsHerScreen: View {
                             voiceProfiles.insert(newProfile, at: 0)
                         }
                     }
+                    .sheet(item: $presentingLegal) { doc in
+                        LegalDocumentView(document: doc, current: $presentingLegal)
+                    }
 
                     SettingsSectionHeader(title: "memory & data")
                     WwCard(padding: 0) {
@@ -2357,9 +2361,13 @@ private struct ExactSettingsHerScreen: View {
                         VStack(spacing: 0) {
                             SettingsValueRow(icon: "gearshape", label: "Version", value: appVersion)
                             DividerLine()
-                            SettingsActionRow(icon: "shield", label: "Privacy policy")
+                            SettingsActionRow(icon: "shield", label: "Privacy policy") {
+                                presentingLegal = .privacy
+                            }
                             DividerLine()
-                            SettingsActionRow(icon: "doc.text", label: "Terms of service")
+                            SettingsActionRow(icon: "doc.text", label: "Terms of service") {
+                                presentingLegal = .terms
+                            }
                             DividerLine()
                             SettingsActionRow(icon: "bubble.left.and.bubble.right", label: "Help & feedback")
                             DividerLine()
@@ -5160,15 +5168,7 @@ private struct ProviderIcon: View {
 
 private struct WarmAuthTerms: View {
     var body: some View {
-        (Text("by continuing — ")
-            + Text("terms").underline()
-            + Text(" · ")
-            + Text("privacy").underline())
-            .font(.system(size: 12, weight: .regular, design: .serif))
-            .italic()
-            .foregroundColor(AppTheme.dim)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .multilineTextAlignment(.center)
+        LegalLinksRow(style: .warmSerif)
     }
 }
 
@@ -5292,29 +5292,13 @@ private struct OnboardingGlassesCard: View {
 
 private struct PrivacyLinkText: View {
     var body: some View {
-        (Text("By continuing, you agree to our ")
-            + Text("Privacy Policy").underline()
-            + Text(" & ")
-            + Text("Terms of Use").underline()
-            + Text("."))
-            .font(.system(size: 12, weight: .regular))
-            .foregroundColor(AppTheme.dim)
-            .multilineTextAlignment(.center)
-            .lineLimit(3)
-            .minimumScaleFactor(0.78)
+        LegalLinksRow(style: .plain)
     }
 }
 
 private struct PrivacyPolicyText: View {
     var body: some View {
-        (Text("Governed by our ")
-            + Text("Privacy Policy").underline()
-            + Text(" and ")
-            + Text("Terms of Service").underline()
-            + Text("."))
-            .font(.system(size: 13, weight: .medium))
-            .foregroundColor(AppTheme.dim)
-            .fixedSize(horizontal: false, vertical: true)
+        LegalLinksRow(style: .settingsBlurb)
     }
 }
 
@@ -5762,6 +5746,236 @@ private extension Color {
             blue: Double(hex & 0xff) / 255,
             opacity: alpha
         )
+    }
+}
+
+enum LegalDocument: Identifiable {
+    case privacy
+    case terms
+
+    var id: String {
+        switch self {
+        case .privacy: return "privacy"
+        case .terms: return "terms"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .privacy: return "Privacy"
+        case .terms: return "Terms of use"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .privacy: return "privacy · draft"
+        case .terms: return "terms · draft"
+        }
+    }
+
+    var updated: String { "updated · May 7, 2026" }
+
+    var intro: String {
+        switch self {
+        case .privacy:
+            return "A working draft of Her's data policy: what may be stored, how browser permissions are used for tasks, and where the user keeps control."
+        case .terms:
+            return "A short working document on how to use Her carefully: which actions stay on your side, where confirmations are required, and what is still considered an early version of the product."
+        }
+    }
+
+    var sections: [(title: String, body: [String])] {
+        switch self {
+        case .privacy:
+            return [
+                ("What data Her needs", [
+                    "Her may store account data, agent settings, conversation history, permissions, connected sites, and technical events required for the product to work.",
+                    "We try not to collect anything unnecessary. If data does not help complete a task, ensure security, or improve reliability, it should not be in the product."
+                ]),
+                ("Browser and connected services", [
+                    "When you enable browser capabilities, Her may see the pages, UI elements, and action results needed to complete your task.",
+                    "Sessions for third-party services stay in your browser. Her uses them only within the permissions you grant and should not perform irreversible actions without separate confirmation."
+                ]),
+                ("Credentials", [
+                    "Passkeys are used for password-less sign-in. The passkey secret stays on your device or in the system credential manager.",
+                    "If Her receives temporary access to a login, password, token, or session, that access must be limited by task, time, and permission level."
+                ]),
+                ("How we use data", [
+                    "Data is used to fulfill your requests, preserve context, configure agents, diagnose errors, ensure security, and improve product quality.",
+                    "We don't want to build a product on selling personal data. Any future change to this approach must be explicitly described in the final policy."
+                ]),
+                ("Storage and deletion", [
+                    "Some data may be stored locally or on the server, depending on the feature. Histories, settings, and permissions should be deletable wherever technically possible.",
+                    "Storage rules may change before the final release. For sensitive workflows, treat the current version as a test and don't share data you can't safely use in an early product."
+                ]),
+                ("User control", [
+                    "You can disable permissions, change agent settings, and stop tasks. The final version will need a more precise control panel for data, export, and deletion."
+                ])
+            ]
+        case .terms:
+            return [
+                ("What Her is", [
+                    "Her helps you build personal agents that work with your browser, connected services, and tasks. The agent acts only within the permissions you explicitly enable.",
+                    "This text is a working draft. It exists so the product has clear rules even before the final legal review."
+                ]),
+                ("Your responsibilities", [
+                    "Use Her only for lawful tasks and don't instruct the agent to do anything that violates other people's rights, third-party service rules, or applicable law.",
+                    "You are responsible for the decisions you confirm: sending messages, placing orders, changing data, connecting accounts, and any action taken in third-party services."
+                ]),
+                ("Permissions and confirmations", [
+                    "Some features require access to the browser, accounts, contacts, calendar, files, or stored credentials. These permissions can be limited or turned off.",
+                    "Payments, financial operations, and other sensitive actions must require separate confirmation. If something looks wrong, stop the task and verify the result manually."
+                ]),
+                ("Third-party services", [
+                    "Her may work on top of sites and APIs we don't own. The availability, limits, pricing, blocks, and errors of those services are beyond our control.",
+                    "When you use a third-party service through Her, its own rules continue to apply."
+                ]),
+                ("Product availability", [
+                    "The service is in an early stage. Bugs, feature changes, temporary outages, and gaps between expected and actual agent behavior are possible.",
+                    "We will try to fix important issues quickly, but we do not yet promise constant availability or fitness of Her for mission-critical workflows."
+                ]),
+                ("Feedback", [
+                    "If you notice a risk, bug, or questionable agent behavior, let us know. That feedback helps align the product and final documents with real usage."
+                ])
+            ]
+        }
+    }
+}
+
+struct LegalDocumentView: View {
+    let document: LegalDocument
+    @Binding var current: LegalDocument?
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    Text(document.label.uppercased())
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .tracking(1.5)
+                        .foregroundColor(AppTheme.dim)
+
+                    Text(document.title)
+                        .font(.system(size: 32, weight: .medium, design: .serif))
+
+                    Text(document.intro)
+                        .font(.system(size: 15, design: .serif))
+                        .foregroundColor(AppTheme.muted)
+                        .lineSpacing(4)
+
+                    Text(document.updated)
+                        .font(.system(size: 12, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.dim)
+
+                    Divider().padding(.vertical, 4)
+
+                    ForEach(Array(document.sections.enumerated()), id: \.offset) { _, section in
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(section.title)
+                                .font(.system(size: 18, weight: .semibold, design: .serif))
+                            ForEach(Array(section.body.enumerated()), id: \.offset) { _, paragraph in
+                                Text(paragraph)
+                                    .font(.system(size: 14, design: .serif))
+                                    .foregroundColor(AppTheme.muted)
+                                    .lineSpacing(4)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(.bottom, 8)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button(document == .privacy ? "Read terms" : "Read privacy") {
+                            current = document == .privacy ? .terms : .privacy
+                        }
+                        .font(.system(size: 13, weight: .medium, design: .serif))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color.black)
+                        .cornerRadius(10)
+
+                        Spacer()
+                    }
+                    .padding(.top, 10)
+                }
+                .padding(20)
+            }
+            .navigationTitle(document.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { current = nil }
+                }
+            }
+        }
+    }
+}
+
+struct LegalLinksRow: View {
+    enum Style {
+        case warmSerif
+        case plain
+        case settingsBlurb
+    }
+
+    let style: Style
+    @State private var sheet: LegalDocument?
+
+    var body: some View {
+        Group {
+            switch style {
+            case .warmSerif:
+                HStack(spacing: 4) {
+                    Text("by continuing —")
+                    legalButton(.terms, "terms")
+                    Text("·")
+                    legalButton(.privacy, "privacy")
+                }
+                .font(.system(size: 12, weight: .regular, design: .serif).italic())
+                .foregroundColor(AppTheme.dim)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            case .plain:
+                HStack(spacing: 4) {
+                    Text("By continuing, you agree to our")
+                    legalButton(.privacy, "Privacy Policy")
+                    Text("&")
+                    legalButton(.terms, "Terms of Use")
+                    Text(".")
+                }
+                .font(.system(size: 12, weight: .regular))
+                .foregroundColor(AppTheme.dim)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.78)
+
+            case .settingsBlurb:
+                HStack(spacing: 4) {
+                    Text("Governed by our")
+                    legalButton(.privacy, "Privacy Policy")
+                    Text("and")
+                    legalButton(.terms, "Terms of Service")
+                    Text(".")
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(AppTheme.dim)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .sheet(item: $sheet) { doc in
+            LegalDocumentView(document: doc, current: $sheet)
+        }
+    }
+
+    @ViewBuilder
+    private func legalButton(_ doc: LegalDocument, _ title: String) -> some View {
+        Button(action: { sheet = doc }) {
+            Text(title).underline()
+        }
+        .buttonStyle(.plain)
     }
 }
 
