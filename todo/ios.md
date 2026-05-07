@@ -63,3 +63,109 @@ Known limitations: physical-device recording, Meta Wearables DAT device pairing,
 ## Next
 
 Result is ready for human review. After approval: commit, push, open PR, then archive/update task state.
+
+# IOS-2: Skip iOS Setup For Existing Accounts
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: ios/IOS-2/skip-setup-existing-account
+Created: 2026-05-07
+
+## Goal
+
+When an iOS user signs in to an already existing account, skip the onboarding/setup flow and enter the app.
+
+## Context
+
+The iOS app currently restores auth sessions but still routes users through the remaining onboarding steps when local `onboardingCompleted` is false. The backend auth response also does not say whether Apple/Google sign-in found an existing user or created a new one, so the frontend cannot distinguish existing accounts from new accounts.
+
+## Scope
+
+In scope:
+- Return a new/existing account signal from the local iOS backend auth endpoints.
+- Persist that signal in the iOS auth session.
+- Complete onboarding automatically for existing-account sessions.
+- Keep newly created accounts on the setup flow.
+
+Out of scope:
+- Redesigning onboarding screens.
+- Adding cloud sync, account deletion, or stage 2 credential-vault behavior.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [x] Add `isNewUser` to backend auth responses.
+- [x] Decode and persist the flag in iOS auth sessions.
+- [x] Skip setup for existing-account sessions while preserving setup for new accounts.
+- [x] Run iOS/backend verification and record result.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-ios2-data python3 - <<'PY' ...` contract smoke for `find_or_create_user_with_status` and `AuthResponse.isNewUser`.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO clean build`
+
+## Result
+
+Backend auth now returns `isNewUser` for Apple and Google sign-in. The storage layer keeps the existing `find_or_create_user` API and adds `find_or_create_user_with_status` so auth endpoints can distinguish first sign-in from an existing account.
+
+iOS decodes and persists the optional `isNewUser` flag in `AuthSession`. New sessions with `isNewUser == true` continue through setup. Existing sessions with `isNewUser == false`, plus legacy restored sessions where the flag is absent, automatically mark onboarding complete with the current/default Her profile values and enter the app.
+
+## Next
+
+Result is ready for human review. After approval: commit, push, open PR, then archive/update task state.
+
+# IOS-3: Store iOS Setup State On Backend
+
+Status: planned
+Priority: P2
+Owner: agent
+Stream: ios
+Branch: ios/IOS-3/server-setup-state
+Created: 2026-05-07
+
+## Goal
+
+Persist iOS setup completion and profile settings on the iOS backend instead of relying only on device-local `UserDefaults`.
+
+## Context
+
+`IOS-2` fixes the immediate flow by using the backend identity database to distinguish new accounts from existing accounts. That lets existing accounts skip setup, but the app still stores setup details locally on one device: `onboardingCompleted`, `aiName`, `ownerName`, `signInProvider`, and `glassesSetupSkipped`.
+
+If we want this fully correct, the local iOS backend should expose a `user_profile` or `user_settings` table and API so setup completion lives with the authenticated account. That avoids re-running setup on another device or after local defaults are cleared.
+
+## Scope
+
+In scope:
+- Add a backend table for user profile/setup settings keyed by `user_id`.
+- Add authenticated endpoints to read and update setup/profile state.
+- Update iOS to fetch setup state after auth/session restore.
+- Update iOS to write setup completion and profile edits through the backend.
+- Keep a local fallback only for backend-unavailable/offline development.
+
+Out of scope:
+- Cloud deployment or cross-device sync through a hosted server; local backend remains the stage 1 target.
+- Credential vault, scheduled runs, or other stage 2 behavior.
+- Reworking Apple/Google auth beyond the setup-state contract.
+
+## Implementation Plan
+
+- [ ] Design the `user_settings`/`user_profile` schema and migration.
+- [ ] Add authenticated GET/PATCH endpoints on the iOS backend.
+- [ ] Add Swift client methods and wire session restore/sign-in to fetch profile state.
+- [ ] Move onboarding/profile saves to backend-backed persistence with local fallback.
+- [ ] Add backend contract smoke checks and iOS build verification.
+
+## Verification
+
+Pending.
+
+## Result
+
+Pending.
+
+## Next
+
+Planned follow-up. Pick this after `IOS-2` is reviewed if setup state should be account-backed rather than device-local.
