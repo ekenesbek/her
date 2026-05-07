@@ -68,6 +68,7 @@ Start here in this order:
 - **`app/docs/browser-agent-memory-roadmap.md`**, **`app/docs/credential-broker.md`**, **`app/docs/her-sessions.md`**, **`app/docs/memory-landscape.md`**, **`app/docs/web-mcp-focus.md`** — design notes for the browser agent and memory layer.
 - **`her-ios/README.md`** and **`her-ios/ROADMAP.md`** — iOS app and backend setup, Meta DAT wiring.
 - **`her-ios/docs/meta-wearables-dat.md`**, **`her-ios/docs/privacy-and-consent.md`** — DAT and consent reference for iOS work.
+- **`docs/runtime/commit.md`** — branch, commit message, and PR description rules.
 - **`docs/runtime/agent_handoff.md`** — persistent end-of-task context and next-todo log.
 - **`todo/tasks.md`** — canonical task index with `IOS-N` / `WEB-N` / `BACK-N` / `BUG-N` / `DOC-N` IDs and the strict branch standard.
 - **`todo/{ios,web,back}.md`** — active task streams.
@@ -286,25 +287,40 @@ After the human approves the implemented result:
 
 1. `git status` — confirm clean scope.
 2. Stage only files related to the task.
-3. Commit with a focused message.
+3. Commit with the standard multi-line format from `docs/runtime/commit.md`.
 4. Push the task branch (rename from `claude/...` first if applicable).
 5. Open a draft PR unless the human asks for a ready PR.
 6. Include the task ID in the PR title.
 
-Commit format:
+Commit format summary:
 
 ```text
-TASK-ID: short imperative summary
+<type>: <what was done>
+
+[details, if useful]
+
+Closes #TASK-ID
 ```
 
 Examples:
 
 ```text
-WEB-8: add browser service registry
-BACK-5: add summary cache refresh
-BUG-7: fix token refresh retry handling
-DOC-3: add deployment runbook
+feat: add browser service registry
+
+Register the browser service runtime and document the local Chrome MCP setup.
+
+Closes #WEB-8
+
+fix: retry token refresh failures
+
+Preserve the original session when refresh fails once and retry with backoff.
+
+Closes #BUG-7
 ```
+
+Add detail lines only when they clarify what changed or why. Always include the
+task trailer. If there is no GitHub issue or issue-style alias for the task,
+use `Refs TASK-ID` instead of the `Closes #TASK-ID` trailer.
 
 PR body:
 
