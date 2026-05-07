@@ -5,6 +5,11 @@ struct AuthSession: Codable, Equatable {
     let token: String
     let expiresAt: Date
     let user: AuthUser
+    let isNewUser: Bool?
+
+    var isExistingAccount: Bool {
+        isNewUser != true
+    }
 }
 
 struct AuthUser: Codable, Equatable {
