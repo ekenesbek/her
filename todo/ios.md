@@ -63,3 +63,62 @@ Known limitations: physical-device recording, Meta Wearables DAT device pairing,
 ## Next
 
 Result is ready for human review. After approval: commit, push, open PR, then archive/update task state.
+
+# IOS-4: Improve Voice Enrollment And Wake-Word Setup
+
+Status: planned
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: ios/IOS-4/voice-enrollment-wake-word
+Created: 2026-05-07
+
+## Goal
+
+Replace the vague `Your Voice` onboarding instruction to "speak for about a minute" with a guided voice collection flow, and add a wake-word creation/training path that captures how the chosen assistant name or wake phrase actually sounds from this user.
+
+## Context
+
+The current `Your Voice` page asks the user to record roughly 60 seconds of natural speech so Her can create a voice profile. The next version should make that minute useful: either ask the user to read prepared text or run a short voice Q&A that also collects useful personalization facts with clear consent.
+
+Wake-word setup should not assume a typed assistant name is enough. The user should pronounce the chosen assistant name / wake phrase several times so the app can validate pronunciation, tune thresholds, and, if the selected wake-word backend needs user-specific examples, use those recordings for training.
+
+## Scope
+
+In scope:
+- Update the `Your Voice` onboarding step from generic recording copy to a guided reading mode and/or voice Q&A mode.
+- Design prompts that collect enough speech for voice identification while also gathering useful user context.
+- Add consent, skip, retry, and re-record states for any personalization facts gathered during the voice Q&A.
+- Add a wake-word setup step for choosing the assistant name / wake phrase.
+- Require the user to pronounce the chosen name or wake phrase multiple times, including the natural phrasing they expect to use.
+- Capture enough metadata to distinguish voice profile enrollment from wake-word calibration/training samples.
+
+Out of scope:
+- Scheduled/background autonomous runs.
+- Cross-session memory promotion beyond explicit local onboarding/profile data.
+- Cloud-only wake-word processing or cloud credential storage.
+- Shipping a paid wake-word provider decision without human review.
+
+## Implementation Plan
+
+- [ ] Inspect the current onboarding voice profile UI, recorder, backend enrollment endpoint, and voice profile storage.
+- [ ] Replace "speak for about a minute" UX with guided reading and/or voice Q&A content.
+- [ ] Add explicit consent and review/edit affordances for any Q&A-derived profile facts.
+- [ ] Add wake-word setup UX for assistant name / phrase selection.
+- [ ] Record multiple pronunciation samples of the chosen name / wake phrase for validation and future model training.
+- [ ] Persist voice enrollment and wake-word sample data with separate labels and deletion paths.
+- [ ] Add focused iOS/backend tests or smoke checks for the changed enrollment path.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Manual simulator/device smoke: complete `Your Voice` enrollment, retry/delete samples, and verify wake-word pronunciation samples are stored separately from the normal voice profile.
+
+## Result
+
+Not started.
+
+## Next
+
+Needs human review of the task scope. After approval: create/switch to `ios/IOS-4/voice-enrollment-wake-word`, implement the smallest coherent onboarding change, then stop again for result review before commit/push/PR/archive.

@@ -10,6 +10,7 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | WEB-1 | approved | P1 | web | web/WEB-1/rename-her | Rename project to Her | `todo/web.md` |
 | WEB-2 | review | P2 | web | web/WEB-2/terms-privacy | Add Terms and Privacy pages | `todo/web.md` |
 | IOS-1 | review | P1 | ios | ios/IOS-1/her-ios-smoke-test | Her iOS smoke test | `todo/ios.md` |
+| IOS-4 | planned | P1 | ios | ios/IOS-4/voice-enrollment-wake-word | Improve voice enrollment and wake-word setup | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 
