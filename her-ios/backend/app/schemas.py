@@ -105,3 +105,4 @@ class AuthResponse(BaseModel):
     token: str
     expiresAt: datetime
     user: UserResponse
+    isNewUser: bool = False

@@ -64,6 +64,19 @@ final class AppSettingsStore: ObservableObject {
         persist()
     }
 
+    func completeOnboardingForExistingAccount(
+        session: AuthSession,
+        provider: SignInProvider,
+        glassesSetupSkipped: Bool = true
+    ) {
+        completeOnboarding(
+            aiName: aiDisplayName,
+            ownerName: session.user.name ?? ownerDisplayName,
+            signInProvider: provider,
+            glassesSetupSkipped: glassesSetupSkipped
+        )
+    }
+
     func saveProfile(aiName: String, ownerName: String) {
         self.aiName = Self.clean(aiName, fallback: "Her")
         self.ownerName = Self.clean(ownerName, fallback: "Owner")
@@ -3898,8 +3911,8 @@ private struct ErrorBanner: View {
 private enum OnboardingStep: Int, CaseIterable, Hashable {
     case account
     case ownerName
-    case voiceProfile
     case aiName
+    case voiceProfile
     case permissions
     case glasses
 
@@ -4046,8 +4059,12 @@ private struct OnboardingView: View {
                     SetupAccountPage(
                         authStore: authStore,
                         selectedProvider: $selectedProvider
-                    ) { provider in
+                    ) { provider, session in
                         selectedProvider = provider
+                        if session.isExistingAccount {
+                            settings.completeOnboardingForExistingAccount(session: session, provider: provider)
+                            return
+                        }
                         if ownerName.isEmpty, let name = authStore.session?.user.name {
                             ownerName = name
                         }
@@ -4066,6 +4083,7 @@ private struct OnboardingView: View {
         }
         .navigationViewStyle(.stack)
         .ignoresSafeArea(.keyboard, edges: .bottom)
+        .onAppear(perform: completeSetupIfRestoredExistingAccount)
         .onAppear(perform: refreshPermissionStates)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionStates()
@@ -4074,6 +4092,23 @@ private struct OnboardingView: View {
 
     private var currentProvider: SignInProvider? {
         switch authStore.session?.user.provider {
+        case "google": return .google
+        case "apple": return .apple
+        default: return selectedProvider
+        }
+    }
+
+    private func completeSetupIfRestoredExistingAccount() {
+        guard let session = authStore.session,
+              session.isExistingAccount,
+              let provider = provider(for: session) else {
+            return
+        }
+        settings.completeOnboardingForExistingAccount(session: session, provider: provider)
+    }
+
+    private func provider(for session: AuthSession) -> SignInProvider? {
+        switch session.user.provider {
         case "google": return .google
         case "apple": return .apple
         default: return selectedProvider
@@ -4091,21 +4126,21 @@ private struct OnboardingView: View {
                 provider: currentProvider,
                 onBack: authStore.isAuthenticated ? nil : goBack
             ) {
+                go(to: .aiName)
+            }
+        case .aiName:
+            SetupAgentNamePage(
+                aiName: $aiName,
+                onBack: goBack
+            ) {
                 go(to: .voiceProfile)
             }
         case .voiceProfile:
             SetupVoiceProfilePage(
                 ownerName: ownerName,
                 onBack: goBack,
-                onContinue: { go(to: .aiName) }
+                onContinue: { go(to: .permissions) }
             )
-        case .aiName:
-            SetupAgentNamePage(
-                aiName: $aiName,
-                onBack: goBack
-            ) {
-                go(to: .permissions)
-            }
         case .permissions:
             SetupPermissionsPage(
                 microphonePermission: microphonePermission,
@@ -4317,7 +4352,7 @@ private struct SetupPageShell<Content: View>: View {
 private struct SetupAccountPage: View {
     @ObservedObject var authStore: AuthStore
     @Binding var selectedProvider: SignInProvider?
-    let onSelect: (SignInProvider) -> Void
+    let onSelect: (SignInProvider, AuthSession) -> Void
 
     @State private var isWorking = false
     @State private var errorMessage: String?
@@ -4434,7 +4469,7 @@ private struct SetupAccountPage: View {
             )
             authStore.setSession(session)
             selectedProvider = .apple
-            onSelect(.apple)
+            onSelect(.apple, session)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -4456,7 +4491,7 @@ private struct SetupAccountPage: View {
             let session = try await client.signInWithGoogle(idToken: result.idToken)
             authStore.setSession(session)
             selectedProvider = .google
-            onSelect(.google)
+            onSelect(.google, session)
         } catch GoogleSignInError.authorizationCancelled {
             // User cancelled the picker; stay silent.
         } catch {
@@ -4567,7 +4602,7 @@ private struct SetupVoiceProfilePage: View {
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
-            WwSteps(step: 2, total: 5, label: "voice")
+            WwSteps(step: 3, total: 5, label: "voice")
             WwHeader(pre: "your voice", title: "Teach Her your voice.", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
@@ -4760,7 +4795,7 @@ private struct SetupAgentNamePage: View {
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
-            WwSteps(step: 3, total: 5, label: "agent")
+            WwSteps(step: 2, total: 5, label: "agent")
             WwHeader(pre: "your agent", title: "And what shall I call myself?", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
