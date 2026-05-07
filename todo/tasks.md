@@ -7,6 +7,7 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | ID | Status | Priority | Stream | Branch | Title | Location |
 | --- | --- | --- | --- | --- | --- | --- |
 | DOC-1 | review | P2 | repo | docs/DOC-1/task-workflow | Set up task-first agent workflow | `todo/tasks.md` |
+| WEB-1 | approved | P1 | web | web/WEB-1/rename-her | Rename project to Her | `todo/web.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 
@@ -50,7 +51,7 @@ Out of scope:
 
 ### Result
 
-Created repo-level workflow docs and task tracking structure adapted to `ios`, `web`, and `back`. Existing unrelated `meta-ios/*` worktree changes were left untouched.
+Created repo-level workflow docs and task tracking structure adapted to `ios`, `web`, and `back`. Existing unrelated `her-ios/*` worktree changes were left untouched.
 
 ### Next
 

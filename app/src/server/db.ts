@@ -31,7 +31,11 @@ import type {
 const DATA_DIR = path.join(process.cwd(), ".data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const dbPath = path.join(DATA_DIR, "meta.db");
+const dbPath = path.join(DATA_DIR, "her.db");
+const legacyDbPath = path.join(DATA_DIR, "meta.db");
+if (!fs.existsSync(dbPath) && fs.existsSync(legacyDbPath)) {
+  fs.copyFileSync(legacyDbPath, dbPath);
+}
 const AUTH_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const ACTIVE_TASK_STATUSES: TaskRunStatus[] = ["created", "planning", "running", "waiting_for_user"];
 const TERMINAL_TASK_STATUSES = new Set<TaskRunStatus>(["done", "failed", "cancelled"]);

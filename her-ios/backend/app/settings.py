@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     openai_summary_model: str = "gpt-oss"
 
     auth_jwt_secret: str = "dev-secret-change-me-in-production"
-    apple_client_id: str = "com.ekenesbek.metaagent"
+    apple_client_id: str = "com.ekenesbek.her"
     google_client_ids: str = ""
 
     huggingface_token: str | None = None

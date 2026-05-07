@@ -59,7 +59,7 @@ def current_user(authorization: str | None = Header(default=None)) -> UserRespon
         raise HTTPException(status_code=401, detail="User no longer exists.")
     return user
 
-app = FastAPI(title="Meta iOS Backend", version="0.2.0")
+app = FastAPI(title="Her iOS Backend", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,

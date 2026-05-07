@@ -739,7 +739,7 @@ function createCredentialBrokerMcpServer({
   abortSignal?: AbortSignal;
 }) {
   return createSdkMcpServer({
-    name: "meta_credentials",
+    name: "her_credentials",
     version: "0.1.0",
     tools: [
       tool(
@@ -1043,7 +1043,7 @@ function shouldRunCredentialBrokerFallback(
   latestUserMessage: string,
 ) {
   if (!hasCredentialBroker(agent, browserConnection)) return false;
-  if (result.toolTrace.some((entry) => entry.name === "mcp__meta_credentials__request_credential_approval")) {
+  if (result.toolTrace.some((entry) => entry.name === "mcp__her_credentials__request_credential_approval")) {
     return false;
   }
 
@@ -1356,7 +1356,7 @@ async function streamClaudeReply({
               chrome: buildClaudeChromeMcpServer(browserConnection.chromeMcpUrl!),
               ...(hasClaudeCredentialBroker(agent, browserConnection)
                 ? {
-                    meta_credentials: createCredentialBrokerMcpServer({
+                    her_credentials: createCredentialBrokerMcpServer({
                       agent,
                       taskTrace,
                       browserConnection,
@@ -1372,7 +1372,7 @@ async function streamClaudeReply({
           return { behavior: "allow" as const, updatedInput: input };
         }
 
-        if (hasClaudeCredentialBroker(agent, browserConnection) && toolName === "mcp__meta_credentials__request_credential_approval") {
+        if (hasClaudeCredentialBroker(agent, browserConnection) && toolName === "mcp__her_credentials__request_credential_approval") {
           return { behavior: "allow" as const, updatedInput: input };
         }
 
@@ -2806,7 +2806,7 @@ function buildRuntimeContext(
         ...(hasCredentialBroker(agent, browserConnection)
           ? [
               provider === "claude"
-                ? "Credential broker is available as the meta_credentials MCP tool request_credential_approval."
+                ? "Credential broker is available as the her_credentials MCP tool request_credential_approval."
                 : "Credential broker is available through the app runtime. If a password, passkey, saved credential, or session-confirmation gate blocks the task, report the origin/current URL and exact credential action needed; the runtime can request user approval and retry.",
               "When login is blocked by a saved password, passkey, or credential choice, request broker approval instead of asking the user to paste a password into chat.",
               "The credential broker may pause the task for UI approval. It never returns plaintext secrets to you. After approval, continue through the live browser session. If OS autofill, passkey user presence, MFA, captcha, or a missing saved credential still blocks progress, report that exact blocker.",

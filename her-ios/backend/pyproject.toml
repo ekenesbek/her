@@ -1,7 +1,7 @@
 [project]
-name = "meta-ios-backend"
+name = "her-ios-backend"
 version = "0.1.0"
-description = "Local backend for Meta iOS meeting transcription and summaries."
+description = "Local backend for Her iOS meeting transcription and summaries."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

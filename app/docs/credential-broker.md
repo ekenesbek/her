@@ -13,7 +13,7 @@ The first implementation supports:
 - `credential_broker` agent capability
 - user-scoped credential approval requests
 - approve/deny UI in the task timeline
-- Claude SDK MCP tool: `meta_credentials.request_credential_approval`
+- Claude SDK MCP tool: `her_credentials.request_credential_approval`
 - task status transition to `waiting_for_user` while approval is pending
 - audit-friendly request records with origin, account hint, reason, action, status, timestamps
 

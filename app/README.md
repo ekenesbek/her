@@ -1,4 +1,4 @@
-# Meta App
+# Her App
 
 ## Project Notes
 

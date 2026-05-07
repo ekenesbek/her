@@ -134,7 +134,7 @@ struct VoiceEnrollmentView: View {
     var body: some View {
         NavigationView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Teach meta your voice")
+                Text("Teach Her your voice")
                     .font(.system(size: 28, weight: .medium, design: .serif))
                     .italic()
 

@@ -1,4 +1,4 @@
-# meta
+# Her
 
 Personal agent prototype for Ray-Ban glasses.
 

@@ -1,9 +1,9 @@
-# Meta iOS
+# Her iOS
 
-This folder is split into the mobile frontend and the local backend for the Meta personal AI MVP.
+This folder is split into the mobile frontend and the local backend for the Her personal AI MVP.
 
 ```text
-meta-ios/
+her-ios/
   frontend/   iOS app
   backend/    FastAPI, local Whisper, OpenAI summaries
   docs/       Meta Wearables DAT notes and consent notes
@@ -24,10 +24,10 @@ meta-ios/
 Open the iOS project in Xcode:
 
 ```bash
-open meta-ios/frontend/ConversationSummarizer.xcodeproj
+open her-ios/frontend/ConversationSummarizer.xcodeproj
 ```
 
-The target is `ConversationSummarizer`, deployment target is iOS 15.2, bundle identifier is `com.ekenesbek.metaagent`, and Team ID is `6UNHXUUR5T`.
+The target is `ConversationSummarizer`, deployment target is iOS 15.2, bundle identifier is `com.ekenesbek.her`, and Team ID is `6UNHXUUR5T`.
 
 `ConversationSummarizer/Resources/Info.plist` has:
 
@@ -40,7 +40,7 @@ The target is `ConversationSummarizer`, deployment target is iOS 15.2, bundle id
 Run the backend from the repo root:
 
 ```bash
-cd meta-ios/backend
+cd her-ios/backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -68,19 +68,19 @@ audio=<meeting.m4a>
 In Meta Wearables Developer Center > App configuration, add iOS app details:
 
 - Team ID: `6UNHXUUR5T`
-- Bundle ID: `com.ekenesbek.metaagent`
-- Universal link / callback scheme: `com.ekenesbek.metaagent://`
+- Bundle ID: `com.ekenesbek.her`
+- Universal link / callback scheme: `com.ekenesbek.her://`
 
 The checked-in Xcode project links `MWDATCore` from `https://github.com/facebook/meta-wearables-dat-ios` at exact version `0.6.0`.
 
 ## Local verification
 
 ```bash
-xcodebuild -project meta-ios/frontend/ConversationSummarizer.xcodeproj \
+xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj \
   -scheme ConversationSummarizer \
   -destination 'generic/platform=iOS' \
-  -derivedDataPath meta-ios/frontend/DerivedData \
+  -derivedDataPath her-ios/frontend/DerivedData \
   CODE_SIGNING_ALLOWED=NO build
 
-python3 -m compileall meta-ios/backend/app
+python3 -m compileall her-ios/backend/app
 ```

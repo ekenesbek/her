@@ -7,13 +7,12 @@ import {
   CHROME_MCP_URL,
   commandExists,
   ensureEnvLocal,
-  pingChromeMcp,
   readBridgeDoctor,
   run,
 } from "./browser-runtime.mjs";
 import { ensureManagedChrome, managedChromeStatus } from "./managed-chrome.mjs";
 
-console.log("Launching Meta app");
+console.log("Launching Her app");
 
 if (!commandExists("pnpm")) {
   console.error("pnpm is required. Install it first, then rerun launch.");

@@ -1,9 +1,9 @@
 import type { UserRuntimeLocation } from "@/shared/types";
 
-export const EXACT_LOCATION_STORAGE_KEY = "meta.exact-location.v1";
-export const EXACT_LOCATION_MODE_STORAGE_KEY = "meta.exact-location-mode.v1";
-export const EXACT_LOCATION_CHANGED_EVENT = "meta:exact-location-changed";
-export const EXACT_LOCATION_AUTO_REQUESTED_KEY = "meta.exact-location-auto-requested.v1";
+export const EXACT_LOCATION_STORAGE_KEY = "her.exact-location.v1";
+export const EXACT_LOCATION_MODE_STORAGE_KEY = "her.exact-location-mode.v1";
+export const EXACT_LOCATION_CHANGED_EVENT = "her:exact-location-changed";
+export const EXACT_LOCATION_AUTO_REQUESTED_KEY = "her.exact-location-auto-requested.v1";
 const SEND_REFRESH_TIMEOUT_MS = 4_000;
 const INITIAL_LOCATION_REQUEST_TIMEOUT_MS = 10_000;
 

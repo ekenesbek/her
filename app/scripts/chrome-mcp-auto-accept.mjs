@@ -7,7 +7,7 @@ import {
   CHROME_MCP_EXTENSION_ID,
   CHROME_MCP_URL,
   MANAGED_CHROME_DEBUG_PORT,
-  ensureMetaHome,
+  ensureHerHome,
   pingChromeMcp,
 } from "./browser-runtime.mjs";
 
@@ -27,7 +27,7 @@ export function shouldAttemptChromeMcpAutoAccept({ force = false, marker = null 
 }
 
 export function writeChromeMcpAutoAcceptMarker(marker) {
-  ensureMetaHome();
+  ensureHerHome();
   writeFileSync(CHROME_MCP_AUTO_ACCEPT_FILE, `${JSON.stringify(marker, null, 2)}\n`);
 }
 
@@ -38,7 +38,7 @@ export async function ensureChromeMcpAutoAcceptOnce({
   port = defaultPortFromMcpUrl(CHROME_MCP_URL),
   waitTimeoutMs = 6000,
 } = {}) {
-  ensureMetaHome();
+  ensureHerHome();
 
   const initialMcp = await pingChromeMcp(CHROME_MCP_URL);
   if (initialMcp.ok) {

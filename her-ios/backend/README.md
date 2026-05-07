@@ -1,11 +1,11 @@
-# Meta iOS Backend
+# Her iOS Backend
 
 Local API for the iOS app. It receives meeting audio, transcribes it with local Whisper, summarizes the transcript with an OpenAI-compatible chat endpoint when `OPENAI_API_KEY` is configured, and persists meetings in SQLite.
 
 ## Run
 
 ```bash
-cd meta-ios/backend
+cd her-ios/backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

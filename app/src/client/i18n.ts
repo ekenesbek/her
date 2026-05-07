@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 
 export type Lang = "en" | "ru";
 
-const STORAGE_KEY = "meta.lang.v1";
-const CHANGE_EVENT = "meta:lang-changed";
+const STORAGE_KEY = "her.lang.v1";
+const CHANGE_EVENT = "her:lang-changed";
 const DEFAULT: Lang = "en";
 
 export function readLang(): Lang {
@@ -25,10 +25,9 @@ export function writeLang(lang: Lang) {
 }
 
 export function useLang(): [Lang, (lang: Lang) => void] {
-  const [lang, setLang] = useState<Lang>(DEFAULT);
+  const [lang, setLang] = useState<Lang>(() => readLang());
 
   useEffect(() => {
-    setLang(readLang());
     const sync = () => setLang(readLang());
     window.addEventListener(CHANGE_EVENT, sync);
     window.addEventListener("storage", sync);
@@ -50,14 +49,14 @@ export const STRINGS = {
   "login.welcome": { en: "welcome", ru: "привет," },
   "login.welcomeEm": { en: "back", ru: "снова" },
   "login.letsMake": { en: "let’s make", ru: "давай создадим" },
-  "login.letsMakeEm": { en: "meta", ru: "meta" },
+  "login.letsMakeEm": { en: "Her", ru: "Her" },
   "login.youA": { en: "you a", ru: "твой" },
   "login.subSignin": {
     en: "No passwords. Your device proves it’s you with a passkey — Touch ID, Face ID, or security key.",
     ru: "Без паролей. Устройство подтверждает тебя по passkey — Touch ID, Face ID или ключ.",
   },
   "login.subCreate": {
-    en: "One tap creates a passkey on this device. You won’t ever type a password for meta.",
+    en: "One tap creates a passkey on this device. You won’t ever type a password for Her.",
     ru: "Одним касанием создашь passkey на этом устройстве. Больше никаких паролей.",
   },
   "login.email": { en: "email", ru: "email" },
@@ -78,8 +77,8 @@ export const STRINGS = {
     ru: "подсказка · кликни в email, чтобы выбрать сохранённый passkey",
   },
   "login.newHere": { en: "New here?", ru: "Впервые здесь?" },
-  "login.alreadyHave": { en: "Already have one?", ru: "Уже есть meta?" },
-  "login.createAMeta": { en: "Create a meta", ru: "Создать meta" },
+  "login.alreadyHave": { en: "Already have Her?", ru: "Уже есть Her?" },
+  "login.createAHer": { en: "Create Her", ru: "Создать Her" },
   "login.notSupported": {
     en: "This browser doesn’t support passkeys. Use a recent Safari, Chrome, Edge or Firefox.",
     ru: "В этом браузере passkeys недоступны. Нужен современный Safari, Chrome, Edge или Firefox.",
@@ -97,8 +96,8 @@ export const STRINGS = {
   "onb.consent.title": { en: "Work", ru: "Работай" },
   "onb.consent.titleEm": { en: "silently.", ru: "без вопросов." },
   "onb.consent.body": {
-    en: "Grant standing permissions once. meta acts on your behalf across sites you already use — without tapping you on the shoulder.",
-    ru: "Дай разрешения один раз. meta будет действовать за тебя на сайтах, где ты и так уже, без постоянных вопросов.",
+    en: "Grant standing permissions once. Her acts on your behalf across sites you already use — without tapping you on the shoulder.",
+    ru: "Дай разрешения один раз. Her будет действовать за тебя на сайтах, где ты и так уже, без постоянных вопросов.",
   },
   "onb.consent.observe.label": { en: "Observe open tabs", ru: "Наблюдать за вкладками" },
   "onb.consent.observe.hint": { en: "passive discovery", ru: "тихо, без действий" },
@@ -122,7 +121,7 @@ export const STRINGS = {
   "onb.welcome.s1s": { en: "Chrome MCP", ru: "Chrome MCP" },
   "onb.welcome.s2": { en: "Add keys and contacts", ru: "Добавим ключи и контакты" },
   "onb.welcome.s2s": { en: "Apple / Google", ru: "Apple / Google" },
-  "onb.welcome.s3": { en: "Assemble your meta", ru: "Соберём твой meta" },
+  "onb.welcome.s3": { en: "Assemble Her", ru: "Соберём Her" },
   "onb.welcome.s3s": { en: "one minute", ru: "одна минута" },
   "onb.welcome.go": { en: "Let’s go", ru: "Поехали" },
   "onb.welcome.later": { en: "Later", ru: "Позже" },
@@ -144,12 +143,12 @@ export const STRINGS = {
   "onb.keys.title": { en: "Your", ru: "Твои" },
   "onb.keys.titleEm": { en: "keys", ru: "ключи" },
   "onb.keys.body": {
-    en: "Everything lives on your device. meta sees a password only when you allow it — via Touch ID or passkey.",
-    ru: "Всё живёт на твоём устройстве. meta видит пароль только когда ты разрешаешь — через Touch ID или passkey.",
+    en: "Everything lives on your device. Her sees a password only when you allow it — via Touch ID or passkey.",
+    ru: "Всё живёт на твоём устройстве. Her видит пароль только когда ты разрешаешь — через Touch ID или passkey.",
   },
   "onb.keys.shield": {
-    en: "meta never sees passwords. Only you — via Touch ID / Passkey.",
-    ru: "meta никогда не видит пароли. Только ты — через Touch ID / Passkey.",
+    en: "Her never sees passwords. Only you — via Touch ID / Passkey.",
+    ru: "Her никогда не видит пароли. Только ты — через Touch ID / Passkey.",
   },
   "onb.keys.apple": { en: "Apple Keychain", ru: "Apple Keychain" },
   "onb.keys.appleSub": { en: "passkeys + iCloud passwords", ru: "passkeys + пароли из iCloud" },
@@ -168,7 +167,7 @@ export const STRINGS = {
     en: "I’ll assemble myself from your keys and permissions. You can change anything later — model, access, tone.",
     ru: "Я соберу себя на основе твоих ключей и разрешений. Можешь менять всё потом — модель, доступы, стиль общения.",
   },
-  "onb.ready.assemble": { en: "Assemble meta", ru: "Собрать meta" },
+  "onb.ready.assemble": { en: "Assemble Her", ru: "Собрать Her" },
   "onb.ready.assembling": { en: "Assembling…", ru: "Собираю…" },
   "onb.ready.tpl": { en: "personal assistant", ru: "персональный ассистент" },
   "onb.fail.noTpl": { en: "No templates available. Contact admin.", ru: "Нет доступных шаблонов. Обратись к админу." },

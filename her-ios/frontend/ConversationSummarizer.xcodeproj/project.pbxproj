@@ -29,7 +29,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		000000000000000000000005 /* meta.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = meta.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000005 /* Her.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Her.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		00000000000000000000F101 /* ConversationSummarizerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSummarizerApp.swift; sourceTree = "<group>"; };
 		00000000000000000000F102 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		00000000000000000000F201 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -75,7 +75,7 @@
 		000000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				000000000000000000000005 /* meta.app */,
+				000000000000000000000005 /* Her.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -183,7 +183,7 @@
 				00000000000000000000P601 /* MWDATCore */,
 			);
 			productName = ConversationSummarizer;
-			productReference = 000000000000000000000005 /* meta.app */;
+			productReference = 000000000000000000000005 /* Her.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -387,7 +387,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ConversationSummarizer/Resources/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = meta;
+				INFOPLIST_KEY_CFBundleDisplayName = Her;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -395,8 +395,8 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				META_APP_ID = 1447912729894042;
-				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.metaagent;
-				PRODUCT_NAME = meta;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.her;
+				PRODUCT_NAME = Her;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -417,7 +417,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ConversationSummarizer/Resources/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = meta;
+				INFOPLIST_KEY_CFBundleDisplayName = Her;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.2;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -425,8 +425,8 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				META_APP_ID = 1447912729894042;
-				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.metaagent;
-				PRODUCT_NAME = meta;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.her;
+				PRODUCT_NAME = Her;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;

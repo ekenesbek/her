@@ -9,7 +9,7 @@ import {
   MANAGED_CHROME_LOADS_UNPACKED_EXTENSIONS,
   MANAGED_CHROME_PID_FILE,
   MANAGED_CHROME_PROFILE,
-  ensureMetaHome,
+  ensureHerHome,
   findChromeMcpExtensionPath,
   pingChromeMcp,
 } from "./browser-runtime.mjs";
@@ -67,7 +67,7 @@ export async function startManagedChrome() {
     );
   }
 
-  ensureMetaHome();
+  ensureHerHome();
 
   const args = [
     `--user-data-dir=${MANAGED_CHROME_PROFILE}`,

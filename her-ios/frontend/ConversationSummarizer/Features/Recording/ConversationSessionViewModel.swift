@@ -45,7 +45,7 @@ final class ConversationSessionViewModel: ObservableObject {
     private func registerIntentObservers() {
         let center = NotificationCenter.default
         let start = center.addObserver(
-            forName: Notification.Name("meta.recording.startRequested"),
+            forName: Notification.Name("her.recording.startRequested"),
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -57,7 +57,7 @@ final class ConversationSessionViewModel: ObservableObject {
             }
         }
         let stop = center.addObserver(
-            forName: Notification.Name("meta.recording.stopRequested"),
+            forName: Notification.Name("her.recording.stopRequested"),
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -69,7 +69,7 @@ final class ConversationSessionViewModel: ObservableObject {
             }
         }
         let toggle = center.addObserver(
-            forName: Notification.Name("meta.recording.toggleRequested"),
+            forName: Notification.Name("her.recording.toggleRequested"),
             object: nil,
             queue: .main
         ) { [weak self] _ in

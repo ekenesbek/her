@@ -1,10 +1,10 @@
 # Memory Landscape
 
-Reference list for future work on long-term memory in `meta`.
+Reference list for future work on long-term memory in `Her`.
 
 This is not a commitment to a specific implementation yet. The goal is to keep the most relevant systems, benchmarks, and products in one place so we can revisit them when we design the app's memory layer.
 
-Related product concept: [Meta Sessions](./meta-sessions.md).
+Related product concept: [Her Sessions](./her-sessions.md).
 
 ## Benchmarks and evals
 
