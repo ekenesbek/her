@@ -3911,8 +3911,8 @@ private struct ErrorBanner: View {
 private enum OnboardingStep: Int, CaseIterable, Hashable {
     case account
     case ownerName
-    case voiceProfile
     case aiName
+    case voiceProfile
     case permissions
     case glasses
 
@@ -4126,21 +4126,21 @@ private struct OnboardingView: View {
                 provider: currentProvider,
                 onBack: authStore.isAuthenticated ? nil : goBack
             ) {
+                go(to: .aiName)
+            }
+        case .aiName:
+            SetupAgentNamePage(
+                aiName: $aiName,
+                onBack: goBack
+            ) {
                 go(to: .voiceProfile)
             }
         case .voiceProfile:
             SetupVoiceProfilePage(
                 ownerName: ownerName,
                 onBack: goBack,
-                onContinue: { go(to: .aiName) }
+                onContinue: { go(to: .permissions) }
             )
-        case .aiName:
-            SetupAgentNamePage(
-                aiName: $aiName,
-                onBack: goBack
-            ) {
-                go(to: .permissions)
-            }
         case .permissions:
             SetupPermissionsPage(
                 microphonePermission: microphonePermission,
@@ -4602,7 +4602,7 @@ private struct SetupVoiceProfilePage: View {
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
-            WwSteps(step: 2, total: 5, label: "voice")
+            WwSteps(step: 3, total: 5, label: "voice")
             WwHeader(pre: "your voice", title: "Teach Her your voice.", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
@@ -4795,7 +4795,7 @@ private struct SetupAgentNamePage: View {
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
-            WwSteps(step: 3, total: 5, label: "agent")
+            WwSteps(step: 2, total: 5, label: "agent")
             WwHeader(pre: "your agent", title: "And what shall I call myself?", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {

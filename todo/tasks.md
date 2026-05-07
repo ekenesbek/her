@@ -12,6 +12,7 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-2 | review | P1 | ios | ios/IOS-2/skip-setup-existing-account | Skip iOS setup for existing accounts | `todo/ios.md` |
 | IOS-3 | planned | P2 | ios | ios/IOS-3/server-setup-state | Store iOS setup state on backend | `todo/ios.md` |
 | IOS-1 | review | P1 | ios | ios/IOS-1/her-ios-smoke-test | Her iOS smoke test | `todo/ios.md` |
+| IOS-5 | approved | P3 | ios | ios/IOS-5/onboarding-agent-before-voice | Put agent name before voice enrollment | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 
