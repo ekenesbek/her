@@ -56,3 +56,62 @@ Preserved external Meta Wearables DAT naming, SDK package references, Info.plist
 ## Next
 
 Human approved the implemented result. Next: commit, push, open draft PR, then wait for merge before archival.
+
+# WEB-2: Add Terms And Privacy Pages
+
+Status: review
+Priority: P2
+Owner: agent
+Stream: web
+Branch: web/WEB-2/terms-privacy
+Created: 2026-05-07
+
+## Goal
+
+Add public `/terms` and `/privacy` pages for Her with on-brand placeholder copy.
+
+## Context
+
+The app needs basic legal entry points before the final legal text is ready. The copy should be clearly framed as a working draft and should match the current quiet, editorial Her visual style.
+
+## Scope
+
+In scope:
+- Add `/terms` and `/privacy` App Router pages.
+- Add shared legal page presentation if useful.
+- Link to the pages from the public login surface.
+- Run focused web verification.
+
+Out of scope:
+- Final legal review or jurisdiction-specific terms.
+- Changes to auth, backend, iOS, or browser-agent behavior.
+- Commit, push, PR, archive, or mark done before human review.
+
+## Implementation Plan
+
+- [x] Inspect public page styling and routing.
+- [x] Add shared legal page UI and copy.
+- [x] Add public links from login.
+- [x] Run lint/build checks and record result.
+
+## Verification
+
+- `sed -n '1,220p' app/node_modules/next/dist/docs/01-app/01-getting-started/03-layouts-and-pages.md`
+- `sed -n '1,180p' app/node_modules/next/dist/docs/01-app/01-getting-started/14-metadata-and-og-images.md`
+- `pnpm lint`
+- `pnpm build`
+- `pnpm exec next start --port 3004`
+- `curl -I --max-time 10 http://localhost:3004/terms`
+- `curl -I --max-time 10 http://localhost:3004/privacy`
+- `curl -s --max-time 10 http://localhost:3004/terms | rg -n "Условия использования|terms|Her"`
+- `curl -s --max-time 10 http://localhost:3004/privacy | rg -n "Конфиденциальность|privacy|Her"`
+
+## Result
+
+Added public `/terms` and `/privacy` App Router pages with shared Her legal-page styling, static metadata, and working-draft Russian copy. Added Terms and Privacy links to the login footer so the pages are discoverable before authentication.
+
+The pages are intentionally draft legal copy, not final reviewed legal terms. Production server checks returned `200 OK` for both pages. Existing unrelated iOS worktree changes were left untouched.
+
+## Next
+
+Result is ready for human review. After approval: commit, push, open PR, then archive/update task state.
