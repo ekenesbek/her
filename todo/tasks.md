@@ -15,6 +15,7 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-4 | planned | P1 | ios | ios/IOS-4/voice-enrollment-wake-word | Improve voice enrollment and wake-word setup | `todo/ios.md` |
 | IOS-5 | approved | P3 | ios | ios/IOS-5/onboarding-agent-before-voice | Put agent name before voice enrollment | `todo/ios.md` |
 | BUG-1 | review | P1 | ios | fix/BUG-1/voice-enrollment-audio-fallback | Fall back from Bluetooth voice enrollment recorder | `todo/ios.md` |
+| IOS-6 | approved | P2 | ios | ios/IOS-6/auth-screen-polish | Polish iOS auth screen | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 
