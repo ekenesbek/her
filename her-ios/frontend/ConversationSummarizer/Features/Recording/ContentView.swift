@@ -4370,7 +4370,7 @@ private struct SetupAccountPage: View {
             }
 
             Color.clear
-                .frame(height: 64)
+                .frame(height: 112)
 
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -4439,14 +4439,6 @@ private struct SetupAccountPage: View {
                 .padding(.top, 14)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .overlay {
-            if isWorking {
-                ZStack {
-                    Color.black.opacity(0.18).ignoresSafeArea()
-                    ProgressView().progressViewStyle(.circular)
-                }
-            }
-        }
     }
 
     @MainActor

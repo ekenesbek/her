@@ -92,7 +92,7 @@ final class GoogleSignInService: NSObject {
                 continuation.resume(returning: url)
             }
             webSession.presentationContextProvider = self
-            webSession.prefersEphemeralWebBrowserSession = false
+            webSession.prefersEphemeralWebBrowserSession = true
             webSession.start()
         }
 

@@ -2,6 +2,64 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# IOS-6: Polish iOS Auth Screen
+
+Status: approved
+Priority: P2
+Owner: agent
+Stream: ios
+Branch: ios/IOS-6/auth-screen-polish
+Created: 2026-05-07
+
+## Goal
+
+Remove the extra square/card feeling from the registration/sign-in screen and move the "One mind. Every conversation." headline lower.
+
+## Context
+
+The current first-run auth screen shows a large feature card below the headline and uses `ASWebAuthenticationSession` for Google sign-in, which can trigger the iOS pre-authentication consent dialog.
+
+## Scope
+
+In scope:
+- Adjust the iOS onboarding account screen layout.
+- Request an ephemeral Google web auth session to avoid the iOS shared-browser consent dialog where supported.
+- Install the updated Debug build on the connected iPhone for review.
+
+Out of scope:
+- Replacing the OAuth implementation with a new Google SDK.
+- Changing backend auth contracts.
+- Commit, push, PR, archive, or mark done before human review.
+
+## Implementation Plan
+
+- [x] Inspect the current auth screen and Google sign-in flow.
+- [x] Remove the extra auth-screen card treatment and lower the headline.
+- [x] Build, compile backend, install on the connected iPhone.
+- [x] Record verification and stop for human review.
+
+## Verification
+
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=00008140-00114D90227B001C' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `python3 -m compileall her-ios/backend/app`
+- `xcrun devicectl device install app --device 00008140-00114D90227B001C her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 00008140-00114D90227B001C com.ekenesbek.her`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'platform=iOS Simulator,id=F233F4D5-BF3B-4CF5-9DB1-39BF34869797' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `xcrun simctl uninstall booted com.ekenesbek.her`
+- `xcrun simctl install booted her-ios/frontend/DerivedData/Build/Products/Debug-iphonesimulator/Her.app`
+- `xcrun simctl launch booted com.ekenesbek.her`
+- `xcrun simctl io booted screenshot /tmp/her-auth-screen-polish.png`
+
+## Result
+
+Removed the auth working overlay that dimmed only the padded account view and showed as a large rectangular block behind the system sign-in prompt. Moved the "One mind. Every conversation." headline lower by increasing the top spacer on the account step. Google sign-in now requests an ephemeral `ASWebAuthenticationSession` so iOS does not use the shared Safari browser session for this OAuth flow.
+
+The updated Debug app builds, installs, and launches on the connected iPhone. A fresh iPhone 17 simulator install showed the adjusted auth screen without the rectangular working overlay.
+
+## Next
+
+Approved for PR. After PR review/merge: archive/update task state.
+
 # IOS-1: Her iOS Smoke Test
 
 Status: review
