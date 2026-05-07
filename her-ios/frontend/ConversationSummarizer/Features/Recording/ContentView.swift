@@ -4324,14 +4324,12 @@ private struct SetupAccountPage: View {
                     .font(.system(size: 18, weight: .medium, design: .serif))
                     .foregroundColor(AppTheme.fg)
                 Spacer(minLength: 12)
-                MonoLabel("v 0.1 · ios")
             }
 
             Color.clear
                 .frame(height: 64)
 
             VStack(alignment: .leading, spacing: 14) {
-                MonoLabel("personal AI · for Ray-Ban Meta")
                 VStack(alignment: .leading, spacing: 2) {
                     Text("One mind.")
                         .font(.system(size: 48, weight: .regular, design: .serif))
