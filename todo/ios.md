@@ -274,3 +274,53 @@ Updated the iOS onboarding order to `Your name` -> `Assistant name` -> `Teach He
 ## Next
 
 Approved for PR. After PR review/merge: archive/update task state.
+
+# BUG-1: Fall Back From Bluetooth Voice Enrollment Recorder
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: fix/BUG-1/voice-enrollment-audio-fallback
+Created: 2026-05-07
+
+## Goal
+
+Voice profile enrollment should try the Bluetooth HFP microphone first when paired, then fall back to the iPhone microphone if the Bluetooth route cannot prepare or start recording.
+
+## Context
+
+On a physical iPhone with `RB Meta 060S` selected, onboarding voice enrollment failed with `Could not prepare recorder (rate=16000Hz, route=RB Meta 060S).` The recorder only falls back to phone when no glasses input is present, not when the Bluetooth route is present but unusable for the selected recorder settings.
+
+## Scope
+
+In scope:
+- Fix `VoiceEnrollmentRecorder` route/format fallback for onboarding and settings voice profile recording.
+- Keep Bluetooth as the preferred route.
+- Keep upload format compatible with existing voice profile backend upload.
+
+Out of scope:
+- Changing Meta DAT pairing, Bluetooth permission UX, or backend voice embedding behavior.
+- Physical-device verification if no paired device is available in this environment.
+- Commit, push, PR, archive, or mark done before human review.
+
+## Implementation Plan
+
+- [x] Add route attempts: Bluetooth HFP first, built-in mic fallback.
+- [x] Try compatible recorder settings per route and continue on prepare/start failure.
+- [x] Run iOS build and backend compile verification.
+
+## Verification
+
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination generic/platform=iOS -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `python3 -m compileall her-ios/backend/app`
+
+## Result
+
+Updated `VoiceEnrollmentRecorder` so voice profile recording now prepares route attempts in order: Bluetooth HFP first, then the built-in iPhone microphone. Each route tries AAC `.m4a` first and PCM `.caf` second before moving to the next route. This fixes the screenshot failure mode where `RB Meta 060S` was present, `prepareToRecord()` failed on that route, and the recorder stopped instead of falling back to phone.
+
+Build and backend compile checks pass. Physical-device recording with paired Ray-Ban Meta glasses was not exercised in this environment and needs human review on the device.
+
+## Next
+
+Result is ready for human review. Review gate: install/run on the iPhone, keep `RB Meta 060S` connected, and try the voice profile recording once with Bluetooth and once after disconnecting Bluetooth. After approval: commit, push, open PR, then archive/update task state. Next task candidate from `todo/tasks.md`: continue the approved `WEB-1` PR flow or review the open `IOS-1` smoke-test result.
