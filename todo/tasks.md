@@ -8,6 +8,7 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | --- | --- | --- | --- | --- | --- | --- |
 | DOC-1 | review | P2 | repo | docs/DOC-1/task-workflow | Set up task-first agent workflow | `todo/tasks.md` |
 | WEB-1 | approved | P1 | web | web/WEB-1/rename-her | Rename project to Her | `todo/web.md` |
+| IOS-1 | review | P1 | ios | ios/IOS-1/her-ios-smoke-test | Her iOS smoke test | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 
