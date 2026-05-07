@@ -59,6 +59,21 @@ class MeetingStore:
         email: str | None,
         name: str | None,
     ) -> UserResponse:
+        user, _ = self.find_or_create_user_with_status(
+            provider=provider,
+            provider_user_id=provider_user_id,
+            email=email,
+            name=name,
+        )
+        return user
+
+    def find_or_create_user_with_status(
+        self,
+        provider: str,
+        provider_user_id: str,
+        email: str | None,
+        name: str | None,
+    ) -> tuple[UserResponse, bool]:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM users WHERE provider = ? AND provider_user_id = ?",
@@ -74,7 +89,7 @@ class MeetingStore:
                     row = connection.execute(
                         "SELECT * FROM users WHERE id = ?", (row["id"],)
                     ).fetchone()
-                return self._user_from_row(row)
+                return self._user_from_row(row), False
 
             user_id = str(uuid4())
             now = datetime.now(UTC).isoformat()
@@ -88,7 +103,7 @@ class MeetingStore:
             row = connection.execute(
                 "SELECT * FROM users WHERE id = ?", (user_id,)
             ).fetchone()
-            return self._user_from_row(row)
+            return self._user_from_row(row), True
 
     def get_user(self, user_id: str) -> UserResponse | None:
         with self._connect() as connection:

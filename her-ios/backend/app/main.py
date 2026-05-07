@@ -90,14 +90,14 @@ def auth_apple(payload: AuthAppleRequest) -> AuthResponse:
 
     provider_user_id = claims["sub"]
     email = payload.email or claims.get("email")
-    user = store.find_or_create_user(
+    user, is_new_user = store.find_or_create_user_with_status(
         provider="apple",
         provider_user_id=provider_user_id,
         email=email,
         name=payload.fullName,
     )
     token, expires_at = create_session_token(user.id, settings.auth_jwt_secret)
-    return AuthResponse(token=token, expiresAt=expires_at, user=user)
+    return AuthResponse(token=token, expiresAt=expires_at, user=user, isNewUser=is_new_user)
 
 
 @app.post("/v1/auth/google", response_model=AuthResponse)
@@ -116,14 +116,14 @@ def auth_google(payload: AuthGoogleRequest) -> AuthResponse:
     provider_user_id = claims["sub"]
     email = claims.get("email")
     name = claims.get("name") or claims.get("given_name")
-    user = store.find_or_create_user(
+    user, is_new_user = store.find_or_create_user_with_status(
         provider="google",
         provider_user_id=provider_user_id,
         email=email,
         name=name,
     )
     token, expires_at = create_session_token(user.id, settings.auth_jwt_secret)
-    return AuthResponse(token=token, expiresAt=expires_at, user=user)
+    return AuthResponse(token=token, expiresAt=expires_at, user=user, isNewUser=is_new_user)
 
 
 @app.get("/v1/auth/me", response_model=UserResponse)

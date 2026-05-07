@@ -95,7 +95,12 @@ struct AuthClient {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let payload = try decoder.decode(AuthResponseBody.self, from: data)
-        return AuthSession(token: payload.token, expiresAt: payload.expiresAt, user: payload.user)
+        return AuthSession(
+            token: payload.token,
+            expiresAt: payload.expiresAt,
+            user: payload.user,
+            isNewUser: payload.isNewUser
+        )
     }
 
     private static func errorDetail(from data: Data) -> String? {
@@ -113,6 +118,7 @@ private struct AuthResponseBody: Decodable {
     let token: String
     let expiresAt: Date
     let user: AuthUser
+    let isNewUser: Bool?
 }
 
 private struct AppleSignInBody: Encodable {
