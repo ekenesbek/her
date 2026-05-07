@@ -119,5 +119,5 @@ button, a, input, textarea, select {
   color: var(--fg-dim);
 }
 
-@keyframes meta-pulse { 0%, 100% { opacity: 0.4 } 50% { opacity: 1 } }
-.meta-pulse { animation: meta-pulse 1.6s ease-in-out infinite; }
+@keyframes her-pulse { 0%, 100% { opacity: 0.4 } 50% { opacity: 1 } }
+.her-pulse { animation: her-pulse 1.6s ease-in-out infinite; }

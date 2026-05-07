@@ -17,10 +17,10 @@ export const COMMON_EXTENSION_PATHS = [
   path.join(os.homedir(), "ChromeMCP", "extension"),
 ].filter(Boolean);
 
-export const META_HOME = process.env.META_HOME || path.join(os.homedir(), ".meta");
-export const MANAGED_CHROME_PROFILE = path.join(META_HOME, "chrome-profile");
-export const MANAGED_CHROME_PID_FILE = path.join(META_HOME, "chrome.pid");
-export const CHROME_MCP_AUTO_ACCEPT_FILE = path.join(META_HOME, "chrome-mcp-auto-accept.json");
+export const HER_HOME = process.env.HER_HOME || path.join(os.homedir(), ".her");
+export const MANAGED_CHROME_PROFILE = path.join(HER_HOME, "chrome-profile");
+export const MANAGED_CHROME_PID_FILE = path.join(HER_HOME, "chrome.pid");
+export const CHROME_MCP_AUTO_ACCEPT_FILE = path.join(HER_HOME, "chrome-mcp-auto-accept.json");
 export const MANAGED_CHROME_BIN = process.env.MANAGED_CHROME_BIN || findManagedChromeBinary();
 export const MANAGED_CHROME_DEBUG_PORT = Number(process.env.MANAGED_CHROME_DEBUG_PORT || 9222);
 export const DEFAULT_CHROME_MCP_EXTENSION_ID = "hbdgbgagpkpjffpklnamcljpakneikee";
@@ -92,8 +92,8 @@ function fsReaddirSafe(dir) {
   }
 }
 
-export function ensureMetaHome() {
-  if (!existsSync(META_HOME)) mkdirSync(META_HOME, { recursive: true });
+export function ensureHerHome() {
+  if (!existsSync(HER_HOME)) mkdirSync(HER_HOME, { recursive: true });
   if (!existsSync(MANAGED_CHROME_PROFILE)) mkdirSync(MANAGED_CHROME_PROFILE, { recursive: true });
 }
 

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { BrowserConnection } from "@/shared/types";
 
-const AUTO_ACCEPT_FILE = path.join(process.env.META_HOME || path.join(os.homedir(), ".meta"), "chrome-mcp-auto-accept.json");
+const AUTO_ACCEPT_FILE = path.join(process.env.HER_HOME || path.join(os.homedir(), ".her"), "chrome-mcp-auto-accept.json");
 const AUTO_ACCEPT_SCRIPT = path.join(process.cwd(), "scripts", "chrome-mcp-auto-accept.mjs");
 const AUTO_ACCEPT_TIMEOUT_MS = 10_000;
 const PING_TIMEOUT_MS = 1000;

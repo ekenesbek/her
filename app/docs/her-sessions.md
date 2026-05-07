@@ -1,4 +1,4 @@
-# Meta Sessions
+# Her Sessions
 
 Concept note for a one-window agent experience where the user talks to one agent, while the system manages topic-scoped sessions behind the scenes.
 
@@ -6,7 +6,7 @@ This is an exploration, not a committed implementation.
 
 ## Product idea
 
-Instead of making the user manually create and switch between chats, `meta` can keep a higher-level **meta session** around the user's ongoing work.
+Instead of making the user manually create and switch between chats, `Her` can keep a higher-level **Her session** around the user's ongoing work.
 
 The visible UX stays simple:
 
@@ -20,7 +20,7 @@ Behind the scenes, the agent runtime can create and route messages into multiple
 Example:
 
 ```text
-Meta session: "Personal operations"
+Her session: "Personal operations"
 
 - Topic session: "Taxi and local errands"
 - Topic session: "Travel planning"
@@ -41,7 +41,7 @@ The user still writes in one place. The system decides whether the next message 
 3. The agent runs inside the selected topic session.
 4. Browser/task traces are attached to that session.
 5. A memory writer extracts durable facts, decisions, entities, links, and task outcomes.
-6. The meta session index is updated so future routing can find the right context.
+6. The Her session index is updated so future routing can find the right context.
 
 ## Session router
 
@@ -69,7 +69,7 @@ MVP behavior should be conservative:
 ## Data model sketch
 
 ```text
-meta_sessions
+her_sessions
   id
   user_id
   title
@@ -79,7 +79,7 @@ meta_sessions
 
 topic_sessions
   id
-  meta_session_id
+  her_session_id
   title
   summary
   status
@@ -105,7 +105,7 @@ topic_session_links
 memory_entries
   id
   user_id
-  meta_session_id
+  her_session_id
   topic_session_id
   kind: fact | preference | decision | credential_ref | task_result | summary
   content
@@ -145,7 +145,7 @@ For irreversible browser actions, the approval gate remains outside the memory/s
 
 ## MVP
 
-1. Add `meta_sessions` and `topic_sessions`.
+1. Add `her_sessions` and `topic_sessions`.
 2. Add a router call after each user message.
 3. Attach every chat message and task run to a topic session.
 4. Show current topic and routing events in the chat timeline.
@@ -158,7 +158,7 @@ Do not start with fully autonomous session management. Start with routing + obse
 
 Checked: 2026-04-23.
 
-No memory provider appears to offer this exact one-window meta-session product pattern out of the box. Several providers cover important parts of it:
+No memory provider appears to offer this exact one-window Her session product pattern out of the box. Several providers cover important parts of it:
 
 - [Letta](https://docs.letta.com/guides/agents/conversations)
   Closest conceptually for stateful agents. It supports persistent agents, conversations, message history, shared memory, and multi-conversation patterns. Good reference if we want the agent itself to manage structured memory and long-running state.
@@ -167,14 +167,14 @@ No memory provider appears to offer this exact one-window meta-session product p
   Strong reference for session/thread memory and temporal knowledge graph context. Useful if we want automatic extraction, graph context, and retrieval around users and threads.
 
 - [Mem0](https://docs.mem0.ai/)
-  Useful as a production memory layer with user/session-style scoping and memory extraction. Good candidate for durable facts/preferences across sessions, but the meta-session router and UI model would still be ours.
+  Useful as a production memory layer with user/session-style scoping and memory extraction. Good candidate for durable facts/preferences across sessions, but the Her session router and UI model would still be ours.
 
 - [Supermemory](https://docs.supermemory.ai/)
   Useful as context infrastructure: profiles, memory graph, retrieval, extractors, and connectors. More of a context/memory substrate than an opinionated session orchestration UX.
 
 ## Open questions
 
-- Should meta sessions be user-visible objects or mostly hidden?
+- Should Her sessions be user-visible objects or mostly hidden?
 - Should routing run synchronously before the agent answers or asynchronously after each turn?
 - How aggressive should automatic session creation be?
 - Do we want provider-backed memory first, or local tables + optional provider adapters?

@@ -124,8 +124,8 @@ export default function PasskeyAuth() {
   const [autofillReady, setAutofillReady] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
-  const deviceLabel = useMemo(detectDeviceLabel, []);
-  const authenticatorLabel = useMemo(detectAuthenticatorLabel, []);
+  const deviceLabel = useMemo(() => detectDeviceLabel(), []);
+  const authenticatorLabel = useMemo(() => detectAuthenticatorLabel(), []);
 
   async function finishAuthentication(
     body: { email?: string },
@@ -301,9 +301,9 @@ export default function PasskeyAuth() {
 
         <div className="relative z-10 flex items-center gap-2.5">
           <span className="w-[22px] h-[22px] rounded-full bg-[var(--fg)] grid place-items-center text-[var(--bg)] font-serif italic text-[11px]">
-            m
+            h
           </span>
-          <span className="font-serif italic text-[17px] font-medium">meta</span>
+          <span className="font-serif italic text-[17px] font-medium">Her</span>
           <span className="ml-auto flex items-center gap-2">
             <span className="label-mono text-[10px]">
               {signin ? t(lang, "login.signIn") : t(lang, "login.createAccount")}
@@ -501,7 +501,7 @@ export default function PasskeyAuth() {
               className="font-medium text-[var(--accent)]"
               style={{ borderBottom: "1px solid var(--accent)" }}
             >
-              {signin ? t(lang, "login.createAMeta") : t(lang, "login.signIn")}
+              {signin ? t(lang, "login.createAHer") : t(lang, "login.signIn")}
             </button>
           </div>
           <div

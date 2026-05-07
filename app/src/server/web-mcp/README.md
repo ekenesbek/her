@@ -1,6 +1,6 @@
 # Web MCP Server Modules
 
-Web MCP is split into small layers so reusable website-memory logic does not depend on the meta product runtime.
+Web MCP is split into small layers so reusable website-memory logic does not depend on the Her product runtime.
 
 ## `core/`
 

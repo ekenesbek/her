@@ -6,7 +6,7 @@ import type { Template } from "@/shared/templates";
 import { useLang, t, type Lang } from "@/client/i18n";
 import LangToggle from "@/ui/shell/lang-toggle";
 
-const KEYS_STORAGE = "meta.keys.v1";
+const KEYS_STORAGE = "her.keys.v1";
 type KeyId = "apple" | "google" | "contacts" | "calendar";
 type KeyStatus = "idle" | "connecting" | "connected";
 
@@ -21,6 +21,25 @@ const STEP_TITLE_KEYS: Record<Step, "onb.step.welcome" | "onb.step.browser" | "o
 };
 
 const DEFAULT_TEMPLATE_ID = "personal-assistant";
+const DEFAULT_KEYS: Record<KeyId, KeyStatus> = {
+  apple: "idle",
+  google: "idle",
+  contacts: "idle",
+  calendar: "idle",
+};
+
+function readStoredKeys(): Record<KeyId, KeyStatus> {
+  if (typeof window === "undefined") return DEFAULT_KEYS;
+
+  try {
+    const raw = window.localStorage.getItem(KEYS_STORAGE);
+    if (!raw) return DEFAULT_KEYS;
+    const parsed = JSON.parse(raw) as Partial<Record<KeyId, KeyStatus>>;
+    return { ...DEFAULT_KEYS, ...parsed };
+  } catch {
+    return DEFAULT_KEYS;
+  }
+}
 
 export default function OnboardingWizard({ templates }: { templates: Template[] }) {
   const router = useRouter();
@@ -33,23 +52,7 @@ export default function OnboardingWizard({ templates }: { templates: Template[] 
     openPages: true,
     payments: false,
   });
-  const [keys, setKeys] = useState<Record<KeyId, KeyStatus>>({
-    apple: "idle",
-    google: "idle",
-    contacts: "idle",
-    calendar: "idle",
-  });
-
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(KEYS_STORAGE);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Partial<Record<KeyId, KeyStatus>>;
-      setKeys((k) => ({ ...k, ...parsed }));
-    } catch {
-      /* ignore */
-    }
-  }, []);
+  const [keys, setKeys] = useState<Record<KeyId, KeyStatus>>(() => readStoredKeys());
 
   useEffect(() => {
     try {
@@ -87,7 +90,7 @@ export default function OnboardingWizard({ templates }: { templates: Template[] 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...template.draft,
-          name: "meta",
+          name: "Her",
           emoji: "◉",
           description:
             lang === "en" ? "Your personal agent." : "Твой персональный агент.",
@@ -194,7 +197,7 @@ function Welcome({ lang, onNext }: { lang: Lang; onNext: () => void }) {
         <br />
         <em className="italic font-normal">{t(lang, "onb.welcome.iAmYour")}</em>
         <br />
-        meta.
+        Her.
       </h1>
 
       <p className="mt-7 text-[14px] leading-[1.55] text-[var(--fg-muted)] max-w-[320px]">
@@ -286,9 +289,9 @@ function BrowserStep({
             <ChromeIcon />
           </div>
           <div className="relative flex-1 h-px bg-[var(--border)]">
-            <span className="absolute -top-[3px] left-[28%] w-[7px] h-[7px] rounded-full bg-[var(--accent)] meta-pulse" />
+            <span className="absolute -top-[3px] left-[28%] w-[7px] h-[7px] rounded-full bg-[var(--accent)] her-pulse" />
             <span
-              className="absolute -top-[3px] left-[62%] w-[7px] h-[7px] rounded-full bg-[var(--accent)] meta-pulse"
+              className="absolute -top-[3px] left-[62%] w-[7px] h-[7px] rounded-full bg-[var(--accent)] her-pulse"
               style={{ animationDelay: "0.3s" }}
             />
           </div>
@@ -299,7 +302,7 @@ function BrowserStep({
         <div className="mt-3.5 flex justify-between font-mono text-[10px] text-[var(--fg-dim)] tracking-wide">
           <span>Chrome MCP</span>
           <span>→</span>
-          <span>meta</span>
+          <span>Her</span>
         </div>
         <div className="mt-2.5 font-mono text-[10px] text-[var(--accent)] bg-[var(--accent-soft)] px-2.5 py-1.5 rounded-md">
           127.0.0.1:12306/mcp
@@ -550,7 +553,7 @@ function KeyCard({
       >
         {connecting && (
           <span
-            className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] meta-pulse"
+            className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] her-pulse"
             aria-hidden
           />
         )}
@@ -638,10 +641,10 @@ function ReadyStep({
 
       <div className="mt-6 p-5 rounded-2xl bg-[var(--bg-soft)] border border-[var(--border)] flex items-center gap-4">
         <div className="w-12 h-12 rounded-full bg-[var(--fg)] text-[var(--bg)] grid place-items-center font-serif italic text-xl leading-none">
-          m
+          h
         </div>
         <div className="flex-1 min-w-0">
-          <div className="font-serif text-lg italic">meta</div>
+          <div className="font-serif text-lg italic">Her</div>
           <div className="text-[11px] font-mono text-[var(--fg-dim)] mt-0.5">
             claude-sonnet-4-6 · chrome · vault
           </div>

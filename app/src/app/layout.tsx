@@ -20,7 +20,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "meta — твои персональные агенты",
+  title: "Her — твои персональные агенты",
   description: "Создавай агентов с доступом к браузеру и сервисам.",
 };
 

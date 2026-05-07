@@ -119,7 +119,7 @@ export default function ChatClient({
       setQueue((q) => [...q, text]);
       return;
     }
-    await runGeneration(text);
+    await runCurrentGeneration(text);
   }
 
   function stop() {
@@ -152,19 +152,23 @@ export default function ChatClient({
       return;
     }
 
-    await runGeneration(text);
+    await runCurrentGeneration(text);
+  }
+
+  async function runCurrentGeneration(text: string) {
+    const run = runGenerationRef.current;
+    if (run) await run(text);
   }
 
   useEffect(() => {
-    runGenerationRef.current = runGeneration;
-  });
-
-  useEffect(() => {
     if (stream.streaming || queue.length === 0) return;
-    const [next, ...rest] = queue;
-    setQueue(rest);
-    const run = runGenerationRef.current;
-    if (run) void run(next);
+    const next = queue[0];
+    const timeout = window.setTimeout(() => {
+      setQueue((current) => (current[0] === next ? current.slice(1) : current));
+      const run = runGenerationRef.current;
+      if (run) void run(next);
+    }, 0);
+    return () => window.clearTimeout(timeout);
   }, [stream.streaming, queue]);
 
   async function runGeneration(text: string) {
@@ -276,6 +280,10 @@ export default function ChatClient({
     }
   }
 
+  useEffect(() => {
+    runGenerationRef.current = runGeneration;
+  });
+
   async function clearHistory() {
     if (!confirm(t(lang, "chat.clearConfirm"))) return;
     await fetch(apiChatUrl, { method: "DELETE" });
@@ -338,7 +346,7 @@ export default function ChatClient({
       >
         <div className="flex items-center gap-2 px-1 mb-3">
           <span className="label-mono" style={{ fontSize: 11, color: "var(--fg)" }}>
-            meta
+            Her
           </span>
           <button
             type="button"
@@ -412,7 +420,7 @@ export default function ChatClient({
           >
             <div className="flex items-center gap-1.5 label-mono" style={{ fontSize: 9 }}>
               <span
-                className="w-1.5 h-1.5 rounded-full meta-pulse"
+                className="w-1.5 h-1.5 rounded-full her-pulse"
                 style={{ background: chromeConnected ? "var(--success)" : "var(--fg-dim)" }}
               />
               Chrome · {chromeConnected ? t(lang, "chat.chrome.online") : t(lang, "chat.chrome.offline")}
@@ -684,7 +692,9 @@ function UserBubble({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    if (editing) {
+    if (!editing) return;
+
+    const timeout = window.setTimeout(() => {
       setDraft(text);
       const el = textareaRef.current;
       if (el) {
@@ -693,7 +703,8 @@ function UserBubble({
         el.style.height = "auto";
         el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
       }
-    }
+    }, 0);
+    return () => window.clearTimeout(timeout);
   }, [editing, text]);
 
   if (editing) {
@@ -813,12 +824,12 @@ function AgentBubble({
         {message.content && (
           <div className="text-[13px] leading-[1.55] whitespace-pre-wrap text-[var(--fg)]">
             {message.content}
-            {streaming && <span className="inline-block w-1.5 h-4 bg-[var(--accent)] ml-0.5 meta-pulse align-middle" />}
+            {streaming && <span className="inline-block w-1.5 h-4 bg-[var(--accent)] ml-0.5 her-pulse align-middle" />}
           </div>
         )}
         {!message.content && streaming && (
           <div className="label-mono flex items-center gap-1.5" style={{ fontSize: 9 }}>
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] meta-pulse" />
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] her-pulse" />
             {t(lang, "chat.thinking")}
           </div>
         )}
@@ -850,7 +861,7 @@ function TaskCard({ lang, taskRun, now }: { lang: Lang; taskRun: TaskRunSnapshot
           className="w-1.5 h-1.5 rounded-full"
           style={{
             background: running ? "var(--accent)" : taskRun.status === "failed" ? "var(--danger)" : "var(--success)",
-            animation: running ? "meta-pulse 1.4s infinite" : undefined,
+            animation: running ? "her-pulse 1.4s infinite" : undefined,
           }}
         />
         <span style={{ color: running ? "var(--accent)" : "var(--fg-muted)" }}>
@@ -973,7 +984,7 @@ function TaskStepRow({ lang, event, index, isLast }: { lang: Lang; event: TaskEv
         >
           {status === "done" && <CheckIcon color="var(--bg)" />}
           {status === "active" && (
-            <span className="w-1 h-1 rounded-full bg-[var(--bg)] meta-pulse" />
+            <span className="w-1 h-1 rounded-full bg-[var(--bg)] her-pulse" />
           )}
         </span>
         <span

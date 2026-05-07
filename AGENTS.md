@@ -20,9 +20,9 @@ app/                         web app and browser-agent product code
 app/AGENTS.md                additional Next.js rules for app/ changes
 app/src/                     web application source
 app/test/                    web tests
-meta-ios/frontend/           iOS application
-meta-ios/backend/            backend service for the iOS app
-meta-ios/docs/               iOS/backend-specific docs
+her-ios/frontend/           iOS application
+her-ios/backend/            backend service for the iOS app
+her-ios/docs/               iOS/backend-specific docs
 docs/runtime/                runtime handoff notes
 todo/tasks.md                canonical task index
 todo/ios.md                  active iOS task stream
@@ -62,7 +62,7 @@ When asked to do work:
 Before creating a task, search relevant docs and task files:
 
 ```bash
-rg -n "keyword|feature|bug|area" todo docs app/docs meta-ios/docs
+rg -n "keyword|feature|bug|area" todo docs app/docs her-ios/docs
 ```
 
 Do not pick next work directly from a strategy doc or loose todo note. Route durable work through `todo/tasks.md`.

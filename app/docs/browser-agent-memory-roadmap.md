@@ -1,12 +1,12 @@
 # Browser Agent Memory Roadmap
 
-Plan for making `meta` agents better at repeated browser work, credential-gated flows, scheduled browser jobs, and long-term user preference learning.
+Plan for making `Her` agents better at repeated browser work, credential-gated flows, scheduled browser jobs, and long-term user preference learning.
 
 This plan connects existing notes:
 
 - [Web MCP Focus](./web-mcp-focus.md)
 - [Credential Broker](./credential-broker.md)
-- [Meta Sessions](./meta-sessions.md)
+- [Her Sessions](./her-sessions.md)
 - [Memory Landscape](./memory-landscape.md)
 
 ## Thesis

@@ -65,7 +65,7 @@ export default function BrowserSettingsForm({
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Browser</h1>
           <p className="text-sm text-[var(--fg-muted)] mt-2 max-w-2xl leading-relaxed">
-            По умолчанию meta использует локальный Chrome MCP на 127.0.0.1:12306/mcp и managed Chrome
+            По умолчанию Her использует локальный Chrome MCP на 127.0.0.1:12306/mcp и managed Chrome
             из launch-процесса. Свой URL нужен только для кастомного браузерного рантайма.
           </p>
         </div>

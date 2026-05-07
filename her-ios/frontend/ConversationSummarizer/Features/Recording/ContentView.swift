@@ -29,7 +29,7 @@ final class AppSettingsStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        aiName = defaults.string(forKey: Keys.aiName) ?? "meta"
+        aiName = defaults.string(forKey: Keys.aiName) ?? "Her"
         ownerName = defaults.string(forKey: Keys.ownerName) ?? ""
         signInProvider = defaults.string(forKey: Keys.signInProvider).flatMap(SignInProvider.init(rawValue:))
         onboardingCompleted = defaults.bool(forKey: Keys.onboardingCompleted)
@@ -38,7 +38,7 @@ final class AppSettingsStore: ObservableObject {
 
     var aiDisplayName: String {
         let trimmed = aiName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "meta" : trimmed
+        return trimmed.isEmpty ? "Her" : trimmed
     }
 
     var ownerDisplayName: String {
@@ -56,7 +56,7 @@ final class AppSettingsStore: ObservableObject {
         signInProvider: SignInProvider,
         glassesSetupSkipped: Bool
     ) {
-        self.aiName = Self.clean(aiName, fallback: "meta")
+        self.aiName = Self.clean(aiName, fallback: "Her")
         self.ownerName = Self.clean(ownerName, fallback: "Owner")
         self.signInProvider = signInProvider
         self.glassesSetupSkipped = glassesSetupSkipped
@@ -65,13 +65,13 @@ final class AppSettingsStore: ObservableObject {
     }
 
     func saveProfile(aiName: String, ownerName: String) {
-        self.aiName = Self.clean(aiName, fallback: "meta")
+        self.aiName = Self.clean(aiName, fallback: "Her")
         self.ownerName = Self.clean(ownerName, fallback: "Owner")
         persist()
     }
 
     func resetOnboarding() {
-        aiName = "meta"
+        aiName = "Her"
         ownerName = ""
         signInProvider = nil
         onboardingCompleted = false
@@ -228,7 +228,7 @@ private enum MainRoute {
     case detail
     case memory
     case recording
-    case meta
+    case her
 }
 
 struct ContentView: View {
@@ -270,7 +270,7 @@ struct ContentView: View {
                         liveContext: liveContext,
                         meetings: meetingsStore.meetings,
                         onSettings: {
-                            route = .meta
+                            route = .her
                         },
                         onPair: showDeviceFlow,
                         onConversations: {
@@ -280,8 +280,8 @@ struct ContentView: View {
                         onMemory: {
                             route = .memory
                         },
-                        onMeta: {
-                            route = .meta
+                        onHer: {
+                            route = .her
                         },
                         onSelectConversation: { meeting in
                             selectedMeeting = meeting
@@ -319,7 +319,7 @@ struct ContentView: View {
                         },
                         onRecord: showRecording,
                         onMemory: { route = .memory },
-                        onMeta: { route = .meta }
+                        onHer: { route = .her }
                     )
                 case .detail:
                     ExactConversationDetailScreen(
@@ -332,7 +332,7 @@ struct ContentView: View {
                         onHome: { route = .home },
                         onConversations: { route = .conversations },
                         onRecord: showRecording,
-                        onMeta: { route = .meta }
+                        onHer: { route = .her }
                     )
                 case .recording:
                     ExactRecordingScreen(
@@ -347,8 +347,8 @@ struct ContentView: View {
                         },
                         onDismiss: { route = .home }
                     )
-                case .meta:
-                    ExactSettingsMetaScreen(
+                case .her:
+                    ExactSettingsHerScreen(
                         settings: settings,
                         bridge: wearablesBridge,
                         viewModel: viewModel,
@@ -429,8 +429,8 @@ private struct ExactBrandBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            MetaOrb(size: 22)
-            Text("meta")
+            HerOrb(size: 22)
+            Text("Her")
                 .font(.system(size: 17, weight: .medium, design: .serif))
                 .foregroundColor(AppTheme.fg)
             Spacer()
@@ -456,7 +456,7 @@ private struct ExactHomeScreen: View {
     let onConversations: () -> Void
     let onRecord: () -> Void
     let onMemory: () -> Void
-    let onMeta: () -> Void
+    let onHer: () -> Void
     let onSelectConversation: (StoredMeeting) -> Void
     let onGenerateSummary: () -> Void
 
@@ -509,7 +509,7 @@ private struct ExactHomeScreen: View {
                 .padding(.bottom, 36)
             }
 
-            ExactTabBar(activeIndex: 0, recording: isRecording, onHome: {}, onRecord: onRecord, onLog: onConversations, onMemory: onMemory, onMeta: onMeta)
+            ExactTabBar(activeIndex: 0, recording: isRecording, onHome: {}, onRecord: onRecord, onLog: onConversations, onMemory: onMemory, onHer: onHer)
         }
     }
 
@@ -604,7 +604,7 @@ private struct ExactGlassesStatusCard: View {
             HStack(alignment: .center, spacing: 14) {
                 SmallGlassesIcon()
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ray-Ban meta")
+                    Text("Ray-Ban Meta")
                         .font(.system(size: 13.5, weight: .medium, design: .serif))
                         .foregroundColor(AppTheme.fg)
                     Text(detailText)
@@ -839,7 +839,7 @@ private struct ExactPairRayBanScreen: View {
             WwHeader(pre: "connect", title: "Searching for Ray-Ban.", italic: true, onBack: onBack)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Open the case near your phone. If they already appear in iOS Bluetooth, meta will show them here.")
+                Text("Open the case near your phone. If they already appear in iOS Bluetooth, Her will show them here.")
                     .font(.system(size: 14, weight: .regular, design: .serif))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(5)
@@ -931,7 +931,7 @@ private struct ExactDeviceConnectedScreen: View {
             WwHeader(pre: "device", title: "Ray-Ban connected.", italic: true, onBack: onBack)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("meta can now use the active iOS audio route for recording. Keep the glasses selected as the microphone route when the meeting starts.")
+                Text("Her can now use the active iOS audio route for recording. Keep the glasses selected as the microphone route when the meeting starts.")
                     .font(.system(size: 14, weight: .regular, design: .serif))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(5)
@@ -1042,7 +1042,7 @@ private struct ExactConversationsScreen: View {
     let onSelect: (StoredMeeting) -> Void
     let onRecord: () -> Void
     let onMemory: () -> Void
-    let onMeta: () -> Void
+    let onHer: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1063,7 +1063,7 @@ private struct ExactConversationsScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 10) {
-                MetaOrb(size: 16)
+                HerOrb(size: 16)
                 Text(items.isEmpty ? "record a conversation to start the log." : "open a conversation to review transcript, summary, and chat.")
                     .font(.system(size: 13.5, weight: .regular, design: .serif))
                     .italic()
@@ -1105,7 +1105,7 @@ private struct ExactConversationsScreen: View {
                 .padding(.horizontal, 22)
             }
 
-            ExactTabBar(activeIndex: 1, recording: false, onHome: onBackHome, onRecord: onRecord, onLog: {}, onMemory: onMemory, onMeta: onMeta)
+            ExactTabBar(activeIndex: 1, recording: false, onHome: onBackHome, onRecord: onRecord, onLog: {}, onMemory: onMemory, onHer: onHer)
         }
     }
 
@@ -1471,7 +1471,7 @@ private struct ExactMemoryScreen: View {
     let onHome: () -> Void
     let onConversations: () -> Void
     let onRecord: () -> Void
-    let onMeta: () -> Void
+    let onHer: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1518,7 +1518,7 @@ private struct ExactMemoryScreen: View {
                 .padding(.bottom, 32)
             }
 
-            ExactTabBar(activeIndex: 2, recording: recording, onHome: onHome, onRecord: onRecord, onLog: onConversations, onMemory: {}, onMeta: onMeta)
+            ExactTabBar(activeIndex: 2, recording: recording, onHome: onHome, onRecord: onRecord, onLog: onConversations, onMemory: {}, onHer: onHer)
         }
     }
 }
@@ -1526,7 +1526,7 @@ private struct ExactMemoryScreen: View {
 private struct MemorySearchCapsule: View {
     var body: some View {
         HStack(spacing: 10) {
-            MetaOrb(size: 16)
+            HerOrb(size: 16)
             Text("ask — \"what do you know about anya?\"")
                 .font(.system(size: 13.5, weight: .regular, design: .serif))
                 .italic()
@@ -1993,7 +1993,7 @@ private struct RecordingInsightChip: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            MetaOrb(size: 18)
+            HerOrb(size: 18)
             Text(message)
                 .font(.system(size: 13.5, weight: .regular, design: .serif))
                 .italic()
@@ -2186,7 +2186,7 @@ private struct RecordingPostProcessDock: View {
     }
 }
 
-private struct ExactSettingsMetaScreen: View {
+private struct ExactSettingsHerScreen: View {
     @ObservedObject var settings: AppSettingsStore
     @ObservedObject var bridge: WearablesBridge
     @ObservedObject var viewModel: ConversationSessionViewModel
@@ -2276,9 +2276,9 @@ private struct ExactSettingsMetaScreen: View {
                                         .font(.system(size: 16))
                                         .frame(width: 24)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text("Teach meta your voice")
+                                        Text("Teach Her your voice")
                                             .font(.system(size: 14.5, weight: .medium, design: .serif))
-                                        Text("60-second sample so meta can label you in transcripts")
+                                        Text("60-second sample so Her can label you in transcripts")
                                             .font(.system(size: 12, design: .serif))
                                             .italic()
                                             .foregroundColor(AppTheme.dim)
@@ -2303,7 +2303,7 @@ private struct ExactSettingsMetaScreen: View {
                     SettingsSectionHeader(title: "memory & data")
                     WwCard(padding: 0) {
                         VStack(spacing: 0) {
-                            SettingsValueRow(icon: "brain.head.profile", label: "What meta knows", subtitle: "connect backend memory to populate", value: "empty")
+                            SettingsValueRow(icon: "brain.head.profile", label: "What Her knows", subtitle: "connect backend memory to populate", value: "empty")
                             DividerLine()
                             SettingsValueRow(icon: "square.stack.3d.up", label: "Conversations", subtitle: "loaded from backend meetings", value: "sync")
                             DividerLine()
@@ -2346,7 +2346,7 @@ private struct ExactSettingsMetaScreen: View {
                         VStack(spacing: 0) {
                             SettingsToggleRow(icon: "sparkles", label: "Daily summary", subtitle: "disabled until backend schedule is connected", isOn: $dailySummary)
                             DividerLine()
-                            SettingsToggleRow(icon: "pin", label: "Follow-ups", subtitle: "when meta finds an action item", isOn: $followUps)
+                            SettingsToggleRow(icon: "pin", label: "Follow-ups", subtitle: "when Her finds an action item", isOn: $followUps)
                             DividerLine()
                             SettingsToggleRow(icon: "wifi", label: "Sync over Wi-Fi only", isOn: $wifiOnly)
                         }
@@ -2397,7 +2397,7 @@ private struct ExactSettingsMetaScreen: View {
                 onRecord: onRecord,
                 onLog: onConversations,
                 onMemory: onMemory,
-                onMeta: {}
+                onHer: {}
             )
         }
     }
@@ -2545,7 +2545,7 @@ private struct SettingsProfileCard: View {
                 if editingProfile {
                     DividerLine()
                     VStack(alignment: .leading, spacing: 14) {
-                        ProfileTextField(label: "AI NAME", placeholder: "meta", text: $aiName)
+                        ProfileTextField(label: "AI NAME", placeholder: "Her", text: $aiName)
                         ProfileTextField(label: "OWNER", placeholder: "Your name", text: $ownerName)
                         WwPrimaryButton("save profile") {
                             settings.saveProfile(aiName: aiName, ownerName: ownerName)
@@ -2638,7 +2638,7 @@ private struct SettingsGlassesCard: View {
     }
 
     private var glassesTitle: String {
-        bridge.audioRoute.primaryDetectedDevice?.name ?? "Ray-Ban meta · Wayfarer"
+        bridge.audioRoute.primaryDetectedDevice?.name ?? "Ray-Ban Meta · Wayfarer"
     }
 
     private var glassesSubtitle: String {
@@ -2856,7 +2856,7 @@ private struct ExactTabBar: View {
     let onRecord: () -> Void
     let onLog: () -> Void
     let onMemory: () -> Void
-    let onMeta: () -> Void
+    let onHer: () -> Void
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -2866,7 +2866,7 @@ private struct ExactTabBar: View {
                 Color.clear
                     .frame(width: 76, height: 1)
                 tab(icon: "brain.head.profile", title: "memory", index: 2, action: onMemory)
-                tab(icon: "gearshape", title: "meta", index: 3, action: onMeta)
+                tab(icon: "gearshape", title: "Her", index: 3, action: onHer)
             }
 
             Button(action: onRecord) {
@@ -3105,7 +3105,7 @@ private struct WarmHomeHeader: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            MetaOrb(size: 28)
+            HerOrb(size: 28)
 
             Text(settings.aiDisplayName.lowercased())
                 .font(.system(size: 20, weight: .medium, design: .serif))
@@ -3251,7 +3251,7 @@ private struct WarmGlassesStatusCard: View {
                         .background(Circle().fill(AppTheme.fg))
 
                     VStack(alignment: .leading, spacing: 5) {
-                        MonoLabel("ray-ban meta")
+                        MonoLabel("Ray-Ban Meta")
                         Text(bridge.audioRoute.primaryDetectedDevice?.name ?? "Glasses not detected")
                             .font(.system(size: 17, weight: .medium, design: .serif))
                             .foregroundColor(AppTheme.fg)
@@ -3467,7 +3467,7 @@ private struct WarmTabBar: View {
         ("mic", "record"),
         ("square.stack.3d.up", "log"),
         ("brain.head.profile", "memory"),
-        ("gearshape", "meta")
+        ("gearshape", "Her")
     ]
 
     var body: some View {
@@ -3919,7 +3919,7 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
         case .ownerName:
             return "Your name"
         case .voiceProfile:
-            return "Teach meta your voice"
+            return "Teach Her your voice"
         case .aiName:
             return "Assistant name"
         case .permissions:
@@ -3936,7 +3936,7 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
         case .ownerName:
             return "This is how the app addresses the main owner."
         case .voiceProfile:
-            return "Optional. Speak for ~60 seconds so meta can label you in transcripts automatically."
+            return "Optional. Speak for ~60 seconds so Her can label you in transcripts automatically."
         case .aiName:
             return "This is the assistant name you will see across recordings and summaries."
         case .permissions:
@@ -4223,7 +4223,7 @@ private struct SetupFlowHeader: View {
                     }
                     .buttonStyle(PlainButtonStyle())
                 } else {
-                    MetaOrb(size: 28)
+                    HerOrb(size: 28)
                 }
 
                 Text(displayName.lowercased())
@@ -4242,7 +4242,7 @@ private struct SetupFlowHeader: View {
 
     private var displayName: String {
         let trimmed = aiName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "meta" : trimmed
+        return trimmed.isEmpty ? "Her" : trimmed
     }
 }
 
@@ -4319,8 +4319,8 @@ private struct SetupAccountPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
-                MetaOrb(size: 26)
-                Text("meta")
+                HerOrb(size: 26)
+                Text("Her")
                     .font(.system(size: 18, weight: .medium, design: .serif))
                     .foregroundColor(AppTheme.fg)
                 Spacer(minLength: 12)
@@ -4331,7 +4331,7 @@ private struct SetupAccountPage: View {
                 .frame(height: 64)
 
             VStack(alignment: .leading, spacing: 14) {
-                MonoLabel("personal AI · for ray-ban meta")
+                MonoLabel("personal AI · for Ray-Ban Meta")
                 VStack(alignment: .leading, spacing: 2) {
                     Text("One mind.")
                         .font(.system(size: 48, weight: .regular, design: .serif))
@@ -4562,7 +4562,7 @@ private struct SetupVoiceProfilePage: View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
             WwSteps(step: 2, total: 5, label: "voice")
-            WwHeader(pre: "your voice", title: "Teach meta your voice.", italic: true)
+            WwHeader(pre: "your voice", title: "Teach Her your voice.", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
                 WwCard(padding: 20) {
@@ -4749,7 +4749,7 @@ private struct SetupAgentNamePage: View {
     let onBack: () -> Void
     let onContinue: () -> Void
 
-    private let suggestions = ["meta", "iris", "echo", "mira", "atlas", "wren", "lior"]
+    private let suggestions = ["Her", "iris", "echo", "mira", "atlas", "wren", "lior"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -4760,9 +4760,9 @@ private struct SetupAgentNamePage: View {
             VStack(alignment: .leading, spacing: 16) {
                 WwCard(padding: 28) {
                     VStack(alignment: .center, spacing: 0) {
-                        MetaOrb(size: 38)
+                        HerOrb(size: 38)
                         HStack(alignment: .center, spacing: 4) {
-                            TextField("meta", text: $aiName)
+                            TextField("Her", text: $aiName)
                                 .font(.system(size: 60, weight: .medium, design: .serif))
                                 .foregroundColor(AppTheme.fg)
                                 .multilineTextAlignment(.center)
@@ -4806,7 +4806,7 @@ private struct SetupAgentNamePage: View {
     }
 
     private var displayName: String {
-        aiName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "meta" : aiName
+        aiName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Her" : aiName
     }
 }
 
@@ -4995,7 +4995,7 @@ private struct SetupPermissionsPage: View {
                             ExactPermissionRow(
                                 icon: "eyeglasses",
                                 title: "Bluetooth",
-                                subtitle: "pair Ray-Ban meta",
+                                subtitle: "pair Ray-Ban Meta",
                                 state: bluetoothPermission,
                                 defaultOn: true,
                                 action: onBluetooth
@@ -5009,7 +5009,7 @@ private struct SetupPermissionsPage: View {
                             .foregroundColor(AppTheme.fg)
                             .padding(.top, 2)
                         (Text("Audio stays on this device.").italic()
-                            + Text(" Never uploaded unless you ask meta to summarize."))
+                            + Text(" Never uploaded unless you ask Her to summarize."))
                             .font(.system(size: 12.5, weight: .regular, design: .serif))
                             .foregroundColor(AppTheme.muted)
                             .lineSpacing(4)
@@ -5093,7 +5093,7 @@ private struct SetupGlassesPage: View {
                     .frame(height: 168)
                     .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bgSoft))
 
-                Text("We will use the iOS audio route first. If Ray-Ban Meta is already paired in Bluetooth, meta can detect it here.")
+                Text("We will use the iOS audio route first. If Ray-Ban Meta is already paired in Bluetooth, Her can detect it here.")
                     .font(.system(size: 15, weight: .regular))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(4)
@@ -5418,7 +5418,7 @@ private struct SettingsSheet: View {
 
                         AppCard {
                             VStack(alignment: .leading, spacing: 16) {
-                                ProfileTextField(label: "AI NAME", placeholder: "meta", text: $aiName)
+                                ProfileTextField(label: "AI NAME", placeholder: "Her", text: $aiName)
                                 ProfileTextField(label: "OWNER", placeholder: "Your name", text: $ownerName)
 
                                 PrimaryActionButton(title: "Save", icon: "checkmark") {
@@ -5445,7 +5445,7 @@ private struct SettingsSheet: View {
     }
 }
 
-private struct MetaOrb: View {
+private struct HerOrb: View {
     let size: CGFloat
 
     var body: some View {

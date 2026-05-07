@@ -1,4 +1,4 @@
-# meta — Roadmap (deferred initiatives)
+# Her — Roadmap (deferred initiatives)
 
 Отложенные направления, обсуждённые но не начатые. Снято с активных todos чтобы не отвлекали.
 
@@ -20,7 +20,7 @@
 **Этапы (~5-7 дней работы):**
 1. Backend WebSocket `/v1/realtime/conversation` — proxy к OpenAI Realtime + tool execution + injection памяти
 2. iOS audio streaming (`AVAudioEngine` → WebSocket → speaker)
-3. AppIntent «Talk to meta» для Siri-активации
+3. AppIntent «Talk to Her» для Siri-активации
 4. System prompt с sleep-words (bye, goodbye, до свидания, хватит, finish)
 5. 30-сек silence timeout
 6. Tools: `search_meetings(query)`, `get_weather(loc)`, `draft_taxi(from, to)`, `set_reminder(text, when)`, `end_conversation()`
@@ -53,7 +53,7 @@
 - Slu listener живёт пока приложение активно (foreground или background с audio session)
 
 **Что требует периодических действий:**
-- После **force-kill** приложения (свайп-up) — listener умирает, нужно открыть meta один раз
+- После **force-kill** приложения (свайп-up) — listener умирает, нужно открыть Her один раз
 - После **перезагрузки телефона** — то же
 - На **free tier Picovoice** — лимит ~50 wake events/мес/устройство; при превышении нужен Standard план $15/мес
 
@@ -73,8 +73,8 @@
 | Foreground (открыто) | Да |
 | Background с audio session | Да |
 | Lock screen | Да |
-| Force-killed (swipe-up в app switcher) | Нет — нужно открыть meta |
-| После перезагрузки телефона | Нет — нужно открыть meta один раз |
+| Force-killed (swipe-up в app switcher) | Нет — нужно открыть Her |
+| После перезагрузки телефона | Нет — нужно открыть Her один раз |
 | Low Power Mode (<20% батареи) | iOS может приостановить |
 
 **Альтернатива Picovoice:** [OpenWakeWord](https://github.com/dscripka/openWakeWord) — open-source, бесплатно навсегда, но нужно тренировать самому, точность ниже на 5-10%.
@@ -125,7 +125,7 @@
 ### Stage A — deep-link (~1 час за интеграцию)
 Агент готовит запрос → открывает нативное приложение с pre-fill, пользователь жмёт «оплатить» вручную.
 
-- Yandex Taxi: URL scheme `yandextaxi://route/?ref=meta&start-lat=...&start-lon=...&end-lat=...&end-lon=...`
+- Yandex Taxi: URL scheme `yandextaxi://route/?ref=her&start-lat=...&start-lon=...&end-lat=...&end-lon=...`
 - Uber: `uber://?action=setPickup&pickup=my_location&dropoff[latitude]=...`
 - Booking: deep-link с фильтрами поиска
 - Aviasales/Skyscanner: фильтры рейсов

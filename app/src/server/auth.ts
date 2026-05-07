@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createSession, deleteSession, getUserBySessionToken } from "./db";
 import type { User } from "@/shared/types";
 
-const SESSION_COOKIE_NAME = "meta_session";
+const SESSION_COOKIE_NAME = "her_session";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function isSecureCookie() {
@@ -29,7 +29,7 @@ export function getPasskeyConfigFromHeaders(headerStore: Headers) {
   return {
     origin,
     rpID: process.env.PASSKEY_RP_ID?.trim() || new URL(origin).hostname,
-    rpName: process.env.PASSKEY_RP_NAME?.trim() || "meta",
+    rpName: process.env.PASSKEY_RP_NAME?.trim() || "Her",
   };
 }
 

@@ -3,9 +3,8 @@ import {
   CHROME_MCP_URL,
   commandExists,
   ensureEnvLocal,
-  ensureMetaHome,
+  ensureHerHome,
   findChromeMcpExtensionPath,
-  pingChromeMcp,
   readBridgeDoctor,
   run,
 } from "./browser-runtime.mjs";
@@ -46,8 +45,8 @@ if (extensionPath) {
   process.exit(1);
 }
 
-ensureMetaHome();
-console.log("Managed Chrome profile directory is ready at ~/.meta/chrome-profile.");
+ensureHerHome();
+console.log("Managed Chrome profile directory is ready at ~/.her/chrome-profile.");
 console.log("Start it with: pnpm browser:start");
 console.log("");
 console.log("Browser runtime is configured.");
