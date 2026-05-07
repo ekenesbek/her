@@ -43,27 +43,48 @@ final class VoiceEnrollmentRecorder: NSObject, ObservableObject {
 
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.record, mode: .default, options: [])
-            try session.setActive(true)
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+
+            if let glasses = Self.preferredGlassesInput(in: session) {
+                try session.setCategory(
+                    .playAndRecord,
+                    mode: .voiceChat,
+                    options: [.allowBluetoothHFP, .defaultToSpeaker]
+                )
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
+                try? session.setPreferredInput(glasses)
+            } else {
+                try session.setCategory(.record, mode: .default, options: [])
+                if let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                    try? session.setPreferredInput(builtIn)
+                }
+                try session.setActive(true, options: .notifyOthersOnDeactivation)
+            }
         } catch {
-            phase = .failed(error.localizedDescription)
+            phase = .failed(Self.recordingErrorMessage(for: error))
             return
         }
 
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("enroll-\(UUID().uuidString).m4a")
+        let hardwareRate = session.sampleRate
+        let sampleRate = (hardwareRate >= 8_000 && hardwareRate <= 48_000) ? hardwareRate : 44_100
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 16_000,
+            AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: 1,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-            AVEncoderBitRateKey: 96_000
+            AVEncoderBitRateKey: 64_000
         ]
 
         do {
             let recorder = try AVAudioRecorder(url: url, settings: settings)
-            guard recorder.prepareToRecord(), recorder.record() else {
-                phase = .failed("Could not start recording.")
+            guard recorder.prepareToRecord() else {
+                phase = .failed("Could not prepare recorder (rate=\(Int(sampleRate))Hz, route=\(session.currentRoute.inputs.first?.portName ?? "unknown")).")
+                return
+            }
+            guard recorder.record() else {
+                phase = .failed("Could not start recording — microphone may be in use by another app.")
                 return
             }
             self.recorder = recorder
@@ -96,6 +117,39 @@ final class VoiceEnrollmentRecorder: NSObject, ObservableObject {
         phase = .failed(message)
     }
 
+    private static func preferredGlassesInput(in session: AVAudioSession) -> AVAudioSessionPortDescription? {
+        let inputs = session.availableInputs ?? []
+        return inputs.first { input in
+            input.portType == .bluetoothHFP && isLikelyGlassesName(input.portName)
+        }
+    }
+
+    private static func isLikelyGlassesName(_ name: String) -> Bool {
+        let normalized = name.lowercased()
+        return normalized.contains("meta")
+            || normalized.contains("ray-ban")
+            || normalized.contains("rayban")
+            || normalized.contains("glasses")
+            || normalized.contains("stories")
+    }
+
+    private static func recordingErrorMessage(for error: Error) -> String {
+        let nsError = error as NSError
+        if nsError.domain == NSOSStatusErrorDomain || nsError.domain == "NSOSStatusErrorDomain" {
+            if let code = AVAudioSession.ErrorCode(rawValue: nsError.code) {
+                switch code {
+                case .cannotInterruptOthers, .cannotStartRecording, .isBusy, .insufficientPriority:
+                    return "Microphone is busy — end the phone call or close other audio apps and try again."
+                case .siriIsRecording:
+                    return "Siri is using the microphone. Wait for it to finish and try again."
+                default:
+                    break
+                }
+            }
+        }
+        return error.localizedDescription
+    }
+
     private func startTimer(targetURL: URL) {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -116,7 +170,7 @@ final class VoiceEnrollmentRecorder: NSObject, ObservableObject {
         recorder.stop()
         timer?.invalidate()
         timer = nil
-        try? AVAudioSession.sharedInstance().setActive(false)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         self.recorder = nil
         self.startedAt = nil
         phase = .ready(url)
