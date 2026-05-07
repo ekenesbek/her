@@ -68,9 +68,9 @@ Start here in this order:
 - **`app/docs/browser-agent-memory-roadmap.md`**, **`app/docs/credential-broker.md`**, **`app/docs/her-sessions.md`**, **`app/docs/memory-landscape.md`**, **`app/docs/web-mcp-focus.md`** — design notes for the browser agent and memory layer.
 - **`her-ios/README.md`** and **`her-ios/ROADMAP.md`** — iOS app and backend setup, Meta DAT wiring.
 - **`her-ios/docs/meta-wearables-dat.md`**, **`her-ios/docs/privacy-and-consent.md`** — DAT and consent reference for iOS work.
-- **`docs/runtime/commit.md`** — branch, commit message, and PR description rules.
+- **`docs/runtime/commit.md`** — current commit and optional PR rules.
 - **`docs/runtime/agent_handoff.md`** — persistent end-of-task context and next-todo log.
-- **`todo/tasks.md`** — canonical task index with `IOS-N` / `WEB-N` / `BACK-N` / `BUG-N` / `DOC-N` IDs and the strict branch standard.
+- **`todo/tasks.md`** — canonical task index with `IOS-N` / `WEB-N` / `BACK-N` / `BUG-N` / `DOC-N` IDs.
 - **`todo/{ios,web,back}.md`** — active task streams.
 
 ## Core Thesis (one paragraph)
@@ -150,8 +150,8 @@ When picking up or scoping a task:
 - For UI / browser-agent work, exercise the feature in a real browser through the Chrome MCP before claiming success — type checks and unit tests do not validate end-to-end browser flows. If the browser cannot be exercised in the current environment, say so explicitly.
 - For iOS work, run the local `xcodebuild` smoke verification (see `her-ios/README.md`) and `python3 -m compileall her-ios/backend/app` before declaring done.
 - Before creating a new `todo/` entry, follow the intake rules below: search active and done streams, and extend the closest matching task when possible.
-- Every durable task must have an ID from one of the namespaces below. Branch names must follow the strict format. Do not use `claude/` or `codex/` prefixes for shipped work — those are worktree-scratch only and must be renamed before pushing.
-- Do not create a new task ID for a tiny follow-up — reuse the existing ID with a new branch slug.
+- Every durable task must have an ID from one of the namespaces below. Branch creation and branch switching are paused for agents: work in the current worktree, normally on `main`, unless the human explicitly asks for a branch.
+- Do not create a new task ID for a tiny follow-up — reuse the existing ID and current worktree.
 - After executing a task, **stop for human review**. Do not commit, push, open a PR, archive a task, or mark it done until the human explicitly approves the actual result.
 - The post-execution `Next` block must keep the human oriented: include the immediate review gate, what happens after approval, and the next task candidate from `todo/tasks.md`.
 - Use `app/docs/` and `her-ios/docs/` for design and reference; use `todo/` for execution state. Do not pick "next work" directly from a design doc — route through `todo/tasks.md`.
@@ -193,7 +193,7 @@ Status: planned | in_progress | review | approved | done | blocked
 Priority: P0 | P1 | P2 | P3
 Owner: agent | human | mixed
 Stream: ios | web | back | repo
-Branch: ios/IOS-N/short-slug | web/WEB-N/short-slug | back/BACK-N/short-slug | fix/BUG-N/short-slug | docs/DOC-N/short-slug
+Branch: main (branch rules paused; use the current worktree unless the human explicitly asks for a branch)
 Created: YYYY-MM-DD
 
 ## Goal
@@ -231,9 +231,16 @@ Immediate review gate, follow-up after approval, next task candidate.
 
 When choosing next work, prefer blocked dependencies, then production risk, milestone impact, user value, low effort.
 
-## Branch Rules
+## Branch Policy
 
-One branch per task. Strict format:
+Branch creation, switching, and renaming are temporarily disabled for agents.
+Development happens in the current worktree, normally on `main`.
+
+Do not create or switch branches during task execution unless the human
+explicitly asks. Existing task entries may still contain historical `Branch:`
+values; do not rewrite them just to match this temporary policy.
+
+If the human explicitly asks for a task branch, use the strict format:
 
 ```text
 ios/IOS-N/short-slug
@@ -253,13 +260,15 @@ fix/BUG-7/login-token-refresh
 docs/DOC-3/deployment-runbook
 ```
 
-Worktree branches like `claude/<slug>` are scratch — rename to the strict format before the first push. Do not use personal prefixes unless the human explicitly asks.
+Worktree branches like `claude/<slug>` or `codex/<slug>` are scratch. Do not
+push from a scratch branch unless the human explicitly approves renaming or
+pushing that branch.
 
 ## Implementation Flow
 
 For every non-trivial task:
 
-1. Confirm task ID and branch.
+1. Confirm task ID and current worktree/branch.
 2. Inspect relevant files.
 3. Write a short plan.
 4. Implement the smallest coherent change.
@@ -281,16 +290,16 @@ Use risk-based verification:
 
 If tests cannot run in the current environment, say so explicitly and list what was checked instead. Record verification commands in the task `Result`.
 
-## PR Flow
+## Commit And PR Flow
 
 After the human approves the implemented result:
 
 1. `git status` — confirm clean scope.
 2. Stage only files related to the task.
 3. Commit with the standard multi-line format from `docs/runtime/commit.md`.
-4. Push the task branch (rename from `claude/...` first if applicable).
-5. Open a draft PR unless the human asks for a ready PR.
-6. Include the task ID in the PR title.
+4. Push only if the human explicitly asks.
+5. Open a PR only if the human explicitly asks or if a non-`main` branch was explicitly requested.
+6. Include the task ID in the PR title when creating a PR.
 
 Commit format summary:
 
@@ -358,19 +367,19 @@ Known risks:
 
 Next after approval:
 - commit
-- push
-- open PR
+- push/PR only if requested
 - archive/update task
 ```
 
 ## Completion and Archive
 
-A task is complete only after human approval **and** the PR/merge workflow is handled.
+A task is complete only after human approval and the requested commit/push/PR
+workflow is handled.
 
 When completed:
 
 1. Get explicit human approval for the actual result.
-2. Commit and push the approved branch with the standard commit message.
+2. Commit the approved work with the standard commit message; push only if requested.
 3. Update the task `Result` with outcome, commands, metrics, links.
 4. Move completed stream details to `todo/done/<stream>/`.
 5. Link the PR, docs, and verification from the moved task.
@@ -384,7 +393,7 @@ Do not leave completed task entries active in stream files.
 
 When multiple agents are used:
 
-- One agent is the coordinator. The coordinator owns task state, branch naming, final integration, and review summary.
+- One agent is the coordinator. The coordinator owns task state, current-worktree scope, final integration, and review summary.
 - Worker agents may inspect or implement scoped parts.
 - Workers must not revert changes they did not make.
 - Workers must report changed files, verification results, and known risks.
@@ -418,7 +427,7 @@ Needs review:
 - ...
 
 Next after approval:
-- commit, push, PR, archive/update task.
+- commit, push/PR if requested, archive/update task.
 ```
 
 Keep final answers concise and factual.

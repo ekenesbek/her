@@ -1,12 +1,20 @@
-# Branch, Commit, And PR Rules
+# Commit And PR Rules
 
-This repo uses task-ID branches and conventional commit messages with task
-trailers. Add detail lines when they clarify the change; do not pad commits
-with empty description.
+This repo uses task IDs and conventional commit messages with task trailers.
+Add detail lines when they clarify the change; do not pad commits with empty
+description.
 
-## Branch Names
+## Branch Policy
 
-Use the exact task branch format from `AGENTS.md`:
+Branch creation, switching, and renaming are temporarily disabled for agents.
+Development happens in the current worktree, normally on `main`.
+
+Do not create or switch branches unless the human explicitly asks. Existing
+task entries may still contain historical `Branch:` values; do not rewrite them
+just to match this temporary policy.
+
+If the human explicitly asks for a task branch, use the exact format from
+`AGENTS.md`:
 
 ```text
 ios/IOS-N/short-slug
@@ -22,7 +30,8 @@ Rules:
   not need tracking.
 - Use lowercase kebab-case for the final slug.
 - Keep branch names task-focused, not person-focused.
-- Worktree scratch branches like `codex/...` must be renamed before push.
+- Worktree scratch branches like `claude/...` or `codex/...` must not be pushed
+  unless the human explicitly approves renaming or pushing that branch.
 
 ## Commit Messages
 
@@ -75,7 +84,10 @@ Rules:
 
 ## PR Descriptions
 
-PRs must include a real description; do not leave the body empty.
+PRs are optional while branch rules are paused. Open one only when the human
+explicitly asks or when a non-`main` branch was explicitly requested.
+
+When creating a PR, include a real description; do not leave the body empty.
 
 Use this shape:
 
