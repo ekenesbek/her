@@ -2,6 +2,67 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# IOS-11: Add Streaming Audio Processing For Faster Transcription
+
+Status: planned
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-10
+
+## Goal
+
+Reduce meeting processing latency by streaming audio chunks from the iOS app to the local backend during or immediately after capture, instead of waiting for one full `.m4a` upload before transcription starts.
+
+## Context
+
+The current Stage 1 recorder path captures a meeting on-device, stops recording, uploads the completed audio file, then the backend transcribes it with `faster-whisper` and summarizes the final transcript. This is simple but slow for longer meetings because no backend work begins until recording ends and upload completes.
+
+`her-ios/ROADMAP.md` already calls out an eventual `/v1/transcribe/stream` path with `AVAudioEngine` -> WebSocket -> backend streaming. This task promotes the Stage 1 portion into the active todo stream: speed up local transcription while preserving the current file-upload flow as a fallback.
+
+## Scope
+
+In scope:
+- Add a local backend streaming transcription endpoint, likely WebSocket-based, for chunked audio ingestion.
+- Add an iOS streaming sender path using `AVAudioEngine` or another route-compatible capture pipeline.
+- Start backend decoding/transcription work before the full recording is complete.
+- Preserve the existing `.m4a` upload endpoint as a fallback and compatibility path.
+- Store the final transcript, summary, audio metadata, and errors in the existing meeting storage model.
+- Measure and log latency improvements such as time-to-first-transcript and total processing time.
+
+Out of scope:
+- Cloud-only transcription or hosted streaming infrastructure.
+- Scheduled/background autonomous runs or vault-driven credentials.
+- Real-time wearable voice-agent playback through glasses.
+- Requiring a paid external streaming provider before the local path is evaluated.
+- Removing the existing file upload path before the streaming path is stable.
+
+## Implementation Plan
+
+- [ ] Inspect the current iOS recorder, upload client, backend transcription endpoint, and meeting storage flow.
+- [ ] Choose the local streaming strategy: true incremental Whisper streaming, chunked local transcription with overlap, or a staged adapter that can later swap in `whisper-streaming`.
+- [ ] Add the backend streaming endpoint and chunk/session lifecycle handling.
+- [ ] Add the iOS capture/sender implementation with fallback to full-file upload.
+- [ ] Wire partial/final transcript state into the existing meeting result flow.
+- [ ] Add latency logging and focused backend/iOS smoke checks.
+- [ ] Validate on simulator where possible and on a physical iPhone for real audio-route behavior.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- Backend smoke: stream a fixture or short generated audio sample through the new endpoint and verify final transcript/session persistence.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Manual device smoke: record a short meeting, confirm transcription starts before recording/upload completion, and verify fallback upload still works.
+
+## Result
+
+Not started.
+
+## Next
+
+Needs human review of the task scope. After approval: implement the smallest coherent local streaming path in the current worktree, then stop again for result review before commit/push/PR/archive.
+
 # BUG-2: Clean AI Summaries And Add Audio Scrubber
 
 Status: blocked
