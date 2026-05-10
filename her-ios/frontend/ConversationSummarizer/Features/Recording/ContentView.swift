@@ -4096,45 +4096,103 @@ private struct ConversationContentsPanel: View {
 private struct ConversationAudioRow: View {
     let meeting: StoredMeeting
     @ObservedObject var playback: MeetingAudioPlaybackController
+    @State private var scrubberValue: Double = 0
+    @State private var isScrubbing = false
+    @State private var wasPlayingBeforeScrub = false
 
     var body: some View {
         VStack(spacing: 0) {
             DividerLine()
-            HStack(spacing: 18) {
-                Button(action: { playback.toggleFullPlayback(for: meeting) }) {
-                    ZStack {
-                        if playback.isLoading {
-                            ProgressView()
-                                .tint(AppTheme.fg)
-                        } else {
-                            Image(systemName: playbackIcon)
+            VStack(spacing: 12) {
+                HStack(spacing: 18) {
+                    Button(action: { playback.toggleFullPlayback(for: meeting) }) {
+                        ZStack {
+                            if playback.isLoading {
+                                ProgressView()
+                                    .tint(AppTheme.fg)
+                            } else {
+                                Image(systemName: playbackIcon)
+                            }
                         }
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(canPlay ? AppTheme.fg : AppTheme.dim)
+                            .frame(width: 48, height: 48)
+                            .background(Circle().fill(AppTheme.bgSoft))
                     }
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(canPlay ? AppTheme.fg : AppTheme.dim)
-                        .frame(width: 48, height: 48)
-                        .background(Circle().fill(AppTheme.bgSoft))
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(!canPlay || playback.isLoading)
+
+                    Text(MeetingTimeFormatter.audioDuration(playbackDuration))
+                        .font(.system(size: 21, weight: .regular, design: .monospaced))
+                        .foregroundColor(AppTheme.fg)
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: "waveform")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(AppTheme.dim)
                 }
-                .buttonStyle(PlainButtonStyle())
-                .disabled(!canPlay || playback.isLoading)
 
-                Text(MeetingTimeFormatter.audioDuration(meeting.durationSeconds))
-                    .font(.system(size: 21, weight: .regular, design: .monospaced))
-                    .foregroundColor(AppTheme.fg)
+                VStack(spacing: 4) {
+                    Slider(
+                        value: Binding(
+                            get: { isScrubbing ? scrubberValue : playback.currentTime },
+                            set: { value in
+                                scrubberValue = value
+                                playback.previewSeek(to: value)
+                            }
+                        ),
+                        in: 0...sliderUpperBound,
+                        onEditingChanged: { editing in
+                            if editing {
+                                isScrubbing = true
+                                wasPlayingBeforeScrub = playback.isPlaying
+                            } else {
+                                let target = scrubberValue
+                                isScrubbing = false
+                                playback.seek(
+                                    to: target,
+                                    meeting: meeting,
+                                    resumePlayback: wasPlayingBeforeScrub
+                                )
+                            }
+                        }
+                    )
+                    .tint(AppTheme.fg)
+                    .disabled(!canPlay || playback.isLoading)
 
-                Spacer(minLength: 0)
-
-                Image(systemName: "waveform")
-                    .font(.system(size: 18, weight: .medium))
+                    HStack {
+                        Text(MeetingTimeFormatter.timestamp(isScrubbing ? scrubberValue : playback.currentTime))
+                        Spacer()
+                        Text(MeetingTimeFormatter.timestamp(playbackDuration))
+                    }
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
                     .foregroundColor(AppTheme.dim)
+                }
             }
             .padding(.vertical, 18)
             DividerLine()
+        }
+        .onAppear {
+            scrubberValue = playback.currentTime
+        }
+        .onChange(of: playback.currentTime) { newValue in
+            if !isScrubbing {
+                scrubberValue = newValue
+            }
         }
     }
 
     private var canPlay: Bool {
         playback.canPlay(meeting)
+    }
+
+    private var playbackDuration: Double {
+        playback.durationSeconds(for: meeting)
+    }
+
+    private var sliderUpperBound: Double {
+        max(1, playbackDuration)
     }
 
     private var playbackIcon: String {
@@ -4223,6 +4281,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
     @Published private(set) var isLoading = false
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTime: Double = 0
+    @Published private(set) var duration: Double = 0
     @Published private(set) var errorMessage: String?
 
     private var player: AVAudioPlayer?
@@ -4237,6 +4296,17 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
 
     func canPlay(_ meeting: StoredMeeting) -> Bool {
         MeetingAudioFileStore.load(meetingId: meeting.id) != nil || (meeting.hasAudio && downloader != nil)
+    }
+
+    func durationSeconds(for meeting: StoredMeeting) -> Double {
+        if duration.isFinite, duration > 0 {
+            return duration
+        }
+        return max(0, meeting.durationSeconds ?? 0)
+    }
+
+    func previewSeek(to seconds: Double) {
+        currentTime = clampedTime(seconds)
     }
 
     func toggleFullPlayback(for meeting: StoredMeeting) {
@@ -4279,6 +4349,28 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         }
     }
 
+    func seek(to seconds: Double, meeting: StoredMeeting, resumePlayback: Bool) {
+        Task { @MainActor in
+            guard canPlay(meeting) else {
+                return
+            }
+            do {
+                let player = try await preparePlayer(for: meeting)
+                player.currentTime = clampedTime(seconds)
+                currentTime = player.currentTime
+                if resumePlayback {
+                    player.play()
+                    isPlaying = true
+                    startTimer()
+                } else {
+                    isPlaying = player.isPlaying
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     func stop() {
         timer?.invalidate()
         timer = nil
@@ -4287,6 +4379,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         loadedMeetingID = nil
         stopAt = nil
         currentTime = 0
+        duration = 0
         isPlaying = false
     }
 
@@ -4313,6 +4406,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         newPlayer.prepareToPlay()
         player = newPlayer
         loadedMeetingID = meeting.id
+        duration = newPlayer.duration
         currentTime = newPlayer.currentTime
         return newPlayer
     }
@@ -4350,6 +4444,11 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         } else {
             isPlaying = player.isPlaying
         }
+    }
+
+    private func clampedTime(_ seconds: Double) -> Double {
+        let upperBound = duration > 0 ? duration : .greatestFiniteMagnitude
+        return min(max(0, seconds), upperBound)
     }
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {

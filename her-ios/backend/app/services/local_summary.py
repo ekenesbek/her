@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from app.schemas import SummaryResponse, TranscriptSegment
-from app.services.meeting_contents import build_outline_from_segments
+from app.services.meeting_contents import RAW_SPEAKER_LABEL_RE, build_outline_from_segments
 
 
 ACTION_KEYWORDS = [
@@ -88,13 +88,16 @@ def extract(sentences: list[str], keywords: list[str]) -> list[str]:
 
 
 def make_title(transcript: str) -> str:
-    words = transcript.split()
+    cleaned = RAW_SPEAKER_LABEL_RE.sub("", transcript)
+    cleaned = cleaned.replace(":", " ")
+    words = cleaned.split()
     return " ".join(words[:6]) if words else "Meeting summary"
 
 
 def make_key_topics(transcript: str, sentences: list[str]) -> list[str]:
     counts: dict[str, int] = {}
-    for raw_word in transcript.lower().replace("\n", " ").split():
+    cleaned_transcript = RAW_SPEAKER_LABEL_RE.sub("", transcript.lower())
+    for raw_word in cleaned_transcript.replace("\n", " ").split():
         word = "".join(char for char in raw_word if char.isalnum())
         if len(word) <= 3:
             continue

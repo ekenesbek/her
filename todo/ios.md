@@ -2,6 +2,67 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# BUG-2: Clean AI Summaries And Add Audio Scrubber
+
+Status: blocked
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-10
+
+## Goal
+
+Stop AI summaries from treating machine speaker labels as real meeting topics, improve default multi-speaker diarization on the deployed backend, and add a draggable audio track in the contents view.
+
+## Context
+
+A real 3-speaker recording produced mostly `Speaker 1` rows and an AI title/key topic like `Interview with SPEAKER_00`. The raw diarization labels are implementation details, not semantic content, and the contents audio row currently only has a play button plus duration instead of a scrubber.
+
+## Scope
+
+In scope:
+- Remove raw `SPEAKER_00` / `Speaker 1` labels from summary prompt inputs and sanitize LLM summary output.
+- Make summary titles fall back to transcript content when the AI returns a speaker-label-based title.
+- Tune deployed diarization speaker-count settings for multi-person meetings.
+- Add a draggable audio scrubber/progress track in the iOS contents audio row.
+
+Out of scope:
+- Reprocessing old meetings automatically.
+- Guaranteed exact speaker count for every recording without a user-provided expected speaker count.
+
+## Implementation Plan
+
+- [x] Patch backend summary formatting/prompt/output normalization.
+- [x] Patch local fallback titles to ignore speaker labels.
+- [x] Add iOS scrubber seek UI and playback controller seek support.
+- [x] Verify backend/iOS builds and deploy backend.
+- [ ] Install iOS app after the physical iPhone is available to CoreDevice.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend python3 - <<'PY' ...` summary sanitizer smoke: `SPEAKER_00` is hidden from summary input and `Interview with SPEAKER_00` falls back to transcript content.
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Deployed backend to `51.195.200.207`; previous backend files backed up at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-155126-bug2-summary-scrubber.tgz`.
+- Remote backend compile, `systemctl restart meta-ios-backend.service`, `GET /health`, and remote summary sanitizer smoke.
+
+Blocked:
+- Signed device build/install did not run because `xcrun devicectl list devices` reports `iPhone (Yerasyl)` as `unavailable`, and `devicectl device install app` cannot locate the device.
+
+## Result
+
+Backend summary input no longer exposes raw `SPEAKER_00` labels to the LLM; raw diarization labels are normalized to participant labels before summary generation. The summary prompt now explicitly forbids using machine speaker labels as titles, topics, overview content, or outline titles. The parser also sanitizes LLM output and replaces speaker-label-based titles like `Interview with SPEAKER_00` with transcript-derived content. Local fallback titles/key topics also ignore raw speaker labels.
+
+The deployed server now has `DIARIZATION_MIN_SPEAKERS=2` and `DIARIZATION_MAX_SPEAKERS=6` in `/etc/meta-ios-backend.env` to reduce one-speaker collapse on multi-person meetings. This is a server default for new recordings, not a reprocessing of old meetings.
+
+iOS contents audio row now has a draggable scrubber/progress track. Dragging the track seeks the audio; playback still supports full audio, chunk playback, highlighted active transcript chunks, and backend download when local audio is missing.
+
+## Next
+
+Blocked on the iPhone becoming available to CoreDevice. Unlock/reconnect the device and trust the computer if prompted; then rerun signed device build, install, and launch. After that: record a new 3-speaker meeting and verify summary title/content, speaker separation, and scrubber behavior.
+
 # IOS-10: Persist Meeting Audio And Improve Transcript Playback
 
 Status: review

@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -15,8 +16,10 @@ from app.schemas import (
     TranscriptSegment,
 )
 from app.services.meeting_contents import (
+    RAW_SPEAKER_LABEL_RE,
     build_outline_from_segments,
     format_transcript_for_summary,
+    make_outline_title,
 )
 from app.settings import Settings
 
@@ -48,7 +51,11 @@ class SummaryService:
                         '"actionItems": string[], "followUps": string[], '
                         '"outline": [{"start": number, "title": string}]}. '
                         "The outline should be a compact chronological table of contents. "
-                        "Use the timestamps supplied in the transcript input. Do not translate text."
+                        "Use the timestamps supplied in the transcript input. Do not translate text. "
+                        "Speaker labels such as SPEAKER_00, Speaker 1, and Participant 1 are machine labels, "
+                        "not real names or topics. Never use those labels in the title, key topics, "
+                        "overview, or outline titles unless the transcript explicitly gives a real person name. "
+                        "The title must describe what was discussed, not who the diarization label was."
                     ),
                 },
                 {
@@ -59,7 +66,8 @@ class SummaryService:
         )
 
         content = response.choices[0].message.content
-        payload = parse_summary_payload(content or "")
+        formatted_transcript = format_transcript_for_summary(transcript, segments)
+        payload = parse_summary_payload(content or "", formatted_transcript)
         outline = payload["outline"] or build_outline_from_segments(transcript, segments)
         return SummaryResponse(
             title=payload["title"],
@@ -156,7 +164,7 @@ def normalize_openai_base_url(raw_url: str) -> str:
     return urlunparse(parsed._replace(path=path or ""))
 
 
-def parse_summary_payload(content: str) -> dict[str, Any]:
+def parse_summary_payload(content: str, transcript: str = "") -> dict[str, Any]:
     trimmed = content.strip()
     if trimmed.startswith("```"):
         lines = trimmed.splitlines()
@@ -182,14 +190,26 @@ def parse_summary_payload(content: str) -> dict[str, Any]:
     }.items():
         value = payload.get(key, fallback)
         if key in {"title", "overview"}:
-            normalized[key] = str(value).strip() or fallback
+            raw_text = str(value).strip()
+            cleaned_text = clean_summary_text(raw_text)
+            if key == "title" and (
+                not cleaned_text
+                or title_uses_machine_label(raw_text)
+                or title_uses_machine_label(cleaned_text)
+            ):
+                cleaned_text = fallback_title_from_transcript(transcript)
+            normalized[key] = cleaned_text or fallback
         elif key == "outline" and isinstance(value, list):
             normalized[key] = normalize_outline(value)
         elif isinstance(value, list):
-            normalized[key] = [str(item).strip() for item in value if str(item).strip()]
+            normalized[key] = clean_summary_list(value)
         else:
             normalized[key] = []
 
+    if title_uses_machine_label(normalized["title"]):
+        normalized["title"] = fallback_title_from_transcript(transcript)
+    if not normalized["keyTopics"]:
+        normalized["keyTopics"] = [normalized["title"]]
     return normalized
 
 
@@ -203,10 +223,42 @@ def normalize_outline(value: list[Any]) -> list[MeetingOutlineItem]:
             start = float(raw_start)
         except (TypeError, ValueError):
             start = 0.0
-        title = str(item.get("title", item.get("text", ""))).strip()
+        title = clean_summary_text(str(item.get("title", item.get("text", ""))).strip())
         if title:
             items.append(MeetingOutlineItem(start=max(0.0, start), title=title))
     return items
+
+
+def clean_summary_list(value: list[Any]) -> list[str]:
+    items: list[str] = []
+    for item in value:
+        text = clean_summary_text(str(item).strip())
+        if not text or title_uses_machine_label(text):
+            continue
+        items.append(text)
+    return items
+
+
+def clean_summary_text(text: str) -> str:
+    cleaned = RAW_SPEAKER_LABEL_RE.sub("", text)
+    cleaned = re.sub(r"\b(?:Interview|Conversation|Meeting)\s+with\s*$", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    return cleaned.strip(" \t\r\n-:;,")
+
+
+def title_uses_machine_label(text: str) -> bool:
+    if RAW_SPEAKER_LABEL_RE.search(text):
+        return True
+    lowered = text.lower().strip()
+    return lowered in {"interview", "conversation", "meeting", "interview with"}
+
+
+def fallback_title_from_transcript(transcript: str) -> str:
+    title = make_outline_title(transcript)
+    if title and not title_uses_machine_label(title):
+        return title
+    return "Meeting summary"
 
 
 def format_meeting_chat_context(meeting: MeetingResponse) -> str:

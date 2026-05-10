@@ -6,6 +6,10 @@ from app.schemas import MeetingOutlineItem, TranscriptSegment
 
 
 SENTENCE_ENDINGS = (".", "!", "?", "。", "！", "？")
+RAW_SPEAKER_LABEL_RE = re.compile(
+    r"\b(?:SPEAKER[_\s-]*\d+|Speaker\s+\d+|Participant\s+\d+)\b",
+    flags=re.I,
+)
 
 
 def format_time(seconds: float) -> str:
@@ -27,10 +31,22 @@ def format_transcript_for_summary(
         return transcript
 
     lines = []
+    speaker_labels: dict[str, str] = {}
     for segment in usable_segments:
-        speaker = segment.speaker or "Speaker"
+        speaker = summary_speaker_label(segment.speaker, speaker_labels)
         lines.append(f"[{format_time(segment.start)}] {speaker}: {segment.text.strip()}")
     return "\n".join(lines)
+
+
+def summary_speaker_label(raw_speaker: str | None, labels: dict[str, str]) -> str:
+    clean = (raw_speaker or "").strip()
+    if not clean:
+        return "Participant"
+    if not RAW_SPEAKER_LABEL_RE.search(clean):
+        return clean
+    if clean not in labels:
+        labels[clean] = f"Participant {len(labels) + 1}"
+    return labels[clean]
 
 
 def build_outline_from_segments(
@@ -99,7 +115,10 @@ def merge_smallest_neighbor_groups(
 
 def make_outline_title(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", text).strip()
-    cleaned = re.sub(r"^(SPEAKER[_\s-]*\d+|Speaker\s*\d+|Speaker):\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"^\[\d+:\d+(?::\d+)?\]\s*:?\s*", "", cleaned)
+    cleaned = re.sub(r"^(SPEAKER[_\s-]*\d+|Speaker\s*\d+|Participant\s*\d+|Speaker):\s*", "", cleaned, flags=re.I)
+    cleaned = RAW_SPEAKER_LABEL_RE.sub("", cleaned)
+    cleaned = cleaned.strip(" :;,")
     if not cleaned:
         return ""
 
