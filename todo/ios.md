@@ -2,6 +2,300 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# IOS-10: Persist Meeting Audio And Improve Transcript Playback
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-10
+
+## Goal
+
+Keep uploaded meeting audio on the backend per authenticated user, improve speaker diarization/relabeling quality, and let the iOS contents transcript play grouped timestamp chunks while following the active text.
+
+## Context
+
+The current job worker deletes uploaded audio after transcription, so another device cannot download the original recording and contents playback only works on the recording iPhone. WhisperX diarization currently runs inside each transcription chunk, which can collapse or destabilize speaker labels across the full meeting. The iOS transcript also renders every raw sentence-level segment instead of reviewer-friendly speaker chunks.
+
+## Scope
+
+In scope:
+- Persist original job/process audio under backend `DATA_DIR` and link it to the owning user/meeting.
+- Add an authenticated meeting audio download endpoint.
+- Improve WhisperX diarization by using full-file speaker context and profile matching against transcript speaker labels.
+- Group transcript rows into 3-5 sentence speaker-prioritized chunks.
+- Add chunk playback from the contents transcript, with remote audio download when local audio is missing.
+
+Out of scope:
+- Cloud sync beyond the current backend server.
+- Reprocessing old meetings to recover audio already deleted by earlier backend versions.
+- Perfect diarization for every acoustic environment; this still depends on pyannote/WhisperX model quality and voice enrollment quality.
+
+## Implementation Plan
+
+- [x] Add backend audio columns, storage helpers, and audio download route.
+- [x] Preserve uploaded audio when meeting jobs/process endpoint complete.
+- [x] Adjust diarization/profile matching for full-meeting speaker consistency.
+- [x] Add iOS audio download/playback controller and grouped transcript chunks.
+- [x] Run backend/iOS verification and update docs.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-ios10-audio-storage python3 - <<'PY' ...` storage smoke verified `hasAudio`, attached audio path lookup, and summary/save updates preserving attached audio.
+- `python3 -m compileall her-ios/backend/app/services/voice_profiles.py`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `git diff --check`
+- Secret scan over tracked project paths found no pasted API key.
+- Deployed backend to `51.195.200.207`; previous backend files backed up at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-085321-ios10-audio.tgz`.
+- Remote backend compile in `/opt/meta-ios/backend/.venv`, `systemctl restart meta-ios-backend.service`, `GET /health`, and route import smoke for `/v1/meetings/{meeting_id}/audio`.
+- Signed iOS device build succeeded.
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+
+Not run:
+- Real multi-speaker recording review after deployment.
+- Cross-device audio download playback, because only one physical iPhone is connected here.
+
+## Result
+
+Backend meetings now keep original uploaded audio for completed `/v1/meetings/jobs` and `/v1/meetings/process` flows instead of deleting it. Completed audio is moved to `DATA_DIR/meeting-audio/{user_id}/{meeting_id}.*`, linked to the authenticated meeting row, exposed as `hasAudio=true`, and downloadable by the owning user at `GET /v1/meetings/{id}/audio`.
+
+WhisperX no longer runs external chunk-level diarization when diarization is enabled; it transcribes the full file so pyannote/WhisperX has full-meeting speaker context. Added optional `DIARIZATION_MIN_SPEAKERS` and `DIARIZATION_MAX_SPEAKERS` knobs. Voice profile matching now first extracts embeddings from the actual transcript speaker time ranges, so enrolled-user matching aligns with the same speaker labels shown in the transcript. The pyannote fallback pipeline token argument was also fixed for the installed server version.
+
+iOS contents now groups transcript display rows into speaker-prioritized chunks instead of rendering every raw sentence. A speaker change always starts a new chunk; same-speaker text is grouped up to roughly 3-5 sentences or a time/pause boundary. Tapping a chunk plays only that time range. While audio is playing, the active chunk is highlighted and the scroll view follows it. If the local recording file is missing but the backend has audio, iOS downloads the meeting audio through the authenticated backend endpoint, saves it locally, and then plays it.
+
+Docs/env guidance now mention persisted meeting audio and diarization speaker-count knobs. Backend code is deployed to `51.195.200.207`, and the updated iOS app is installed/launched on `iPhone (Yerasyl)`.
+
+Known limitations: older meetings whose audio was deleted by previous backend versions cannot be recovered unless re-uploaded/reprocessed. Diarization quality still depends on WhisperX/pyannote and recording acoustics; if the model collapses multiple similar voices, set `DIARIZATION_MIN_SPEAKERS=2` or a known speaker count on the server and retest.
+
+## Next
+
+Result is ready for human review. Review gate: record a new multi-speaker meeting, open contents, verify speaker chunks, tap a chunk to play only that range, and confirm the active text follows playback. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue review of the IOS-7/8/9 meeting-processing stack after this real recording test.
+
+# IOS-9: Wire Alem OSS Summaries And Meeting Chat
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-10
+
+## Goal
+
+Use the platform-managed Alem OSS LLM for meeting summaries and conversation chat instead of local heuristic summary and mocked chat.
+
+## Context
+
+OpenClaw configures Alem OSS as a platform-managed provider using `ALEM_OSS_API_KEY`, base URL `https://llm.alem.ai/v1`, and model `gpt-oss`. The Her backend currently only checks `OPENAI_API_KEY`, so `/health` reports `openaiConfigured=false` and summaries fall back to the local first-sentences heuristic. iOS meeting chat is currently a local keyword mock in `ConversationChatPanel`.
+
+## Scope
+
+In scope:
+- Add Alem OSS env support to the backend without committing secrets.
+- Make health/config reflect either OpenAI-compatible or Alem OSS key availability.
+- Add a backend meeting chat endpoint powered by the same OpenAI-compatible client.
+- Wire the iOS chat tab to the backend endpoint with a local fallback only for failures.
+- Stream chat answers into the active assistant bubble and keep the chat input readable in iOS dark mode.
+- Persist meeting chat messages per meeting and include prior turns in the next chat context.
+- Use a location-based meeting title when AI summary is unavailable, then retitle from AI summary when it succeeds.
+- Deploy backend env/code and install the updated iOS build.
+
+Out of scope:
+- Storing API keys in source control or task docs.
+- Cross-meeting/global memory chat.
+
+## Implementation Plan
+
+- [x] Add `ALEM_OSS_API_KEY`/base URL settings and fallback client selection.
+- [x] Add meeting chat request/response schemas and backend endpoint.
+- [x] Replace mocked iOS chat send path with backend chat calls.
+- [x] Verify locally, deploy backend, install iOS build.
+- [x] Add streaming meeting chat responses and force readable chat input text in dark mode.
+- [x] Persist chat messages and hydrate them in the iOS chat tab.
+- [x] Add location fallback titles and summary retitle behavior.
+
+## Verification
+
+- Inspected OpenClaw Alem OSS config under `/Users/ekenesbek/VSCodeProjects/openclaw/private`: provider uses `ALEM_OSS_API_KEY`, base URL `https://llm.alem.ai/v1`, and model `gpt-oss`.
+- `python3 -m compileall her-ios/backend/app`
+- Local settings smoke with `ALEM_OSS_API_KEY` confirmed `llm_configured=true`, Alem base URL selection, and chat fallback behavior.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Signed device build for `iPhone (Yerasyl)` succeeded.
+- Deployed backend code to `51.195.200.207`; previous backend files backed up at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-075158.tgz`.
+- Runtime env on `51.195.200.207` now uses Alem OSS without storing secrets in tracked files; `GET /health` returns `summaryModel=gpt-oss` and `openaiConfigured=true`.
+- Remote Alem summary smoke returned a summary with decisions, action items, and outline items.
+- Remote Alem meeting chat smoke answered from the meeting context.
+- Deployed streaming chat backend update to `51.195.200.207`; backup created at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-081406-stream-chat.tgz`.
+- Remote isolated FastAPI stream smoke against Alem OSS returned status 200, 13 delta chunks, `done=true`, and no error event.
+- Chat input `TextField` now uses explicit black foreground/tint/prompt colors so iOS dark mode does not turn typed text white.
+- Updated signed iOS build installed and launched on `iPhone (Yerasyl)`.
+- Deployed chat persistence/offline-title backend update to `51.195.200.207`; backup created at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-083623-chat-persist.tgz`.
+- Remote isolated FastAPI smoke on a temporary SQLite database verified: repeated location titles become `Кошек батыр 14` then `Кошек батыр 14 1`; `GET /chat` returns persisted user/assistant messages; the second chat response receives previous turns in context; `POST /summary` retitles the meeting to the AI summary title without deleting chat history.
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+- `git diff --check`
+- Secret scan over tracked project paths found no pasted API key.
+
+## Result
+
+Backend settings now support platform-managed Alem OSS through `ALEM_OSS_API_KEY` and `ALEM_OSS_BASE_URL`, while keeping the existing OpenAI-compatible path. Summary generation uses the configured LLM when available, so it no longer falls back to the first transcript lines. If AI summary is unavailable, the backend still saves the transcript/meeting with `summaryStatus=unavailable` and a location-based title. Added authenticated `GET /v1/meetings/{meeting_id}/chat`, `POST /v1/meetings/{meeting_id}/chat`, streaming `POST /v1/meetings/{meeting_id}/chat/stream`, and `POST /v1/meetings/{meeting_id}/summary`. Chat messages are persisted in SQLite per meeting, prior turns are included in the next LLM call, and regenerating a summary retitles the saved meeting without deleting chat history. iOS hydrates saved chat messages, streams new deltas into the active assistant bubble, exposes summary generation for unsummarized saved meetings, and keeps chat input text readable in dark mode. Backend code and runtime env are deployed to `51.195.200.207`, and the updated iOS build was installed and launched on the connected iPhone.
+
+## Next
+
+Ready for human review: open a meeting, ask two chat questions, leave and reopen it, and confirm the thread is still there and the second answer can refer to the first. Also verify a meeting saved without AI summary gets a location-based title and that pressing Generate summary later retitles it from the AI summary. After approval: commit, push/PR only if requested, then archive/update the task. Next task candidate from `todo/tasks.md`: review/approve the current `IOS-7` and `IOS-8` meeting-processing changes.
+
+# IOS-8: Add Meeting Contents Outline And Speaker Transcript
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-10
+
+## Goal
+
+Replace the flat transcript card in conversation detail with a contents-style review surface: audio duration row, logical outline with timestamps, and timestamped transcript segments grouped by speaker labels that can be renamed.
+
+## Context
+
+The current detail screen shows `summary`, `transcript`, and `chat` tabs. The transcript tab renders one plain text blob, so it does not expose timestamps, segment boundaries, speaker chunks, or editable speaker labels. The backend already receives transcript segments from Whisper/WhisperX but saved meetings do not persist those structured segments.
+
+## Scope
+
+In scope:
+- Persist transcript segments and generated outline entries with saved meetings.
+- Generate a heuristic logical outline from timestamped transcript segments, with AI-compatible summary shape ready for richer outlines.
+- Decode structured meeting contents in iOS.
+- Replace the detail transcript tab with a `contents` tab containing audio duration, outline, and segment transcript.
+- Let the user tap `Speaker N` labels and rename them locally in the detail view.
+
+Out of scope:
+- Cloud sync for renamed speaker labels.
+- Guaranteed audio playback from older meetings, because existing backend processing deletes uploaded audio after transcription.
+- Reprocessing old meetings to recover missing timestamps.
+
+## Implementation Plan
+
+- [x] Add backend schemas/storage fields for outline and transcript segments.
+- [x] Generate outline entries during meeting processing and save them with jobs.
+- [x] Decode outline/segments in iOS models and processing responses.
+- [x] Build the contents UI with timestamped outline and speaker transcript rows.
+- [x] Run backend and iOS build verification.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-ios8-data DIARIZATION_ENABLED=false python3 - <<'PY' ...` storage smoke for saving/loading `segments` and `outline`, including legacy JSON-blob migration.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Remote deploy verification on `51.195.200.207`: backend compile in `/opt/meta-ios/backend/.venv`, storage/import smoke for `segments` and `outline`, `systemctl restart meta-ios-backend.service`, `GET /health`.
+- iPhone deploy: `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
+
+Not run:
+- Real recording content review with a new mixed-language meeting.
+- Audio playback from saved meetings; existing backend processing still deletes uploaded audio after transcription.
+
+## Result
+
+Added structured meeting contents. Backend `TranscriptSegment` data is now persisted on saved meetings as `segments_json`, and meetings include an `outline_json` chronological table of contents. Existing SQLite databases migrate in place by adding the two JSON columns with empty-array defaults. Job-based processing and `/v1/meetings/process` now save both transcript segments and outline entries on the completed meeting response.
+
+Added outline generation. The local fallback groups timestamped transcript segments using pause/duration boundaries and produces timestamped outline items. The OpenAI-compatible summary prompt now also requests a chronological `outline` array when an API key is configured, while still preserving the original transcript language.
+
+Updated iOS meeting models and detail UI. `StoredMeeting` now decodes `segments`, and `MeetingSummary` decodes `outline`. The detail tabs are now `contents`, `summary`, and `chat`. The `contents` view shows an audio duration row, an `Outline` list with timestamp links, and a `Transcript` list with per-segment timestamps and speaker labels. Tapping a speaker label opens a rename dialog and stores renamed labels locally per meeting in `UserDefaults`. For newly recorded meetings on the same iPhone, the app also links the returned meeting id to the local recording file and the audio row can play/pause that local audio.
+
+Deployed backend update to `51.195.200.207` on 2026-05-10. Backups of the previous backend files were created at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-072636.tgz` and `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-073012.tgz`. The updated Debug iOS app was built, installed, and launched on `iPhone (Yerasyl)`.
+
+Known limitations: older meetings do not have saved segments/outline unless they are reprocessed, so the UI falls back to a single transcript block. Speaker renames are local to this device and are not synced to backend yet. Audio playback is local-only for meetings recorded on the same iPhone; backend-hosted playback for older/cross-device meetings still requires keeping uploaded audio or adding a playback endpoint.
+
+## Next
+
+Result is ready for human review. Review gate: record a new meeting, open its `contents` tab, verify outline timestamps, segment transcript, and speaker rename behavior. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: decide whether audio playback should persist original recordings as a follow-up, or continue `IOS-3` setup state backend work.
+
+# IOS-7: Add Background Meeting Processing Jobs
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-08
+
+## Goal
+
+Move post-recording meeting processing to a backend-owned job so transcription and AI summary can finish after the iOS app leaves the recording screen or is closed after upload.
+
+## Context
+
+Meeting transcription currently happens through the synchronous `/v1/transcriptions` endpoint. The iOS view model waits for that request to finish, then the user must tap a separate summary button. The backend already has OpenAI-compatible summary support and Alem env guidance, but the running backend reports `openaiConfigured=false`, so AI summaries are not active until the runtime `.env` is configured.
+
+## Scope
+
+In scope:
+- Add backend job state for uploaded meeting audio.
+- Process meeting jobs in a backend worker thread pool and persist completed meetings to SQLite.
+- Split long audio into chunks and transcribe chunks in parallel when enabled by runtime settings.
+- Expose job submit/status endpoints for iOS.
+- Update iOS recording flow to submit audio once, poll job status, and show transcript/summary when complete.
+- Keep Alem/OpenAI-compatible summary configured through `.env`, not committed credentials.
+
+Out of scope:
+- Storing plaintext API keys in source control or task docs.
+- Guaranteed upload completion if the app is force-killed before the recording file reaches the backend.
+- Cloud deployment or stage 2 scheduled/background autonomous runs.
+
+## Implementation Plan
+
+- [x] Add backend schemas and SQLite job table.
+- [x] Add job submission/status endpoints and worker execution.
+- [x] Add chunk-level parallel transcription for long recordings.
+- [x] Wire iOS meeting processing service to submit/poll jobs.
+- [x] Update docs/env guidance and result notes.
+- [x] Run backend compile and iOS build verification.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-ios7-data DIARIZATION_ENABLED=false python3 - <<'PY' ...` storage smoke for meeting job create/get/list/update/completed meeting hydration.
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-chunks-smoke DIARIZATION_ENABLED=false TRANSCRIPTION_CHUNK_SECONDS=3 TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=1 TRANSCRIPTION_CHUNK_MIN_DURATION_SECONDS=4 python3 - <<'PY' ...` ffmpeg/ffprobe audio chunk split smoke.
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-chunks-merge DIARIZATION_ENABLED=false TRANSCRIPTION_CHUNK_SECONDS=3 TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=1 TRANSCRIPTION_CHUNK_MIN_DURATION_SECONDS=4 TRANSCRIPTION_CHUNK_WORKERS=2 python3 - <<'PY' ...` chunk merge smoke with a fake transcriber.
+- `PYTHONPATH=her-ios/backend WHISPER_LANGUAGE= python3 - <<'PY' ...` settings smoke proving empty `WHISPER_LANGUAGE` normalizes to auto-detect.
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-multilingual-chunks DIARIZATION_ENABLED=false TRANSCRIPTION_CHUNK_SECONDS=30 TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=3 TRANSCRIPTION_CHUNK_MIN_DURATION_SECONDS=30 python3 - <<'PY' ...` multilingual chunk split smoke.
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-multilingual-merge DIARIZATION_ENABLED=false TRANSCRIPTION_CHUNK_SECONDS=30 TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=3 TRANSCRIPTION_CHUNK_MIN_DURATION_SECONDS=30 TRANSCRIPTION_CHUNK_WORKERS=2 python3 - <<'PY' ...` multilingual chunk merge smoke with a fake transcriber.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Secret scan across tracked project/docs files.
+- Remote deploy verification on `51.195.200.207`: backend compile in `/opt/meta-ios/backend/.venv`, app import/routes smoke, `systemctl restart meta-ios-backend.service`, `GET /health`, OpenAPI route check for `/v1/meetings/jobs`.
+- Remote multilingual deploy verification on `51.195.200.207`: settings smoke for `WHISPER_LANGUAGE=None`, 30-second chunk runtime config, ffmpeg/ffprobe chunk split smoke, `systemctl restart meta-ios-backend.service`, `GET /health`, protected job route returns `401`.
+- iPhone deploy: `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
+
+Not run:
+- Full `app.main` import/route smoke in the ambient `python3`; it failed before app import because `jwt`/`pyjwt` is not installed in that interpreter.
+- Real audio transcription and on-device upload/polling smoke.
+- Real mixed English/Russian/Kazakh recording was not exercised; the deployed change was verified through settings, chunking, and merge smoke checks.
+
+## Result
+
+Added backend-owned meeting processing jobs. `POST /v1/meetings/jobs` persists uploaded audio under `DATA_DIR`, stores a queued job in SQLite, and submits processing to a backend `ThreadPoolExecutor`. The worker transcribes audio, relabels enrolled speakers, summarizes through the existing OpenAI-compatible `SummaryService`, saves the completed meeting, marks the job completed, and removes the uploaded audio file. `GET /v1/meetings/jobs/{job_id}` returns job state and hydrates the completed meeting when ready. Active queued/processing jobs are resubmitted on backend startup.
+
+Added chunk-level parallel transcription for long recordings. When `TRANSCRIPTION_CHUNKING_ENABLED=true` and the audio duration is at least `TRANSCRIPTION_CHUNK_MIN_DURATION_SECONDS`, the backend uses `ffprobe`/`ffmpeg` to split audio into overlapping WAV chunks, transcribes chunks in a `ThreadPoolExecutor` capped by `TRANSCRIPTION_CHUNK_WORKERS`, offsets segment timestamps back into the original recording, drops duplicate overlap segments, and merges the transcript. Runtime knobs now include `TRANSCRIPTION_CHUNK_SECONDS`, `TRANSCRIPTION_CHUNK_OVERLAP_SECONDS`, `TRANSCRIPTION_CHUNK_MIN_DURATION_SECONDS`, and `TRANSCRIPTION_CHUNK_WORKERS`.
+
+Updated transcription defaults for mixed-language meetings. Empty `WHISPER_LANGUAGE` now normalizes to `None`, faster-whisper and WhisperX run with `task="transcribe"` instead of translation, and runtime chunking defaults to 30-second chunks with 3-second overlap and 2 chunk workers. This lets language detection happen per short chunk instead of forcing a whole meeting into the first detected language, so English, Russian, and Kazakh speech should stay in their original languages instead of being rewritten into one language.
+
+Updated iOS recording processing to submit the recording to the job endpoint and poll until completion. When the backend supports jobs, the transcript and summary arrive together and the meeting is already stored server-side. If the backend does not have the job endpoint yet, iOS falls back to the old synchronous `/v1/transcriptions` flow so existing deployments do not hard-break.
+
+AI summary support was already present through OpenAI-compatible env vars; docs now call out the `gpt-oss` default, Alem-compatible `OPENAI_BASE_URL`, `MEETING_JOB_WORKERS`, `WHISPER_CPU_THREADS`, `WHISPER_NUM_WORKERS`, and `WHISPERX_BATCH_SIZE`. The provided secret was not written to tracked files. Current checked health responses for the running local/remote backends still report `openaiConfigured=false`, so runtime `.env` must be configured before real AI summaries are active.
+
+Known limitations: chunk-wise WhisperX diarization can make raw `SPEAKER_NN` labels less stable across chunk boundaries; disable chunking if full-file diarization quality matters more than throughput. A job survives app navigation/closure after upload reaches the backend; it does not yet guarantee recovery if iOS is force-killed before the upload completes.
+
+Deployed to `51.195.200.207` on 2026-05-10. Backups of previous backend files were created at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-064921.tgz` and `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-071010.tgz`. The active systemd service is `meta-ios-backend.service`, running from `/opt/meta-ios/backend` on port `8787`. Runtime config now has `summaryModel=gpt-oss`, Alem base URL configured, `WHISPER_LANGUAGE=` normalized to auto-detect, `TRANSCRIPTION_CHUNKING_ENABLED=true`, `TRANSCRIPTION_CHUNK_SECONDS=30`, `TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=3`, `TRANSCRIPTION_CHUNK_MIN_DURATION_SECONDS=30`, `TRANSCRIPTION_CHUNK_WORKERS=2`, and `MEETING_JOB_WORKERS=1`. `ffmpeg` and `ffprobe` are installed on the server. `OPENAI_API_KEY` is still missing from `/etc/meta-ios-backend.env`, so `/health` reports `openaiConfigured=false`; AI summaries will use local fallback until a non-exposed key is added and the service is restarted. The updated Debug iOS app was also built, installed, and launched on `iPhone (Yerasyl)` so the client uses the new job polling endpoint.
+
+## Next
+
+Result is ready for human review. Review gate: add a rotated `OPENAI_API_KEY` to `/etc/meta-ios-backend.env`, restart `meta-ios-backend.service`, run one real recording from the iPhone, then close or leave the recording screen after upload starts and verify the completed meeting appears in Conversations. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
+
 # IOS-6: Polish iOS Auth Screen
 
 Status: approved

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
-from app.schemas import SummaryResponse
+from app.schemas import SummaryResponse, TranscriptSegment
+from app.services.meeting_contents import build_outline_from_segments
 
 
 ACTION_KEYWORDS = [
@@ -39,7 +40,10 @@ FOLLOW_UP_KEYWORDS = [
 ]
 
 
-def summarize_locally(transcript: str) -> SummaryResponse:
+def summarize_locally(
+    transcript: str,
+    segments: list[TranscriptSegment] | None = None,
+) -> SummaryResponse:
     sentences = split_sentences(transcript)
     overview = ". ".join(sentences[:3])
 
@@ -50,6 +54,7 @@ def summarize_locally(transcript: str) -> SummaryResponse:
         decisions=extract(sentences, DECISION_KEYWORDS) or ["No explicit decisions detected."],
         actionItems=extract(sentences, ACTION_KEYWORDS) or ["No explicit action items detected."],
         followUps=extract(sentences, FOLLOW_UP_KEYWORDS) or ["No follow-ups detected."],
+        outline=build_outline_from_segments(transcript, segments),
         generatedAt=datetime.now(UTC),
     )
 

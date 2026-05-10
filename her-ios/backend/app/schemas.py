@@ -20,11 +20,16 @@ class TranscriptSegment(BaseModel):
     speaker: str | None = None
 
 
+class MeetingOutlineItem(BaseModel):
+    start: float
+    title: str
+
+
 class TranscriptResponse(BaseModel):
     transcript: str
     language: str | None = None
     durationSeconds: float | None = None
-    segments: list[TranscriptSegment] = []
+    segments: list[TranscriptSegment] = Field(default_factory=list)
 
 
 class VoiceProfileResponse(BaseModel):
@@ -42,29 +47,37 @@ class SummaryRequest(BaseModel):
     transcript: str = Field(min_length=1)
 
 
+SummaryStatus = Literal["generated", "unavailable"]
+
+
 class SummaryResponse(BaseModel):
     title: str
     overview: str
-    keyTopics: list[str] = []
+    keyTopics: list[str] = Field(default_factory=list)
     decisions: list[str]
     actionItems: list[str]
     followUps: list[str]
+    outline: list[MeetingOutlineItem] = Field(default_factory=list)
     generatedAt: datetime
+    summaryStatus: SummaryStatus = "generated"
 
 
 class MeetingResponse(SummaryResponse):
     id: str
     transcript: str
+    segments: list[TranscriptSegment] = Field(default_factory=list)
     language: str | None = None
     durationSeconds: float | None = None
     source: str | None = None
     deviceName: str | None = None
     locationName: str | None = None
+    hasAudio: bool = False
     createdAt: datetime
 
 
 class MeetingSaveRequest(BaseModel):
     transcript: str = Field(min_length=1)
+    segments: list[TranscriptSegment] = Field(default_factory=list)
     language: str | None = None
     durationSeconds: float | None = None
     source: str | None = None
@@ -72,15 +85,53 @@ class MeetingSaveRequest(BaseModel):
     locationName: str | None = None
     title: str
     overview: str
-    keyTopics: list[str] = []
-    decisions: list[str] = []
-    actionItems: list[str] = []
-    followUps: list[str] = []
+    keyTopics: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    actionItems: list[str] = Field(default_factory=list)
+    followUps: list[str] = Field(default_factory=list)
+    outline: list[MeetingOutlineItem] = Field(default_factory=list)
     generatedAt: datetime
+    summaryStatus: SummaryStatus = "generated"
 
 
 class MeetingListResponse(BaseModel):
     meetings: list[MeetingResponse]
+
+
+class MeetingChatRequest(BaseModel):
+    question: str = Field(min_length=1)
+
+
+MeetingChatRole = Literal["user", "assistant"]
+
+
+class MeetingChatMessageResponse(BaseModel):
+    id: str
+    role: MeetingChatRole
+    content: str
+    createdAt: datetime
+
+
+class MeetingChatListResponse(BaseModel):
+    messages: list[MeetingChatMessageResponse]
+
+
+class MeetingChatResponse(BaseModel):
+    answer: str
+    generatedAt: datetime
+
+
+MeetingJobStatus = Literal["queued", "processing", "completed", "failed"]
+
+
+class MeetingJobResponse(BaseModel):
+    id: str
+    status: MeetingJobStatus
+    meetingId: str | None = None
+    error: str | None = None
+    createdAt: datetime
+    updatedAt: datetime
+    meeting: MeetingResponse | None = None
 
 
 class UserResponse(BaseModel):

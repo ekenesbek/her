@@ -337,7 +337,10 @@ struct ContentView: View {
                 case .detail:
                     ExactConversationDetailScreen(
                         meeting: selectedMeeting,
-                        onBack: { route = .conversations }
+                        onBack: { route = .conversations },
+                        onGenerateSummary: { meeting in
+                            selectedMeeting = try? await meetingsStore.generateSummary(for: meeting)
+                        }
                     )
                 case .memory:
                     ExactMemoryScreen(
@@ -386,7 +389,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: viewModel.phase) { newPhase in
-            if newPhase == .completed {
+            if newPhase == .completed || newPhase == .transcriptReady {
                 Task { @MainActor in
                     await meetingsStore.refresh()
                 }
@@ -432,7 +435,7 @@ struct ContentView: View {
         }
 
         Task { @MainActor in
-            await viewModel.stopAndTranscribe()
+            await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationLabel)
         }
     }
 }
@@ -1244,8 +1247,10 @@ private extension StoredMeeting {
 private struct ExactConversationDetailScreen: View {
     let meeting: StoredMeeting?
     let onBack: () -> Void
-    private let tabs = ["summary", "transcript", "chat"]
+    let onGenerateSummary: (StoredMeeting) async -> Void
+    private let tabs = ["contents", "summary", "chat"]
     @State private var selectedTab = 0
+    @State private var isGeneratingSummary = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1258,14 +1263,30 @@ private struct ExactConversationDetailScreen: View {
 
                 if selectedTab == 2 {
                     ConversationChatPanel(meeting: meeting)
+                } else if selectedTab == 0 {
+                    ScrollViewReader { scrollProxy in
+                        ScrollView(showsIndicators: false) {
+                            VStack(alignment: .leading, spacing: 16) {
+                                ConversationContentsPanel(meeting: meeting, scrollProxy: scrollProxy)
+                            }
+                            .padding(.horizontal, 22)
+                            .padding(.bottom, 14)
+                        }
+                    }
                 } else {
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 16) {
-                            if selectedTab == 0 {
-                                SummaryPanel(summary: meeting.summary)
-                            } else {
-                                TranscriptPanel(transcript: meeting.transcript)
-                            }
+                            SummaryPanel(
+                                summary: meeting.summary,
+                                isGenerating: isGeneratingSummary,
+                                onGenerateSummary: meeting.hasGeneratedSummary ? nil : {
+                                    Task { @MainActor in
+                                        isGeneratingSummary = true
+                                        await onGenerateSummary(meeting)
+                                        isGeneratingSummary = false
+                                    }
+                                }
+                            )
                         }
                         .padding(.horizontal, 22)
                         .padding(.bottom, 14)
@@ -1349,6 +1370,8 @@ private struct ConversationChatPanel: View {
     let meeting: StoredMeeting
     @State private var draft = ""
     @State private var messages: [ConversationChatMessage] = []
+    @State private var isSending = false
+    private let chatService = MeetingChatServiceFactory.make()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1367,8 +1390,11 @@ private struct ConversationChatPanel: View {
             }
 
             HStack(spacing: 10) {
-                TextField("Ask about this conversation", text: $draft)
+                TextField("", text: $draft, prompt: Text("Ask about this conversation").foregroundColor(AppTheme.dim))
                     .font(.system(size: 14, weight: .regular, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                    .foregroundStyle(AppTheme.fg)
+                    .tint(AppTheme.fg)
                     .textFieldStyle(.plain)
                     .padding(.leading, 16)
                     .frame(height: 46)
@@ -1389,10 +1415,13 @@ private struct ConversationChatPanel: View {
             .padding(.vertical, 12)
             .overlay(alignment: .top) { DividerLine() }
         }
+        .task(id: meeting.id) {
+            await loadMessages()
+        }
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isSending && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func send() {
@@ -1401,12 +1430,58 @@ private struct ConversationChatPanel: View {
             return
         }
 
+        let assistantMessageId = UUID()
         messages.append(ConversationChatMessage(role: .user, text: question))
-        messages.append(ConversationChatMessage(role: .assistant, text: answer(for: question)))
+        messages.append(ConversationChatMessage(role: .assistant, text: "", id: assistantMessageId))
         draft = ""
+        isSending = true
+
+        Task { @MainActor in
+            let answer: String
+            if let chatService {
+                do {
+                    answer = try await chatService.ask(meetingId: meeting.id, question: question) { partial in
+                        Task { @MainActor in
+                            updateAssistantMessage(id: assistantMessageId, text: partial)
+                        }
+                    }
+                } catch {
+                    answer = localAnswer(for: question)
+                }
+            } else {
+                answer = localAnswer(for: question)
+            }
+            updateAssistantMessage(id: assistantMessageId, text: answer)
+            isSending = false
+        }
     }
 
-    private func answer(for question: String) -> String {
+    private func loadMessages() async {
+        guard let chatService else {
+            messages = []
+            return
+        }
+        do {
+            let saved = try await chatService.messages(meetingId: meeting.id)
+            messages = saved.compactMap { item in
+                guard let role = ConversationChatMessage.Role(rawValue: item.role) else {
+                    return nil
+                }
+                return ConversationChatMessage(role: role, text: item.content)
+            }
+        } catch {
+            messages = []
+        }
+    }
+
+    private func updateAssistantMessage(id: UUID, text: String) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        messages[index].text = text
+    }
+
+    private func localAnswer(for question: String) -> String {
         let lowercased = question.lowercased()
         if lowercased.contains("action") || lowercased.contains("todo") || lowercased.contains("зада") {
             return meeting.summary.actionItems.isEmpty ? "No action items were found in this conversation." : meeting.summary.actionItems.joined(separator: "\n")
@@ -1425,11 +1500,17 @@ private struct ConversationChatPanel: View {
 }
 
 private struct ConversationChatMessage: Identifiable, Equatable {
-    let id = UUID()
+    let id: UUID
     let role: Role
-    let text: String
+    var text: String
 
-    enum Role: Equatable {
+    init(role: Role, text: String, id: UUID = UUID()) {
+        self.id = id
+        self.role = role
+        self.text = text
+    }
+
+    enum Role: String, Equatable {
         case user
         case assistant
     }
@@ -1443,7 +1524,7 @@ private struct ConversationChatBubble: View {
             if message.role == .user {
                 Spacer(minLength: 36)
             }
-            Text(message.text)
+            Text(message.text.isEmpty ? "..." : message.text)
                 .font(.system(size: 14, weight: .regular, design: .serif))
                 .foregroundColor(message.role == .user ? AppTheme.bg : AppTheme.fg)
                 .lineSpacing(4)
@@ -1753,7 +1834,7 @@ private struct ExactRecordingScreen: View {
                     }
 
                     if let summary = viewModel.summary {
-                        SummaryPanel(summary: summary)
+                        SummaryPanel(summary: summary, isGenerating: false, onGenerateSummary: nil)
                             .padding(.top, 8)
                     }
                 }
@@ -3797,33 +3878,21 @@ private struct WearablesPanel: View {
     }
 }
 
-private struct TranscriptPanel: View {
-    let transcript: String
-
-    var body: some View {
-        AppCard {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionTitle(label: "TRANSCRIPT", title: "Conversation", icon: "text.quote")
-                DividerLine()
-
-                Text(transcript)
-                    .font(.system(size: 15, weight: .regular))
-                    .foregroundColor(AppTheme.fg)
-                    .lineSpacing(4)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
 private struct SummaryPanel: View {
     let summary: MeetingSummary
+    let isGenerating: Bool
+    let onGenerateSummary: (() -> Void)?
 
     var body: some View {
         AppCard {
             VStack(alignment: .leading, spacing: 16) {
                 SectionTitle(label: "SUMMARY", title: summary.title, icon: "doc.text.magnifyingglass")
+
+                if let onGenerateSummary {
+                    WwPrimaryButton(isGenerating ? "Generating summary..." : "Generate summary", disabled: isGenerating) {
+                        onGenerateSummary()
+                    }
+                }
 
                 MonoLabel("overview")
                 Text(summary.overview)
@@ -3849,6 +3918,653 @@ private struct SummaryPanel: View {
 
         let candidates = [summary.title] + summary.decisions + summary.actionItems + summary.followUps
         return Array(candidates.prefix(4)).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+}
+
+private struct ConversationContentsPanel: View {
+    let meeting: StoredMeeting
+    let scrollProxy: ScrollViewProxy
+    @State private var speakerNames: [String: String] = [:]
+    @State private var renamingSpeakerKey: String?
+    @State private var speakerDraft = ""
+    @State private var lastScrolledChunkID: String?
+    @StateObject private var playback = MeetingAudioPlaybackController()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            ConversationAudioRow(meeting: meeting, playback: playback)
+
+            ConversationOutlineSection(items: outlineItems)
+
+            VStack(alignment: .leading, spacing: 18) {
+                ContentsSectionTitle(title: "Transcript")
+
+                if displaySegments.isEmpty {
+                    Text(meeting.transcript)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundColor(AppTheme.fg)
+                        .lineSpacing(5)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(displayChunks) { chunk in
+                        ConversationTranscriptSegmentRow(
+                            chunk: chunk,
+                            speakerName: displayName(for: chunk.speakerKey),
+                            isActive: activeChunkID == chunk.id,
+                            onPlay: {
+                                playback.playChunk(chunk, meeting: meeting)
+                            },
+                            onRename: {
+                                speakerDraft = displayName(for: chunk.speakerKey)
+                                renamingSpeakerKey = chunk.speakerKey
+                            }
+                        )
+                        .id(chunk.id)
+                    }
+                }
+            }
+        }
+        .padding(.top, 4)
+        .onAppear {
+            speakerNames = SpeakerNamePreferences.load(meetingId: meeting.id)
+        }
+        .alert("Rename speaker", isPresented: renameBinding) {
+            TextField("Speaker name", text: $speakerDraft)
+            Button("Save") {
+                saveSpeakerName()
+            }
+            Button("Cancel", role: .cancel) {
+                renamingSpeakerKey = nil
+            }
+        }
+        .onChange(of: playback.currentTime) { _ in
+            scrollToActiveChunkIfNeeded()
+        }
+        .onDisappear {
+            playback.stop()
+        }
+    }
+
+    private var renameBinding: Binding<Bool> {
+        Binding(
+            get: { renamingSpeakerKey != nil },
+            set: { isPresented in
+                if !isPresented {
+                    renamingSpeakerKey = nil
+                }
+            }
+        )
+    }
+
+    private var displaySegments: [MeetingTranscriptSegment] {
+        if !meeting.segments.isEmpty {
+            return meeting.segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+
+        let trimmed = meeting.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return []
+        }
+        return [
+            MeetingTranscriptSegment(
+                start: 0,
+                end: meeting.durationSeconds ?? 0,
+                text: trimmed,
+                speaker: "Speaker"
+            )
+        ]
+    }
+
+    private var outlineItems: [MeetingOutlineItem] {
+        if !meeting.summary.outline.isEmpty {
+            return meeting.summary.outline
+        }
+        return MeetingContentsBuilder.outline(from: displaySegments, transcript: meeting.transcript)
+    }
+
+    private var displayChunks: [TranscriptDisplayChunk] {
+        TranscriptDisplayChunk.group(segments: displaySegments, speakerKey: speakerKey(for:))
+    }
+
+    private var activeChunkID: String? {
+        guard playback.isPlaying else {
+            return nil
+        }
+        return displayChunks.first { chunk in
+            playback.currentTime + 0.05 >= chunk.start && playback.currentTime <= chunk.end + 0.25
+        }?.id
+    }
+
+    private func speakerKey(for segment: MeetingTranscriptSegment) -> String {
+        let trimmed = segment.speaker?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Speaker" : trimmed
+    }
+
+    private func displayName(for speakerKey: String) -> String {
+        if let renamed = speakerNames[speakerKey], !renamed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return renamed
+        }
+
+        if !speakerKey.localizedCaseInsensitiveContains("speaker") {
+            return speakerKey
+        }
+
+        let orderedKeys = speakerOrder
+        if let index = orderedKeys.firstIndex(of: speakerKey) {
+            return "Speaker \(index + 1)"
+        }
+        return "Speaker"
+    }
+
+    private var speakerOrder: [String] {
+        var keys: [String] = []
+        for chunk in displayChunks {
+            let key = chunk.speakerKey
+            if !keys.contains(key) {
+                keys.append(key)
+            }
+        }
+        return keys
+    }
+
+    private func saveSpeakerName() {
+        guard let key = renamingSpeakerKey else {
+            return
+        }
+        let trimmed = speakerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            speakerNames.removeValue(forKey: key)
+        } else {
+            speakerNames[key] = trimmed
+        }
+        SpeakerNamePreferences.save(speakerNames, meetingId: meeting.id)
+        renamingSpeakerKey = nil
+    }
+
+    private func scrollToActiveChunkIfNeeded() {
+        guard let activeChunkID, activeChunkID != lastScrolledChunkID else {
+            return
+        }
+        lastScrolledChunkID = activeChunkID
+        withAnimation(.easeInOut(duration: 0.25)) {
+            scrollProxy.scrollTo(activeChunkID, anchor: .center)
+        }
+    }
+}
+
+private struct ConversationAudioRow: View {
+    let meeting: StoredMeeting
+    @ObservedObject var playback: MeetingAudioPlaybackController
+
+    var body: some View {
+        VStack(spacing: 0) {
+            DividerLine()
+            HStack(spacing: 18) {
+                Button(action: { playback.toggleFullPlayback(for: meeting) }) {
+                    ZStack {
+                        if playback.isLoading {
+                            ProgressView()
+                                .tint(AppTheme.fg)
+                        } else {
+                            Image(systemName: playbackIcon)
+                        }
+                    }
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(canPlay ? AppTheme.fg : AppTheme.dim)
+                        .frame(width: 48, height: 48)
+                        .background(Circle().fill(AppTheme.bgSoft))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(!canPlay || playback.isLoading)
+
+                Text(MeetingTimeFormatter.audioDuration(meeting.durationSeconds))
+                    .font(.system(size: 21, weight: .regular, design: .monospaced))
+                    .foregroundColor(AppTheme.fg)
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "waveform")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(AppTheme.dim)
+            }
+            .padding(.vertical, 18)
+            DividerLine()
+        }
+    }
+
+    private var canPlay: Bool {
+        playback.canPlay(meeting)
+    }
+
+    private var playbackIcon: String {
+        guard canPlay else {
+            return "play.slash.fill"
+        }
+        return playback.isPlaying ? "pause.fill" : "play.fill"
+    }
+}
+
+private struct TranscriptDisplayChunk: Identifiable, Equatable {
+    let id: String
+    let start: Double
+    let end: Double
+    let speakerKey: String
+    let text: String
+
+    static func group(
+        segments: [MeetingTranscriptSegment],
+        speakerKey: (MeetingTranscriptSegment) -> String
+    ) -> [TranscriptDisplayChunk] {
+        let usableSegments = segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        var groups: [[MeetingTranscriptSegment]] = []
+        var current: [MeetingTranscriptSegment] = []
+
+        for segment in usableSegments {
+            guard let previous = current.last else {
+                current = [segment]
+                continue
+            }
+
+            if shouldStartNewGroup(next: segment, after: previous, current: current, speakerKey: speakerKey) {
+                groups.append(current)
+                current = [segment]
+            } else {
+                current.append(segment)
+            }
+        }
+
+        if !current.isEmpty {
+            groups.append(current)
+        }
+
+        return groups.compactMap { group in
+            guard let first = group.first, let last = group.last else {
+                return nil
+            }
+            let key = speakerKey(first)
+            let startBucket = Int((first.start * 100).rounded())
+            let endBucket = Int((last.end * 100).rounded())
+            return TranscriptDisplayChunk(
+                id: "\(startBucket)-\(endBucket)-\(key)",
+                start: first.start,
+                end: max(first.end, last.end),
+                speakerKey: key,
+                text: group.map(\.text).joined(separator: " ")
+            )
+        }
+    }
+
+    private static func shouldStartNewGroup(
+        next: MeetingTranscriptSegment,
+        after previous: MeetingTranscriptSegment,
+        current: [MeetingTranscriptSegment],
+        speakerKey: (MeetingTranscriptSegment) -> String
+    ) -> Bool {
+        if speakerKey(next) != speakerKey(previous) {
+            return true
+        }
+        if next.start - previous.end >= 8 {
+            return true
+        }
+        let sentenceCount = current.reduce(0) { total, segment in
+            total + max(1, segment.text.filter { ".!?".contains($0) }.count)
+        }
+        if sentenceCount >= 5 {
+            return true
+        }
+        let duration = max(previous.end, next.end) - (current.first?.start ?? next.start)
+        return sentenceCount >= 3 && duration >= 35
+    }
+}
+
+@MainActor
+private final class MeetingAudioPlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published private(set) var isLoading = false
+    @Published private(set) var isPlaying = false
+    @Published private(set) var currentTime: Double = 0
+    @Published private(set) var errorMessage: String?
+
+    private var player: AVAudioPlayer?
+    private var loadedMeetingID: String?
+    private var stopAt: Double?
+    private var timer: Timer?
+    private let downloader: MeetingAudioDownloadService?
+
+    init(downloader: MeetingAudioDownloadService? = MeetingAudioDownloadServiceFactory.make()) {
+        self.downloader = downloader
+    }
+
+    func canPlay(_ meeting: StoredMeeting) -> Bool {
+        MeetingAudioFileStore.load(meetingId: meeting.id) != nil || (meeting.hasAudio && downloader != nil)
+    }
+
+    func toggleFullPlayback(for meeting: StoredMeeting) {
+        Task { @MainActor in
+            guard canPlay(meeting) else {
+                return
+            }
+            if isPlaying && stopAt == nil {
+                pause()
+                return
+            }
+            do {
+                let player = try await preparePlayer(for: meeting)
+                stopAt = nil
+                player.play()
+                isPlaying = true
+                startTimer()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func playChunk(_ chunk: TranscriptDisplayChunk, meeting: StoredMeeting) {
+        Task { @MainActor in
+            guard canPlay(meeting) else {
+                return
+            }
+            do {
+                let player = try await preparePlayer(for: meeting)
+                player.currentTime = max(0, chunk.start)
+                currentTime = player.currentTime
+                stopAt = max(chunk.start, chunk.end)
+                player.play()
+                isPlaying = true
+                startTimer()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        player?.stop()
+        player = nil
+        loadedMeetingID = nil
+        stopAt = nil
+        currentTime = 0
+        isPlaying = false
+    }
+
+    private func preparePlayer(for meeting: StoredMeeting) async throws -> AVAudioPlayer {
+        if loadedMeetingID == meeting.id, let player {
+            return player
+        }
+
+        stop()
+        isLoading = true
+        defer { isLoading = false }
+
+        let audioURL: URL
+        if let localURL = MeetingAudioFileStore.load(meetingId: meeting.id) {
+            audioURL = localURL
+        } else if meeting.hasAudio, let downloader {
+            audioURL = try await downloader.downloadAudio(meetingId: meeting.id)
+        } else {
+            throw MeetingsServiceError.backendFailed
+        }
+
+        let newPlayer = try AVAudioPlayer(contentsOf: audioURL)
+        newPlayer.delegate = self
+        newPlayer.prepareToPlay()
+        player = newPlayer
+        loadedMeetingID = meeting.id
+        currentTime = newPlayer.currentTime
+        return newPlayer
+    }
+
+    private func pause() {
+        player?.pause()
+        timer?.invalidate()
+        timer = nil
+        isPlaying = false
+    }
+
+    private func startTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.tick()
+            }
+        }
+    }
+
+    private func tick() {
+        guard let player else {
+            stop()
+            return
+        }
+        currentTime = player.currentTime
+        if let stopAt, player.currentTime >= stopAt {
+            player.pause()
+            player.currentTime = stopAt
+            currentTime = stopAt
+            self.stopAt = nil
+            timer?.invalidate()
+            timer = nil
+            isPlaying = false
+        } else {
+            isPlaying = player.isPlaying
+        }
+    }
+
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
+            self.timer?.invalidate()
+            self.timer = nil
+            self.stopAt = nil
+            self.isPlaying = false
+            self.currentTime = player.currentTime
+        }
+    }
+}
+
+private struct ConversationOutlineSection: View {
+    let items: [MeetingOutlineItem]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ContentsSectionTitle(title: "Outline")
+
+            if items.isEmpty {
+                Text("No outline was generated for this conversation.")
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundColor(AppTheme.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(items) { item in
+                        HStack(alignment: .firstTextBaseline, spacing: 24) {
+                            Text(MeetingTimeFormatter.timestamp(item.start))
+                                .font(.system(size: 16, weight: .regular, design: .monospaced))
+                                .underline()
+                                .foregroundColor(AppTheme.fg)
+                                .frame(width: 86, alignment: .leading)
+
+                            Text(item.title)
+                                .font(.system(size: 16, weight: .regular))
+                                .foregroundColor(AppTheme.muted)
+                                .lineSpacing(4)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+
+            DividerLine()
+        }
+    }
+}
+
+private struct ConversationTranscriptSegmentRow: View {
+    let chunk: TranscriptDisplayChunk
+    let speakerName: String
+    let isActive: Bool
+    let onPlay: () -> Void
+    let onRename: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Button(action: onPlay) {
+                    HStack(spacing: 6) {
+                        Image(systemName: isActive ? "pause.fill" : "play.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(MeetingTimeFormatter.timestamp(chunk.start))
+                            .font(.system(size: 15, weight: .regular, design: .monospaced))
+                    }
+                    .foregroundColor(isActive ? AppTheme.fg : AppTheme.dim)
+                    .frame(width: 86, alignment: .leading)
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                Button(action: onRename) {
+                    Text(speakerName)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(AppTheme.fg)
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                Spacer(minLength: 0)
+            }
+
+            Text(chunk.text)
+                .font(.system(size: 18, weight: .regular))
+                .foregroundColor(isActive ? AppTheme.fg : AppTheme.muted)
+                .lineSpacing(6)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isActive ? AppTheme.bgSoft : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onPlay)
+    }
+}
+
+private struct ContentsSectionTitle: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 22, weight: .semibold))
+            .foregroundColor(AppTheme.fg)
+            .overlay(alignment: .bottomLeading) {
+                Rectangle()
+                    .fill(AppTheme.fg)
+                    .frame(height: 1)
+                    .offset(y: 4)
+            }
+    }
+}
+
+private enum MeetingTimeFormatter {
+    static func audioDuration(_ seconds: Double?) -> String {
+        guard let seconds, seconds.isFinite, seconds > 0 else {
+            return "00:00:00"
+        }
+        return clock(seconds)
+    }
+
+    static func timestamp(_ seconds: Double) -> String {
+        clock(seconds)
+    }
+
+    private static func clock(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "0:%02d:%02d", minutes, secs)
+    }
+}
+
+private enum MeetingContentsBuilder {
+    static func outline(from segments: [MeetingTranscriptSegment], transcript: String) -> [MeetingOutlineItem] {
+        let usableSegments = segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !usableSegments.isEmpty else {
+            let title = outlineTitle(from: transcript)
+            return title.isEmpty ? [] : [MeetingOutlineItem(start: 0, title: title)]
+        }
+
+        var groups: [[MeetingTranscriptSegment]] = []
+        var current: [MeetingTranscriptSegment] = []
+        for segment in usableSegments {
+            guard let previous = current.last else {
+                current = [segment]
+                continue
+            }
+
+            let gap = segment.start - previous.end
+            let duration = max(previous.end, segment.end) - (current.first?.start ?? segment.start)
+            let previousEndedSentence = previous.text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix(".")
+                || previous.text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")
+                || previous.text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("!")
+
+            if gap >= 12 || duration >= 140 || (duration >= 75 && previousEndedSentence) {
+                groups.append(current)
+                current = [segment]
+            } else {
+                current.append(segment)
+            }
+        }
+        if !current.isEmpty {
+            groups.append(current)
+        }
+
+        return groups.prefix(8).compactMap { group in
+            guard let first = group.first else {
+                return nil
+            }
+            let title = outlineTitle(from: group.map(\.text).joined(separator: " "))
+            return title.isEmpty ? nil : MeetingOutlineItem(start: first.start, title: title)
+        }
+    }
+
+    private static func outlineTitle(from text: String) -> String {
+        let cleaned = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .split(separator: " ")
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            return ""
+        }
+
+        let sentence = cleaned
+            .split(whereSeparator: { ".!?".contains($0) })
+            .first
+            .map(String.init) ?? cleaned
+        return sentence
+            .split(separator: " ")
+            .prefix(12)
+            .joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: " ,;:-"))
+    }
+}
+
+private enum SpeakerNamePreferences {
+    static func load(meetingId: String) -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: key(meetingId)) as? [String: String] ?? [:]
+    }
+
+    static func save(_ names: [String: String], meetingId: String) {
+        UserDefaults.standard.set(names, forKey: key(meetingId))
+    }
+
+    private static func key(_ meetingId: String) -> String {
+        "her.meeting.speakerNames.\(meetingId)"
     }
 }
 

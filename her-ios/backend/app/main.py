@@ -1,3 +1,7 @@
+import json
+import logging
+import mimetypes
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -5,12 +9,17 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.schemas import (
     AuthAppleRequest,
     AuthGoogleRequest,
     AuthResponse,
     HealthResponse,
+    MeetingChatListResponse,
+    MeetingChatRequest,
+    MeetingChatResponse,
+    MeetingJobResponse,
     MeetingListResponse,
     MeetingResponse,
     MeetingSaveRequest,
@@ -29,17 +38,24 @@ from app.services.auth import (
     verify_google_id_token,
 )
 from app.services.diarizer import WhisperXTranscriber
+from app.services.meeting_contents import build_outline_from_segments
 from app.services.storage import MeetingStore
-from app.services.summarizer import SummaryService
+from app.services.summarizer import SummaryService, SummaryUnavailableError
 from app.services.transcriber import WhisperTranscriber
 from app.services.voice_profiles import VoiceEmbedder
 from app.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 transcriber: object = WhisperXTranscriber(settings) if settings.diarization_enabled else WhisperTranscriber(settings)
 summarizer = SummaryService(settings)
 store = MeetingStore(settings.data_dir)
 voice_embedder = VoiceEmbedder(settings)
+meeting_job_executor = ThreadPoolExecutor(
+    max_workers=max(1, settings.meeting_job_workers),
+    thread_name_prefix="meeting-job",
+)
 
 
 def current_user(authorization: str | None = Header(default=None)) -> UserResponse:
@@ -69,6 +85,12 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def resume_meeting_jobs() -> None:
+    for job_id in store.list_active_meeting_job_ids():
+        submit_meeting_job(job_id)
+
+
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(
@@ -77,7 +99,7 @@ def health() -> HealthResponse:
         database=str(store.db_path),
         whisperModel=settings.whisper_model,
         summaryModel=settings.openai_summary_model,
-        openaiConfigured=bool(settings.openai_api_key),
+        openaiConfigured=settings.llm_configured,
     )
 
 
@@ -163,7 +185,10 @@ def relabel_transcript(
 
     import numpy as np
 
-    per_speaker_embeddings = voice_embedder.extract_per_speaker(audio_path)
+    per_speaker_embeddings = voice_embedder.extract_for_labeled_segments(
+        audio_path,
+        result.segments,
+    ) or voice_embedder.extract_per_speaker(audio_path)
     if not per_speaker_embeddings:
         return result
 
@@ -276,41 +301,98 @@ def create_summary(
     request: SummaryRequest,
     _: UserResponse = Depends(current_user),
 ) -> SummaryResponse:
-    return summarizer.summarize(request.transcript)
+    try:
+        return summarizer.summarize(request.transcript)
+    except SummaryUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Summary generation failed")
+        raise HTTPException(status_code=503, detail="AI summary is unavailable.") from exc
 
 
 @app.post("/v1/meetings/process", response_model=MeetingResponse)
 async def process_meeting(
     audio: UploadFile = File(...),
+    source: str | None = Form(default=None),
+    device_name: str | None = Form(default=None),
+    location_name: str | None = Form(default=None),
     user: UserResponse = Depends(current_user),
 ) -> MeetingResponse:
     path = await persist_upload(audio)
+    audio_stored = False
     try:
         transcript = transcriber.transcribe(path)
         transcript = relabel_transcript(transcript, user.id, audio_path=path)
         if not transcript.transcript:
             raise HTTPException(status_code=422, detail="Whisper produced an empty transcript.")
 
-        summary = summarizer.summarize(transcript.transcript)
+        summary = summarize_or_make_unavailable(
+            user.id,
+            transcript.transcript,
+            transcript.segments,
+            location_name,
+        )
         now = datetime.now(UTC)
         meeting = MeetingResponse(
             id=str(uuid4()),
             transcript=transcript.transcript,
+            segments=transcript.segments,
             language=transcript.language,
             durationSeconds=transcript.durationSeconds,
+            source=source,
+            deviceName=device_name,
+            locationName=location_name,
             title=summary.title,
             overview=summary.overview,
             keyTopics=summary.keyTopics,
             decisions=summary.decisions,
             actionItems=summary.actionItems,
             followUps=summary.followUps,
+            outline=summary.outline,
             generatedAt=summary.generatedAt,
+            summaryStatus=summary.summaryStatus,
             createdAt=now,
         )
         store.save(meeting, user_id=user.id)
-        return meeting
+        stored_audio_path = persist_meeting_audio(path, user.id, meeting.id)
+        audio_stored = True
+        content_type = mimetypes.guess_type(stored_audio_path.name)[0] or audio.content_type
+        store.attach_meeting_audio(meeting.id, user.id, stored_audio_path, content_type)
+        return meeting.model_copy(update={"hasAudio": True})
     finally:
-        path.unlink(missing_ok=True)
+        if not audio_stored:
+            path.unlink(missing_ok=True)
+
+
+@app.post("/v1/meetings/jobs", response_model=MeetingJobResponse, status_code=202)
+async def create_meeting_job(
+    audio: UploadFile = File(...),
+    source: str | None = Form(default=None),
+    device_name: str | None = Form(default=None),
+    location_name: str | None = Form(default=None),
+    user: UserResponse = Depends(current_user),
+) -> MeetingJobResponse:
+    path = await persist_job_upload(audio)
+    job = store.create_meeting_job(
+        user.id,
+        path,
+        source=source,
+        device_name=device_name,
+        location_name=location_name,
+    )
+    submit_meeting_job(job.id)
+    return job
+
+
+@app.get("/v1/meetings/jobs/{job_id}", response_model=MeetingJobResponse)
+def get_meeting_job(
+    job_id: str,
+    user: UserResponse = Depends(current_user),
+) -> MeetingJobResponse:
+    job = store.get_meeting_job(job_id, user_id=user.id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Meeting job not found.")
+    return job
 
 
 @app.post("/v1/meetings", response_model=MeetingResponse)
@@ -347,9 +429,239 @@ def get_meeting(
     return meeting
 
 
+@app.get("/v1/meetings/{meeting_id}/audio")
+def download_meeting_audio(
+    meeting_id: str,
+    user: UserResponse = Depends(current_user),
+) -> FileResponse:
+    meeting = store.get(meeting_id, user_id=user.id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    audio = store.get_meeting_audio(meeting_id, user.id)
+    if audio is None:
+        raise HTTPException(status_code=404, detail="Meeting audio not found.")
+
+    audio_path, content_type = audio
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Meeting audio file is missing.")
+
+    media_type = content_type or mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        path=audio_path,
+        media_type=media_type,
+        filename=audio_path.name,
+    )
+
+
+@app.post("/v1/meetings/{meeting_id}/summary", response_model=MeetingResponse)
+def generate_meeting_summary(
+    meeting_id: str,
+    user: UserResponse = Depends(current_user),
+) -> MeetingResponse:
+    meeting = store.get(meeting_id, user_id=user.id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    try:
+        summary = summarizer.summarize(meeting.transcript, meeting.segments)
+    except SummaryUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Meeting summary generation failed for meeting %s", meeting_id)
+        raise HTTPException(status_code=503, detail="AI summary is unavailable.") from exc
+    updated = store.update_meeting_summary(meeting_id, user.id, summary)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    return updated
+
+
+@app.get("/v1/meetings/{meeting_id}/chat", response_model=MeetingChatListResponse)
+def list_meeting_chat(
+    meeting_id: str,
+    user: UserResponse = Depends(current_user),
+) -> MeetingChatListResponse:
+    meeting = store.get(meeting_id, user_id=user.id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    return MeetingChatListResponse(messages=store.list_chat_messages(meeting_id, user.id))
+
+
+@app.post("/v1/meetings/{meeting_id}/chat", response_model=MeetingChatResponse)
+def chat_with_meeting(
+    meeting_id: str,
+    payload: MeetingChatRequest,
+    user: UserResponse = Depends(current_user),
+) -> MeetingChatResponse:
+    meeting = store.get(meeting_id, user_id=user.id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="Question is required.")
+    history = store.list_chat_messages(meeting_id, user.id)
+    store.append_chat_message(meeting_id, user.id, "user", question)
+    response = summarizer.answer_question(meeting, question, history)
+    store.append_chat_message(meeting_id, user.id, "assistant", response.answer)
+    return response
+
+
+@app.post("/v1/meetings/{meeting_id}/chat/stream")
+def stream_chat_with_meeting(
+    meeting_id: str,
+    payload: MeetingChatRequest,
+    user: UserResponse = Depends(current_user),
+) -> StreamingResponse:
+    meeting = store.get(meeting_id, user_id=user.id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="Question is required.")
+    history = store.list_chat_messages(meeting_id, user.id)
+    store.append_chat_message(meeting_id, user.id, "user", question)
+
+    def events():
+        answer_parts: list[str] = []
+        try:
+            for delta in summarizer.stream_answer_question(meeting, question, history):
+                if delta:
+                    answer_parts.append(delta)
+                    yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+            answer = "".join(answer_parts).strip()
+            if answer:
+                store.append_chat_message(meeting_id, user.id, "assistant", answer)
+            yield "event: done\ndata: {}\n\n"
+        except Exception:  # noqa: BLE001
+            logger.exception("Meeting chat stream failed for meeting %s", meeting_id)
+            payload_json = json.dumps({"error": "Chat stream failed."})
+            yield f"event: error\ndata: {payload_json}\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def submit_meeting_job(job_id: str) -> None:
+    meeting_job_executor.submit(run_meeting_job, job_id)
+
+
+def run_meeting_job(job_id: str) -> None:
+    job = store.get_meeting_job_payload(job_id)
+    if job is None:
+        return
+    if job["status"] == "completed":
+        return
+
+    audio_path = Path(job["audio_path"])
+    audio_stored = False
+    store.update_meeting_job(job_id, status="processing")
+    try:
+        if not audio_path.exists():
+            raise RuntimeError("Uploaded audio file is missing.")
+
+        transcript = transcriber.transcribe(audio_path)
+        transcript = relabel_transcript(transcript, job["user_id"], audio_path=audio_path)
+        if not transcript.transcript:
+            raise RuntimeError("Whisper produced an empty transcript.")
+
+        summary = summarize_or_make_unavailable(
+            job["user_id"],
+            transcript.transcript,
+            transcript.segments,
+            job.get("location_name"),
+        )
+        now = datetime.now(UTC)
+        meeting = MeetingResponse(
+            id=str(uuid4()),
+            transcript=transcript.transcript,
+            segments=transcript.segments,
+            language=transcript.language,
+            durationSeconds=transcript.durationSeconds,
+            source=job.get("source"),
+            deviceName=job.get("device_name"),
+            locationName=job.get("location_name"),
+            title=summary.title,
+            overview=summary.overview,
+            keyTopics=summary.keyTopics,
+            decisions=summary.decisions,
+            actionItems=summary.actionItems,
+            followUps=summary.followUps,
+            outline=summary.outline,
+            generatedAt=summary.generatedAt,
+            summaryStatus=summary.summaryStatus,
+            createdAt=now,
+        )
+        store.save(meeting, user_id=job["user_id"])
+        stored_audio_path = persist_meeting_audio(audio_path, job["user_id"], meeting.id)
+        audio_stored = True
+        content_type = mimetypes.guess_type(stored_audio_path.name)[0]
+        store.attach_meeting_audio(meeting.id, job["user_id"], stored_audio_path, content_type)
+        store.update_meeting_job(job_id, status="completed", meeting_id=meeting.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Meeting job %s failed", job_id)
+        store.update_meeting_job(job_id, status="failed", error=str(exc))
+    finally:
+        if not audio_stored:
+            audio_path.unlink(missing_ok=True)
+
+
 async def persist_upload(upload: UploadFile) -> Path:
     suffix = Path(upload.filename or "meeting.m4a").suffix or ".m4a"
     with NamedTemporaryFile(delete=False, suffix=suffix) as target:
         while chunk := await upload.read(1024 * 1024):
             target.write(chunk)
         return Path(target.name)
+
+
+async def persist_job_upload(upload: UploadFile) -> Path:
+    suffix = Path(upload.filename or "meeting.m4a").suffix or ".m4a"
+    upload_dir = settings.data_dir / "meeting-job-uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / f"{uuid4()}{suffix}"
+    with path.open("wb") as target:
+        while chunk := await upload.read(1024 * 1024):
+            target.write(chunk)
+    return path
+
+
+def persist_meeting_audio(audio_path: Path, user_id: str, meeting_id: str) -> Path:
+    suffix = audio_path.suffix or ".m4a"
+    audio_dir = settings.data_dir / "meeting-audio" / user_id
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    destination = audio_dir / f"{meeting_id}{suffix}"
+    if audio_path.resolve() == destination.resolve():
+        return destination
+    audio_path.replace(destination)
+    return destination
+
+
+def summarize_or_make_unavailable(
+    user_id: str,
+    transcript: str,
+    segments,
+    location_name: str | None,
+) -> SummaryResponse:
+    try:
+        return summarizer.summarize(transcript, segments)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("AI summary unavailable; saving meeting without summary: %s", exc)
+        title = store.next_meeting_title(user_id, fallback_meeting_title(location_name))
+        return SummaryResponse(
+            title=title,
+            overview="Summary unavailable until AI is available.",
+            keyTopics=[],
+            decisions=[],
+            actionItems=[],
+            followUps=[],
+            outline=build_outline_from_segments(transcript, segments),
+            generatedAt=datetime.now(UTC),
+            summaryStatus="unavailable",
+        )
+
+
+def fallback_meeting_title(location_name: str | None) -> str:
+    clean_location = (location_name or "").strip()
+    if clean_location and clean_location.lower() != "location unavailable":
+        return clean_location
+    return "Recording"

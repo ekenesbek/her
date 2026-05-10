@@ -16,6 +16,10 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-5 | approved | P3 | ios | ios/IOS-5/onboarding-agent-before-voice | Put agent name before voice enrollment | `todo/ios.md` |
 | BUG-1 | review | P1 | ios | fix/BUG-1/voice-enrollment-audio-fallback | Fall back from Bluetooth voice enrollment recorder | `todo/ios.md` |
 | IOS-6 | approved | P2 | ios | ios/IOS-6/auth-screen-polish | Polish iOS auth screen | `todo/ios.md` |
+| IOS-7 | review | P1 | ios | current worktree | Add background meeting processing jobs | `todo/ios.md` |
+| IOS-8 | review | P1 | ios | current worktree | Add meeting contents outline and speaker transcript | `todo/ios.md` |
+| IOS-9 | review | P1 | ios | current worktree | Wire Alem OSS summaries and meeting chat | `todo/ios.md` |
+| IOS-10 | review | P1 | ios | current worktree | Persist meeting audio and improve transcript playback | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 

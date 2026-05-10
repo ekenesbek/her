@@ -38,6 +38,10 @@ enum AppConfig {
         backendBaseURL?.appendingPathComponent("v1/transcriptions")
     }
 
+    static var meetingJobsEndpoint: URL? {
+        backendBaseURL?.appendingPathComponent("v1/meetings/jobs")
+    }
+
     static var meetingsEndpoint: URL? {
         backendBaseURL?.appendingPathComponent("v1/meetings")
     }

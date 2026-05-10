@@ -42,7 +42,9 @@ struct LocalSummaryService: SummaryService {
             decisions: decisions.isEmpty ? ["No explicit decisions detected."] : decisions,
             actionItems: actionItems.isEmpty ? ["No explicit action items detected."] : actionItems,
             followUps: followUps.isEmpty ? ["No follow-ups detected."] : followUps,
-            generatedAt: Date()
+            outline: [MeetingOutlineItem(start: 0, title: makeTitle(from: transcript))],
+            generatedAt: Date(),
+            summaryStatus: "generated"
         )
     }
 
@@ -137,7 +139,9 @@ struct BackendSummaryService: SummaryService {
             decisions: decoded.decisions,
             actionItems: decoded.actionItems,
             followUps: decoded.followUps,
-            generatedAt: decoded.generatedAt
+            outline: decoded.outline ?? [],
+            generatedAt: decoded.generatedAt,
+            summaryStatus: decoded.summaryStatus ?? "generated"
         )
     }
 }
@@ -153,7 +157,9 @@ private struct BackendSummaryResponse: Decodable {
     let decisions: [String]
     let actionItems: [String]
     let followUps: [String]
+    let outline: [MeetingOutlineItem]?
     let generatedAt: Date
+    let summaryStatus: String?
 }
 
 enum SummaryError: LocalizedError {
@@ -165,6 +171,161 @@ enum SummaryError: LocalizedError {
             return "Summary backend returned an error."
         }
     }
+}
+
+protocol MeetingChatService {
+    func messages(meetingId: String) async throws -> [MeetingChatPersistedMessage]
+    func ask(meetingId: String, question: String) async throws -> String
+    func ask(meetingId: String, question: String, onPartial: @escaping (String) -> Void) async throws -> String
+}
+
+enum MeetingChatServiceFactory {
+    static func make() -> MeetingChatService? {
+        guard let endpoint = AppConfig.meetingsEndpoint else {
+            return nil
+        }
+        return BackendMeetingChatService(meetingsEndpoint: endpoint)
+    }
+}
+
+struct BackendMeetingChatService: MeetingChatService {
+    let meetingsEndpoint: URL
+    private let session: URLSession
+
+    init(meetingsEndpoint: URL, session: URLSession = .shared) {
+        self.meetingsEndpoint = meetingsEndpoint
+        self.session = session
+    }
+
+    func messages(meetingId: String) async throws -> [MeetingChatPersistedMessage] {
+        var request = URLRequest(url: meetingsEndpoint.appendingPathComponent(meetingId).appendingPathComponent("chat"))
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw SummaryError.backendFailed
+        }
+
+        return try Self.decoder().decode(MeetingChatListResponse.self, from: data).messages
+    }
+
+    func ask(meetingId: String, question: String) async throws -> String {
+        try await askOnce(meetingId: meetingId, question: question)
+    }
+
+    func ask(meetingId: String, question: String, onPartial: @escaping (String) -> Void) async throws -> String {
+        var request = URLRequest(url: meetingsEndpoint.appendingPathComponent(meetingId).appendingPathComponent("chat").appendingPathComponent("stream"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONEncoder().encode(MeetingChatRequest(question: question))
+
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            return try await askOnce(meetingId: meetingId, question: question)
+        }
+
+        var answer = ""
+        var eventName = "message"
+        for try await rawLine in bytes.lines {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty {
+                eventName = "message"
+                continue
+            }
+            if line.hasPrefix("event:") {
+                eventName = String(line.dropFirst("event:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                continue
+            }
+            guard line.hasPrefix("data:") else {
+                continue
+            }
+
+            let dataString = String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if eventName == "done" {
+                break
+            }
+            if eventName == "error" {
+                throw SummaryError.backendFailed
+            }
+            guard let data = dataString.data(using: .utf8) else {
+                continue
+            }
+
+            let payload = try JSONDecoder().decode(MeetingChatStreamPayload.self, from: data)
+            if let delta = payload.delta, !delta.isEmpty {
+                answer += delta
+                onPartial(answer)
+            }
+            if payload.done == true {
+                break
+            }
+        }
+
+        return answer.isEmpty ? try await askOnce(meetingId: meetingId, question: question) : answer
+    }
+
+    private func askOnce(meetingId: String, question: String) async throws -> String {
+        var request = URLRequest(url: meetingsEndpoint.appendingPathComponent(meetingId).appendingPathComponent("chat"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONEncoder().encode(MeetingChatRequest(question: question))
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw SummaryError.backendFailed
+        }
+
+        return try JSONDecoder().decode(MeetingChatResponse.self, from: data).answer
+    }
+
+    private static func decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let rawValue = try container.decode(String.self)
+            if let date = ISO8601DateFormatter.withFractionalSeconds.date(from: rawValue) {
+                return date
+            }
+            if let date = ISO8601DateFormatter.standard.date(from: rawValue) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO8601 date.")
+        }
+        return decoder
+    }
+}
+
+struct MeetingChatPersistedMessage: Decodable, Equatable, Identifiable {
+    let id: String
+    let role: String
+    let content: String
+    let createdAt: Date
+}
+
+private struct MeetingChatListResponse: Decodable {
+    let messages: [MeetingChatPersistedMessage]
+}
+
+private struct MeetingChatRequest: Encodable {
+    let question: String
+}
+
+private struct MeetingChatResponse: Decodable {
+    let answer: String
+}
+
+private struct MeetingChatStreamPayload: Decodable {
+    let delta: String?
+    let done: Bool?
 }
 
 private extension ISO8601DateFormatter {

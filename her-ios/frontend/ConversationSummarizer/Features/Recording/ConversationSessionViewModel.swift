@@ -9,6 +9,7 @@ final class ConversationSessionViewModel: ObservableObject {
     @Published private(set) var elapsedSeconds = 0
     @Published private(set) var activeInputName = "Not recording"
     @Published var transcript = ""
+    @Published private(set) var transcriptSegments: [MeetingTranscriptSegment] = []
     @Published private(set) var summary: MeetingSummary?
     @Published private(set) var errorMessage: String?
     @Published private(set) var transcriptLanguage: String?
@@ -21,6 +22,9 @@ final class ConversationSessionViewModel: ObservableObject {
     private let meetingsService: MeetingsService?
     private var timer: Timer?
     private var meterTimer: Timer?
+    private var lastProcessedRecordingURL: URL?
+    private var lastProcessedLocationName: String?
+    private var currentMeetingId: String?
 
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var intentObservers: [NSObjectProtocol] = []
@@ -150,8 +154,12 @@ final class ConversationSessionViewModel: ObservableObject {
         errorMessage = nil
         summary = nil
         transcript = ""
+        transcriptSegments = []
+        lastProcessedRecordingURL = nil
         transcriptLanguage = nil
         transcriptDurationSeconds = nil
+        lastProcessedLocationName = nil
+        currentMeetingId = nil
 
         let micAllowed = await recorder.requestPermission()
         guard micAllowed else {
@@ -190,13 +198,21 @@ final class ConversationSessionViewModel: ObservableObject {
 
         phase = .transcribing
         do {
-            let result = try await meetingProcessor.transcribe(recordingURL: recovery.url)
-            transcript = result.transcript
-            transcriptLanguage = result.language
-            transcriptDurationSeconds = result.durationSeconds
+            let result = try await meetingProcessor.process(
+                recordingURL: recovery.url,
+                source: "recording",
+                deviceName: nil,
+                locationName: nil
+            )
+            applyProcessingResult(result)
+            if let meetingId = result.meetingId {
+                MeetingAudioFileStore.save(url: recovery.url, meetingId: meetingId)
+            }
             if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 phase = .failed
                 errorMessage = "Recovered recording but no speech was detected."
+            } else if summary != nil {
+                phase = .completed
             } else {
                 phase = .transcriptReady
             }
@@ -209,26 +225,34 @@ final class ConversationSessionViewModel: ObservableObject {
         MeetingRecorder.clearActiveRecording()
     }
 
-    func stopAndTranscribe() async {
+    func stopAndTranscribe(locationName: String? = nil) async {
         stopTimer()
         playFeedback("Stopped, transcribing.", success: true)
 
         do {
             let recordingURL = try recorder.stop()
+            lastProcessedRecordingURL = recordingURL
+            lastProcessedLocationName = cleanLocationName(locationName)
             phase = .transcribing
             guard let meetingProcessor else {
                 fail("Transcription backend is not configured. Set BackendAPIURL in Info.plist.")
                 return
             }
-            let result = try await meetingProcessor.transcribe(recordingURL: recordingURL)
-            transcript = result.transcript
-            transcriptLanguage = result.language
-            transcriptDurationSeconds = result.durationSeconds
+            let result = try await meetingProcessor.process(
+                recordingURL: recordingURL,
+                source: "recording",
+                deviceName: activeInputName == "Not recording" ? nil : activeInputName,
+                locationName: lastProcessedLocationName
+            )
+            applyProcessingResult(result)
+            if let meetingId = result.meetingId {
+                MeetingAudioFileStore.save(url: recordingURL, meetingId: meetingId)
+            }
             if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 fail("Transcription finished, but no speech was detected.")
                 return
             }
-            phase = .transcriptReady
+            phase = summary == nil ? .transcriptReady : .completed
         } catch {
             fail(error.localizedDescription)
         }
@@ -241,20 +265,33 @@ final class ConversationSessionViewModel: ObservableObject {
 
         do {
             phase = .summarizing
+            if let currentMeetingId, let meetingsService {
+                let saved = try await meetingsService.generateSummary(meetingId: currentMeetingId)
+                summary = saved.summary
+                phase = .completed
+                return
+            }
+
             let generated = try await summaryService.summarize(transcript: transcript)
             summary = generated
 
             if let meetingsService {
                 let payload = MeetingSavePayload(
                     transcript: transcript,
+                    segments: transcriptSegments,
                     language: transcriptLanguage,
                     durationSeconds: transcriptDurationSeconds,
                     source: nil,
                     deviceName: activeInputName == "Not recording" ? nil : activeInputName,
-                    locationName: nil,
+                    locationName: lastProcessedLocationName,
                     summary: generated
                 )
-                _ = try? await meetingsService.saveMeeting(payload)
+                if let saved = try? await meetingsService.saveMeeting(payload) {
+                    currentMeetingId = saved.id
+                    if let lastProcessedRecordingURL {
+                        MeetingAudioFileStore.save(url: lastProcessedRecordingURL, meetingId: saved.id)
+                    }
+                }
             }
 
             phase = .completed
@@ -294,6 +331,23 @@ final class ConversationSessionViewModel: ObservableObject {
         stopTimer()
         phase = .failed
         errorMessage = message
+    }
+
+    private func applyProcessingResult(_ result: MeetingProcessingResult) {
+        transcript = result.transcript
+        transcriptSegments = result.segments
+        transcriptLanguage = result.language
+        transcriptDurationSeconds = result.durationSeconds
+        summary = result.summary
+        currentMeetingId = result.meetingId
+    }
+
+    private func cleanLocationName(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty || trimmed.lowercased() == "location unavailable" {
+            return nil
+        }
+        return trimmed
     }
 }
 

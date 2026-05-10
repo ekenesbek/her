@@ -51,7 +51,12 @@ class VoiceEmbedder:
         try:
             from pyannote.core import Segment
 
-            diarization_result = diarization(str(audio_path))
+            kwargs: dict[str, int] = {}
+            if self.settings.diarization_min_speakers > 0:
+                kwargs["min_speakers"] = self.settings.diarization_min_speakers
+            if self.settings.diarization_max_speakers > 0:
+                kwargs["max_speakers"] = self.settings.diarization_max_speakers
+            diarization_result = diarization(str(audio_path), **kwargs)
             timeline_per_speaker: dict[str, list[Segment]] = {}
             for turn, _, speaker in diarization_result.itertracks(yield_label=True):
                 timeline_per_speaker.setdefault(speaker, []).append(turn)
@@ -74,6 +79,48 @@ class VoiceEmbedder:
             return output or None
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed per-speaker embedding extraction: %s", exc)
+            return None
+
+    def extract_for_labeled_segments(
+        self,
+        audio_path: Path,
+        transcript_segments: list[Any],
+    ) -> dict[str, np.ndarray] | None:
+        """Return one embedding per existing transcript speaker label."""
+        inference = self._get_inference()
+        if inference is None:
+            return None
+
+        try:
+            from pyannote.core import Segment
+
+            timeline_per_speaker: dict[str, list[Segment]] = {}
+            for transcript_segment in transcript_segments:
+                speaker = getattr(transcript_segment, "speaker", None)
+                if not speaker:
+                    continue
+                start = float(getattr(transcript_segment, "start", 0.0) or 0.0)
+                end = float(getattr(transcript_segment, "end", 0.0) or 0.0)
+                if end - start < 0.5:
+                    continue
+                timeline_per_speaker.setdefault(str(speaker), []).append(
+                    Segment(max(0.0, start), end)
+                )
+
+            output: dict[str, np.ndarray] = {}
+            for speaker, segments in timeline_per_speaker.items():
+                vectors = []
+                for seg in segments:
+                    try:
+                        emb = inference.crop(str(audio_path), seg)
+                        vectors.append(np.asarray(emb, dtype=np.float32).reshape(-1))
+                    except Exception:  # noqa: BLE001
+                        continue
+                if vectors:
+                    output[speaker] = np.stack(vectors, axis=0).mean(axis=0)
+            return output or None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed labeled speaker embedding extraction: %s", exc)
             return None
 
     @staticmethod
@@ -134,7 +181,7 @@ class VoiceEmbedder:
 
                 self._diarization = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    use_auth_token=token,
+                    token=token,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to load diarization pipeline for matching: %s", exc)

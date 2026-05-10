@@ -3,11 +3,13 @@ import Foundation
 struct StoredMeeting: Identifiable, Equatable {
     let id: String
     let transcript: String
+    let segments: [MeetingTranscriptSegment]
     let language: String?
     let durationSeconds: Double?
     let source: String?
     let deviceName: String?
     let locationName: String?
+    let hasAudio: Bool
     let createdAt: Date
     let summary: MeetingSummary
 
@@ -17,6 +19,10 @@ struct StoredMeeting: Identifiable, Equatable {
 
     var overview: String {
         summary.overview
+    }
+
+    var hasGeneratedSummary: Bool {
+        summary.isGenerated
     }
 
     var sourceLabel: String {
@@ -72,10 +78,24 @@ final class MeetingsStore: ObservableObject {
             errorMessage = error.localizedDescription
         }
     }
+
+    func generateSummary(for meeting: StoredMeeting) async throws -> StoredMeeting {
+        guard let service else {
+            throw MeetingsServiceError.backendFailed
+        }
+        let updated = try await service.generateSummary(meetingId: meeting.id)
+        if let index = meetings.firstIndex(where: { $0.id == updated.id }) {
+            meetings[index] = updated
+        } else {
+            meetings.insert(updated, at: 0)
+        }
+        return updated
+    }
 }
 
 struct MeetingSavePayload {
     let transcript: String
+    let segments: [MeetingTranscriptSegment]
     let language: String?
     let durationSeconds: Double?
     let source: String?
@@ -87,6 +107,11 @@ struct MeetingSavePayload {
 protocol MeetingsService {
     func listMeetings() async throws -> [StoredMeeting]
     func saveMeeting(_ payload: MeetingSavePayload) async throws -> StoredMeeting
+    func generateSummary(meetingId: String) async throws -> StoredMeeting
+}
+
+protocol MeetingAudioDownloadService {
+    func downloadAudio(meetingId: String) async throws -> URL
 }
 
 enum MeetingsServiceFactory {
@@ -95,6 +120,15 @@ enum MeetingsServiceFactory {
             return nil
         }
         return BackendMeetingsService(endpoint: endpoint)
+    }
+}
+
+enum MeetingAudioDownloadServiceFactory {
+    static func make() -> MeetingAudioDownloadService? {
+        guard let endpoint = AppConfig.meetingsEndpoint else {
+            return nil
+        }
+        return BackendMeetingAudioDownloadService(endpoint: endpoint)
     }
 }
 
@@ -140,6 +174,21 @@ struct BackendMeetingsService: MeetingsService {
         return try Self.decoder().decode(BackendMeetingRecord.self, from: data).storedMeeting
     }
 
+    func generateSummary(meetingId: String) async throws -> StoredMeeting {
+        var request = URLRequest(url: endpoint.appendingPathComponent(meetingId).appendingPathComponent("summary"))
+        request.httpMethod = "POST"
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw MeetingsServiceError.backendFailed
+        }
+
+        return try Self.decoder().decode(BackendMeetingRecord.self, from: data).storedMeeting
+    }
+
     private static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
@@ -157,8 +206,41 @@ struct BackendMeetingsService: MeetingsService {
     }
 }
 
+struct BackendMeetingAudioDownloadService: MeetingAudioDownloadService {
+    let endpoint: URL
+    private let session: URLSession
+
+    init(endpoint: URL, session: URLSession = .shared) {
+        self.endpoint = endpoint
+        self.session = session
+    }
+
+    func downloadAudio(meetingId: String) async throws -> URL {
+        if let localURL = MeetingAudioFileStore.load(meetingId: meetingId) {
+            return localURL
+        }
+
+        var request = URLRequest(url: endpoint.appendingPathComponent(meetingId).appendingPathComponent("audio"))
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (temporaryURL, response) = try await session.download(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw MeetingsServiceError.backendFailed
+        }
+
+        return try MeetingAudioFileStore.saveDownloadedAudio(
+            temporaryURL: temporaryURL,
+            meetingId: meetingId,
+            suggestedFilename: response.suggestedFilename
+        )
+    }
+}
+
 private struct BackendMeetingSaveBody: Encodable {
     let transcript: String
+    let segments: [MeetingTranscriptSegment]
     let language: String?
     let durationSeconds: Double?
     let source: String?
@@ -170,10 +252,13 @@ private struct BackendMeetingSaveBody: Encodable {
     let decisions: [String]
     let actionItems: [String]
     let followUps: [String]
+    let outline: [MeetingOutlineItem]
     let generatedAt: Date
+    let summaryStatus: String
 
     init(payload: MeetingSavePayload) {
         transcript = payload.transcript
+        segments = payload.segments
         language = payload.language
         durationSeconds = payload.durationSeconds
         source = payload.source
@@ -185,7 +270,9 @@ private struct BackendMeetingSaveBody: Encodable {
         decisions = payload.summary.decisions
         actionItems = payload.summary.actionItems
         followUps = payload.summary.followUps
+        outline = payload.summary.outline
         generatedAt = payload.summary.generatedAt
+        summaryStatus = payload.summary.summaryStatus
     }
 }
 
@@ -196,11 +283,13 @@ private struct BackendMeetingListResponse: Decodable {
 private struct BackendMeetingRecord: Decodable {
     let id: String
     let transcript: String
+    let segments: [MeetingTranscriptSegment]?
     let language: String?
     let durationSeconds: Double?
     let source: String?
     let deviceName: String?
     let locationName: String?
+    let hasAudio: Bool?
     let createdAt: Date
     let title: String
     let overview: String
@@ -208,17 +297,21 @@ private struct BackendMeetingRecord: Decodable {
     let decisions: [String]
     let actionItems: [String]
     let followUps: [String]
+    let outline: [MeetingOutlineItem]?
     let generatedAt: Date
+    let summaryStatus: String?
 
     var storedMeeting: StoredMeeting {
         StoredMeeting(
             id: id,
             transcript: transcript,
+            segments: segments ?? [],
             language: language,
             durationSeconds: durationSeconds,
             source: source,
             deviceName: deviceName,
             locationName: locationName,
+            hasAudio: hasAudio ?? false,
             createdAt: createdAt,
             summary: MeetingSummary(
                 title: title,
@@ -227,7 +320,9 @@ private struct BackendMeetingRecord: Decodable {
                 decisions: decisions,
                 actionItems: actionItems,
                 followUps: followUps,
-                generatedAt: generatedAt
+                outline: outline ?? [],
+                generatedAt: generatedAt,
+                summaryStatus: summaryStatus ?? "generated"
             )
         )
     }
@@ -241,6 +336,60 @@ enum MeetingsServiceError: LocalizedError {
         case .backendFailed:
             return "Meetings backend returned an error."
         }
+    }
+}
+
+enum MeetingAudioFileStore {
+    static func save(url: URL, meetingId: String) {
+        UserDefaults.standard.set(url.path, forKey: key(meetingId))
+    }
+
+    static func load(meetingId: String) -> URL? {
+        guard let path = UserDefaults.standard.string(forKey: key(meetingId)) else {
+            return nil
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            return nil
+        }
+        return URL(fileURLWithPath: path)
+    }
+
+    static func saveDownloadedAudio(
+        temporaryURL: URL,
+        meetingId: String,
+        suggestedFilename: String?
+    ) throws -> URL {
+        let directory = try audioDirectory()
+        let fileExtension = cleanExtension(from: suggestedFilename)
+        let destination = directory.appendingPathComponent("\(meetingId).\(fileExtension)")
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        save(url: destination, meetingId: meetingId)
+        return destination
+    }
+
+    private static func audioDirectory() throws -> URL {
+        let baseURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let directory = baseURL.appendingPathComponent("MeetingAudio", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private static func cleanExtension(from suggestedFilename: String?) -> String {
+        guard
+            let suggestedFilename,
+            !suggestedFilename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return "m4a"
+        }
+        let value = URL(fileURLWithPath: suggestedFilename).pathExtension
+        return value.isEmpty ? "m4a" : value
+    }
+
+    private static func key(_ meetingId: String) -> String {
+        "her.meeting.audioPath.\(meetingId)"
     }
 }
 

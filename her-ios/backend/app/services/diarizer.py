@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from app.schemas import TranscriptResponse, TranscriptSegment
+from app.services.audio_chunks import AudioChunk, should_chunk_audio, split_audio_chunks
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -25,12 +27,28 @@ class WhisperXTranscriber:
         self._diarize_attempted = False
 
     def transcribe(self, audio_path: Path) -> TranscriptResponse:
+        should_chunk, duration = should_chunk_audio(audio_path, self.settings)
+        if should_chunk and duration is not None and not self.settings.diarization_enabled:
+            return self._transcribe_chunks(audio_path, duration)
+        if should_chunk and duration is not None:
+            logger.info(
+                "Skipping external audio chunking because diarization needs full-file speaker context."
+            )
+        return self._transcribe_file(audio_path)
+
+    def _transcribe_file(self, audio_path: Path) -> TranscriptResponse:
         import whisperx
 
         model = self._get_model()
         audio = whisperx.load_audio(str(audio_path))
 
-        result = model.transcribe(audio, batch_size=4)
+        result = model.transcribe(
+            audio,
+            batch_size=max(1, self.settings.whisperx_batch_size),
+            language=self.settings.whisper_language or None,
+            task="transcribe",
+            chunk_size=max(5, self.settings.transcription_chunk_seconds),
+        )
         language = result.get("language") or self.settings.whisper_language
 
         try:
@@ -60,6 +78,54 @@ class WhisperXTranscriber:
             durationSeconds=duration,
             segments=segments,
         )
+
+    def _transcribe_chunks(self, audio_path: Path, duration_seconds: float) -> TranscriptResponse:
+        with split_audio_chunks(audio_path, self.settings, duration_seconds) as chunks:
+            if len(chunks) <= 1:
+                return self._transcribe_file(audio_path)
+
+            max_workers = max(1, self.settings.transcription_chunk_workers)
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="whisperx-chunk",
+            ) as executor:
+                results = list(executor.map(self._transcribe_chunk, chunks))
+
+        segments: list[TranscriptSegment] = []
+        fallback_text: list[str] = []
+        languages: list[str] = []
+        overlap = max(0.0, float(self.settings.transcription_chunk_overlap_seconds))
+        for chunk, result in sorted(results, key=lambda item: item[0].index):
+            if result.language:
+                languages.append(result.language)
+            keep_after = chunk.start + overlap if chunk.index > 0 else chunk.start
+            if result.segments:
+                for segment in result.segments:
+                    shifted = segment.model_copy(
+                        update={
+                            "start": segment.start + chunk.start,
+                            "end": segment.end + chunk.start,
+                        }
+                    )
+                    if shifted.start + 0.05 >= keep_after:
+                        segments.append(shifted)
+            elif result.transcript:
+                fallback_text.append(result.transcript)
+
+        transcript = (
+            self._format_transcript(segments)
+            if segments
+            else " ".join(fallback_text).strip()
+        )
+        return TranscriptResponse(
+            transcript=transcript,
+            language=languages[0] if languages else self.settings.whisper_language,
+            durationSeconds=duration_seconds,
+            segments=segments,
+        )
+
+    def _transcribe_chunk(self, chunk: AudioChunk) -> tuple[AudioChunk, TranscriptResponse]:
+        return chunk, self._transcribe_file(chunk.path)
 
     def _materialize_segments(self, raw_segments: list[dict]) -> list[TranscriptSegment]:
         out: list[TranscriptSegment] = []
@@ -129,7 +195,12 @@ class WhisperXTranscriber:
         if diarize_model is None:
             return None
         try:
-            return diarize_model(audio)
+            kwargs: dict[str, int] = {}
+            if self.settings.diarization_min_speakers > 0:
+                kwargs["min_speakers"] = self.settings.diarization_min_speakers
+            if self.settings.diarization_max_speakers > 0:
+                kwargs["max_speakers"] = self.settings.diarization_max_speakers
+            return diarize_model(audio, **kwargs)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Diarization failed: %s", exc)
             return None
