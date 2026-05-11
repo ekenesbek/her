@@ -111,7 +111,7 @@ protocol MeetingsService {
 }
 
 protocol MeetingAudioDownloadService {
-    func downloadAudio(meetingId: String) async throws -> URL
+    func downloadAudio(meetingId: String, locationName: String?) async throws -> URL
 }
 
 enum MeetingsServiceFactory {
@@ -217,7 +217,7 @@ struct BackendMeetingAudioDownloadService: MeetingAudioDownloadService {
         self.session = session
     }
 
-    func downloadAudio(meetingId: String) async throws -> URL {
+    func downloadAudio(meetingId: String, locationName: String?) async throws -> URL {
         if let localURL = MeetingAudioFileStore.load(meetingId: meetingId) {
             return localURL
         }
@@ -235,6 +235,7 @@ struct BackendMeetingAudioDownloadService: MeetingAudioDownloadService {
         return try MeetingAudioFileStore.saveDownloadedAudio(
             temporaryURL: temporaryURL,
             meetingId: meetingId,
+            locationName: locationName,
             suggestedFilename: response.suggestedFilename
         )
     }
@@ -350,41 +351,101 @@ enum MeetingsServiceError: LocalizedError {
 }
 
 enum MeetingAudioFileStore {
-    static func save(url: URL, meetingId: String) {
-        UserDefaults.standard.set(url.path, forKey: key(meetingId))
+    static func save(url: URL, meetingId: String, locationName: String? = nil) {
+        do {
+            let destination = try persistAudio(
+                from: url,
+                meetingId: meetingId,
+                locationName: locationName,
+                suggestedFilename: url.lastPathComponent
+            )
+            UserDefaults.standard.set(destination.path, forKey: key(meetingId))
+        } catch {
+            if FileManager.default.fileExists(atPath: url.path) {
+                UserDefaults.standard.set(url.path, forKey: key(meetingId))
+            }
+        }
     }
 
     static func load(meetingId: String) -> URL? {
-        guard let path = UserDefaults.standard.string(forKey: key(meetingId)) else {
-            return nil
+        if let path = UserDefaults.standard.string(forKey: key(meetingId)) {
+            if FileManager.default.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
         }
-        guard FileManager.default.fileExists(atPath: path) else {
-            return nil
+
+        if let discoveredURL = discoverPersistedAudio(meetingId: meetingId) {
+            UserDefaults.standard.set(discoveredURL.path, forKey: key(meetingId))
+            return discoveredURL
         }
-        return URL(fileURLWithPath: path)
+        return nil
     }
 
     static func saveDownloadedAudio(
         temporaryURL: URL,
         meetingId: String,
+        locationName: String?,
         suggestedFilename: String?
     ) throws -> URL {
-        let directory = try audioDirectory()
-        let fileExtension = cleanExtension(from: suggestedFilename)
-        let destination = directory.appendingPathComponent("\(meetingId).\(fileExtension)")
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.moveItem(at: temporaryURL, to: destination)
-        save(url: destination, meetingId: meetingId)
+        let destination = try persistAudio(
+            from: temporaryURL,
+            meetingId: meetingId,
+            locationName: locationName,
+            suggestedFilename: suggestedFilename
+        )
+        UserDefaults.standard.set(destination.path, forKey: key(meetingId))
         return destination
     }
 
-    private static func audioDirectory() throws -> URL {
+    private static func persistAudio(
+        from sourceURL: URL,
+        meetingId: String,
+        locationName: String?,
+        suggestedFilename: String?
+    ) throws -> URL {
+        let directory = try audioDirectory(locationName: locationName)
+        let fileExtension = cleanExtension(from: suggestedFilename)
+        let destination = directory.appendingPathComponent("\(meetingId).\(fileExtension)")
+        if sourceURL.standardizedFileURL == destination.standardizedFileURL {
+            return destination
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: sourceURL, to: destination)
+        return destination
+    }
+
+    private static func audioDirectory(locationName: String?) throws -> URL {
         let baseURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let directory = baseURL.appendingPathComponent("MeetingAudio", isDirectory: true)
+        let directory = baseURL
+            .appendingPathComponent("MeetingAudio", isDirectory: true)
+            .appendingPathComponent(locationDirectoryName(from: locationName), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private static func discoverPersistedAudio(meetingId: String) -> URL? {
+        let baseURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MeetingAudio", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: baseURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        for case let fileURL as URL in enumerator {
+            let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey])
+            guard values?.isRegularFile == true else {
+                continue
+            }
+            if fileURL.deletingPathExtension().lastPathComponent == meetingId {
+                return fileURL
+            }
+        }
+        return nil
     }
 
     private static func cleanExtension(from suggestedFilename: String?) -> String {
@@ -396,6 +457,28 @@ enum MeetingAudioFileStore {
         }
         let value = URL(fileURLWithPath: suggestedFilename).pathExtension
         return value.isEmpty ? "m4a" : value
+    }
+
+    private static func locationDirectoryName(from locationName: String?) -> String {
+        let trimmed = locationName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty, trimmed.lowercased() != "location unavailable" else {
+            return "unknown-location"
+        }
+
+        var result = ""
+        var lastWasSeparator = false
+        for scalar in trimmed.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                result.unicodeScalars.append(scalar)
+                lastWasSeparator = false
+            } else if !lastWasSeparator {
+                result.append("-")
+                lastWasSeparator = true
+            }
+        }
+
+        let normalized = result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return normalized.isEmpty ? "unknown-location" : String(normalized.prefix(80))
     }
 
     private static func key(_ meetingId: String) -> String {

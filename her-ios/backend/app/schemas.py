@@ -59,6 +59,7 @@ SummaryMode = Literal[
 class SummaryRequest(BaseModel):
     transcript: str = Field(min_length=1)
     summaryMode: SummaryMode = "reasoning"
+    language: str | None = None
 
 
 class SummaryResponse(BaseModel):

@@ -169,6 +169,24 @@ private final class LiveContextStore: NSObject, ObservableObject, CLLocationMana
         }
     }
 
+    func prepareForRecording() {
+        guard CLLocationManager.locationServicesEnabled() else {
+            locationName = nil
+            return
+        }
+
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            requestCurrentLocation()
+        case .notDetermined:
+            manager.requestWhenInUseAuthorization()
+        case .denied, .restricted:
+            locationName = nil
+        @unknown default:
+            locationName = nil
+        }
+    }
+
     func homeContextLabel(for date: Date) -> String {
         var parts = [Self.dayFormatter.string(from: date).lowercased()]
         if let locationName {
@@ -178,7 +196,11 @@ private final class LiveContextStore: NSObject, ObservableObject, CLLocationMana
     }
 
     var recordingLocationLabel: String {
-        locationName ?? "location unavailable"
+        locationName ?? fallbackLocationLabel
+    }
+
+    var recordingLocationName: String? {
+        locationName
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
@@ -195,6 +217,19 @@ private final class LiveContextStore: NSObject, ObservableObject, CLLocationMana
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         isRequestingLocation = false
+    }
+
+    private var fallbackLocationLabel: String {
+        switch manager.authorizationStatus {
+        case .notDetermined:
+            return "location permission pending"
+        case .denied, .restricted:
+            return "location unavailable"
+        case .authorizedAlways, .authorizedWhenInUse:
+            return "location pending"
+        @unknown default:
+            return "location unavailable"
+        }
     }
 
     private func requestCurrentLocation() {
@@ -410,6 +445,7 @@ struct ContentView: View {
 
         Task { @MainActor in
             wearablesBridge.refreshAudioRoute()
+            liveContext.prepareForRecording()
             let didStart = await viewModel.startRecording()
             guard didStart else {
                 return
@@ -435,7 +471,7 @@ struct ContentView: View {
         }
 
         Task { @MainActor in
-            await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationLabel)
+            await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName)
         }
     }
 }
@@ -1524,11 +1560,7 @@ private struct ConversationChatBubble: View {
             if message.role == .user {
                 Spacer(minLength: 36)
             }
-            Text(message.text.isEmpty ? "..." : message.text)
-                .font(.system(size: 14, weight: .regular, design: .serif))
-                .foregroundColor(message.role == .user ? AppTheme.bg : AppTheme.fg)
-                .lineSpacing(4)
-                .fixedSize(horizontal: false, vertical: true)
+            bubbleContent
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
                 .background(
@@ -1543,6 +1575,281 @@ private struct ConversationChatBubble: View {
                 Spacer(minLength: 36)
             }
         }
+    }
+
+    @ViewBuilder
+    private var bubbleContent: some View {
+        if message.role == .assistant {
+            FormattedChatMessage(text: displayText)
+        } else {
+            Text(displayText)
+                .font(.system(size: 14, weight: .regular, design: .serif))
+                .foregroundColor(AppTheme.bg)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var displayText: String {
+        message.text.isEmpty ? "..." : message.text
+    }
+}
+
+private struct FormattedChatMessage: View {
+    let text: String
+
+    private var blocks: [ChatDisplayBlock] {
+        ChatMessageFormatter.blocks(from: text)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .text(let value):
+                    ChatFormattedText(value)
+                case .table(let table):
+                    ChatTableBlock(table: table)
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct ChatFormattedText: View {
+    let value: String
+
+    init(_ value: String) {
+        self.value = value
+    }
+
+    var body: some View {
+        Group {
+            if let attributed = ChatMessageFormatter.attributedString(from: value) {
+                Text(attributed)
+            } else {
+                Text(ChatMessageFormatter.plainText(from: value))
+            }
+        }
+        .font(.system(size: 14, weight: .regular, design: .serif))
+        .foregroundColor(AppTheme.fg)
+        .lineSpacing(4)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct ChatTableBlock: View {
+    let table: ChatMarkdownTable
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(table.rows.enumerated()), id: \.offset) { index, row in
+                VStack(alignment: .leading, spacing: 7) {
+                    if let rowLabel = table.rowLabel(for: row) {
+                        MonoLabel(rowLabel, color: AppTheme.dim)
+                    }
+
+                    ForEach(row.indices, id: \.self) { columnIndex in
+                        let cell = row[columnIndex]
+                        if !cell.isEmpty && !table.shouldHideColumn(columnIndex, in: row) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let header = table.header(at: columnIndex), table.rows.count > 1 {
+                                    Text(header)
+                                        .font(.system(size: 12, weight: .semibold, design: .serif))
+                                        .foregroundColor(AppTheme.dim)
+                                }
+                                ChatFormattedText(cell)
+                            }
+                        }
+                    }
+                }
+
+                if index < table.rows.count - 1 {
+                    DividerLine()
+                }
+            }
+        }
+        .padding(.leading, 10)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(AppTheme.borderStrong)
+                .frame(width: 2)
+        }
+    }
+}
+
+private enum ChatDisplayBlock {
+    case text(String)
+    case table(ChatMarkdownTable)
+}
+
+private struct ChatMarkdownTable {
+    let headers: [String]
+    let rows: [[String]]
+
+    func header(at index: Int) -> String? {
+        guard headers.indices.contains(index) else {
+            return nil
+        }
+        let value = headers[index].trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    func rowLabel(for row: [String]) -> String? {
+        guard shouldHideColumn(0, in: row), let value = row.first?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return "№ \(value)"
+    }
+
+    func shouldHideColumn(_ index: Int, in row: [String]) -> Bool {
+        guard index == 0,
+              row.indices.contains(index),
+              let header = header(at: index) else {
+            return false
+        }
+        let normalized = header.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized == "#"
+            || normalized == "№"
+            || normalized == "no"
+            || normalized == "n"
+            || normalized.contains("номер")
+    }
+}
+
+private enum ChatMessageFormatter {
+    static func blocks(from text: String) -> [ChatDisplayBlock] {
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
+        var blocks: [ChatDisplayBlock] = []
+        var paragraph: [String] = []
+        var index = 0
+
+        func flushParagraph() {
+            let value = paragraph
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                blocks.append(.text(value))
+            }
+            paragraph.removeAll()
+        }
+
+        while index < lines.count {
+            let line = lines[index]
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                flushParagraph()
+                index += 1
+                continue
+            }
+
+            if isTableLine(line) {
+                flushParagraph()
+                var tableLines: [String] = []
+                while index < lines.count, isTableLine(lines[index]) {
+                    tableLines.append(lines[index])
+                    index += 1
+                }
+
+                if let table = table(from: tableLines) {
+                    blocks.append(.table(table))
+                } else {
+                    paragraph.append(contentsOf: tableLines)
+                }
+                continue
+            }
+
+            paragraph.append(line)
+            index += 1
+        }
+
+        flushParagraph()
+        return blocks.isEmpty ? [.text(text)] : blocks
+    }
+
+    static func attributedString(from text: String) -> AttributedString? {
+        let source = normalizedMarkdown(from: text)
+        guard !source.isEmpty else {
+            return nil
+        }
+        return try? AttributedString(markdown: source)
+    }
+
+    static func plainText(from text: String) -> String {
+        normalizedMarkdown(from: text)
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "`", with: "")
+            .replacingOccurrences(of: "### ", with: "")
+            .replacingOccurrences(of: "## ", with: "")
+            .replacingOccurrences(of: "# ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedMarkdown(from text: String) -> String {
+        text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isTableLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return false
+        }
+        return trimmed.filter { $0 == "|" }.count >= 2
+    }
+
+    private static func table(from lines: [String]) -> ChatMarkdownTable? {
+        let rows = lines
+            .map(splitTableRow)
+            .filter { !$0.isEmpty && !isSeparatorRow($0) }
+        guard rows.count >= 2 else {
+            return nil
+        }
+
+        let headers = rows[0]
+        let body = rows
+            .dropFirst()
+            .map { normalizeRow($0, count: headers.count) }
+            .filter { row in row.contains { !$0.isEmpty } }
+
+        guard !body.isEmpty else {
+            return nil
+        }
+        return ChatMarkdownTable(headers: headers, rows: Array(body))
+    }
+
+    private static func splitTableRow(_ line: String) -> [String] {
+        var trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("|") {
+            trimmed.removeFirst()
+        }
+        if trimmed.hasSuffix("|") {
+            trimmed.removeLast()
+        }
+        return trimmed
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map { plainText(from: String($0)) }
+    }
+
+    private static func isSeparatorRow(_ row: [String]) -> Bool {
+        guard !row.isEmpty else {
+            return false
+        }
+        return row.allSatisfy { cell in
+            !cell.isEmpty && cell.allSatisfy { character in
+                character == "-" || character == ":" || character == " "
+            }
+        }
+    }
+
+    private static func normalizeRow(_ row: [String], count: Int) -> [String] {
+        if row.count >= count {
+            return Array(row.prefix(row.count))
+        }
+        return row + Array(repeating: "", count: count - row.count)
     }
 }
 
@@ -2243,40 +2550,46 @@ private struct RecordingPostProcessDock: View {
     let onGenerateSummary: () -> Void
 
     var body: some View {
-        VStack(spacing: 10) {
-            if viewModel.phase == .transcribing || viewModel.phase == .summarizing {
-                HStack(spacing: 9) {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(AppTheme.fg)
-                    Text(viewModel.phase == .transcribing ? "Transcribing..." : "Generating summary...")
-                        .font(.system(size: 14, weight: .medium, design: .serif))
-                        .foregroundColor(AppTheme.fg)
-                    Spacer()
-                }
-                .padding(.horizontal, 22)
-            } else if viewModel.canGenerateSummary || viewModel.summary != nil {
-                Button(action: onGenerateSummary) {
-                    HStack(spacing: 8) {
-                        Image(systemName: viewModel.summary == nil ? "sparkles" : "checkmark")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text(viewModel.summaryButtonTitle)
-                            .font(.system(size: 16, weight: .medium, design: .serif))
+        Group {
+            if viewModel.phase == .transcribing {
+                EmptyView()
+            } else {
+                VStack(spacing: 10) {
+                    if viewModel.phase == .summarizing {
+                        HStack(spacing: 9) {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(AppTheme.fg)
+                            Text("Generating summary...")
+                                .font(.system(size: 14, weight: .medium, design: .serif))
+                                .foregroundColor(AppTheme.fg)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 22)
+                    } else if viewModel.canGenerateSummary || viewModel.summary != nil {
+                        Button(action: onGenerateSummary) {
+                            HStack(spacing: 8) {
+                                Image(systemName: viewModel.summary == nil ? "sparkles" : "checkmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text(viewModel.summaryButtonTitle)
+                                    .font(.system(size: 16, weight: .medium, design: .serif))
+                            }
+                            .foregroundColor(AppTheme.bg)
+                            .frame(maxWidth: .infinity, minHeight: 54)
+                            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.fg))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .disabled(!viewModel.canGenerateSummary)
+                        .opacity(viewModel.canGenerateSummary ? 1 : 0.55)
+                        .padding(.horizontal, 22)
                     }
-                    .foregroundColor(AppTheme.bg)
-                    .frame(maxWidth: .infinity, minHeight: 54)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.fg))
                 }
-                .buttonStyle(PlainButtonStyle())
-                .disabled(!viewModel.canGenerateSummary)
-                .opacity(viewModel.canGenerateSummary ? 1 : 0.55)
-                .padding(.horizontal, 22)
+                .padding(.top, 12)
+                .padding(.bottom, 24)
+                .background(AppTheme.bg)
+                .overlay(alignment: .top) { DividerLine() }
             }
         }
-        .padding(.top, 12)
-        .padding(.bottom, 24)
-        .background(AppTheme.bg)
-        .overlay(alignment: .top) { DividerLine() }
     }
 }
 
@@ -4099,82 +4412,108 @@ private struct ConversationAudioRow: View {
     @State private var scrubberValue: Double = 0
     @State private var isScrubbing = false
     @State private var wasPlayingBeforeScrub = false
+    @State private var controlsExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
             DividerLine()
-            VStack(spacing: 12) {
-                HStack(spacing: 18) {
-                    Button(action: { playback.toggleFullPlayback(for: meeting) }) {
-                        ZStack {
-                            if playback.isLoading {
-                                ProgressView()
-                                    .tint(AppTheme.fg)
-                            } else {
-                                Image(systemName: playbackIcon)
-                            }
-                        }
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(canPlay ? AppTheme.fg : AppTheme.dim)
-                            .frame(width: 48, height: 48)
-                            .background(Circle().fill(AppTheme.bgSoft))
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .disabled(!canPlay || playback.isLoading)
-
-                    Text(MeetingTimeFormatter.audioDuration(playbackDuration))
-                        .font(.system(size: 21, weight: .regular, design: .monospaced))
-                        .foregroundColor(AppTheme.fg)
+            VStack(spacing: controlsExpanded ? 14 : 0) {
+                HStack(alignment: .center, spacing: 12) {
+                    Text("\(MeetingTimeFormatter.fullTimestamp(isScrubbing ? scrubberValue : playback.currentTime)) / \(MeetingTimeFormatter.fullTimestamp(playbackDuration))")
+                        .font(.system(size: 16, weight: .regular, design: .monospaced))
+                        .foregroundColor(AppTheme.muted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
 
                     Spacer(minLength: 0)
 
-                    Image(systemName: "waveform")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(AppTheme.dim)
+                    Button(action: { withAnimation(.easeInOut(duration: 0.2)) { controlsExpanded.toggle() } }) {
+                        Image(systemName: controlsExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(AppTheme.fg)
+                            .frame(width: 34, height: 34)
+                            .background(Circle().fill(AppTheme.bgSoft))
+                            .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+                    }
+                    .buttonStyle(PlainButtonStyle())
                 }
 
-                VStack(spacing: 4) {
-                    Slider(
-                        value: Binding(
-                            get: { isScrubbing ? scrubberValue : playback.currentTime },
-                            set: { value in
-                                scrubberValue = value
-                                playback.previewSeek(to: value)
-                            }
-                        ),
-                        in: 0...sliderUpperBound,
-                        onEditingChanged: { editing in
-                            if editing {
+                if controlsExpanded {
+                    VStack(spacing: 12) {
+                        AudioWaveformScrubber(
+                            value: isScrubbing ? scrubberValue : playback.currentTime,
+                            duration: sliderUpperBound,
+                            samples: playback.waveformSamples,
+                            isEnabled: canPlay && !playback.isLoading,
+                            onScrubStart: {
                                 isScrubbing = true
                                 wasPlayingBeforeScrub = playback.isPlaying
-                            } else {
-                                let target = scrubberValue
+                            },
+                            onScrubChanged: { value in
+                                scrubberValue = value
+                                playback.previewSeek(to: value)
+                            },
+                            onScrubEnded: { value in
+                                scrubberValue = value
                                 isScrubbing = false
                                 playback.seek(
-                                    to: target,
+                                    to: value,
                                     meeting: meeting,
                                     resumePlayback: wasPlayingBeforeScrub
                                 )
                             }
-                        }
-                    )
-                    .tint(AppTheme.fg)
-                    .disabled(!canPlay || playback.isLoading)
+                        )
 
-                    HStack {
-                        Text(MeetingTimeFormatter.timestamp(isScrubbing ? scrubberValue : playback.currentTime))
-                        Spacer()
-                        Text(MeetingTimeFormatter.timestamp(playbackDuration))
+                        HStack(spacing: 16) {
+                            AudioTransportButton(
+                                systemName: playbackIcon,
+                                size: .large,
+                                disabled: !canPlay || playback.isLoading
+                            ) {
+                                playback.toggleFullPlayback(for: meeting)
+                            }
+
+                            AudioTransportButton(
+                                systemName: "gobackward.15",
+                                disabled: !canPlay || playback.isLoading
+                            ) {
+                                playback.skip(by: -15, meeting: meeting)
+                            }
+
+                            AudioTransportButton(
+                                systemName: "goforward.15",
+                                disabled: !canPlay || playback.isLoading
+                            ) {
+                                playback.skip(by: 15, meeting: meeting)
+                            }
+
+                            Button(action: { playback.cyclePlaybackRate() }) {
+                                VStack(spacing: 1) {
+                                    Image(systemName: "speedometer")
+                                        .font(.system(size: 15, weight: .medium))
+                                    Text(playback.playbackRateLabel)
+                                        .font(.system(size: 8, weight: .semibold, design: .rounded))
+                                }
+                                .foregroundColor(canPlay ? AppTheme.fg : AppTheme.dim)
+                                .frame(width: 38, height: 38)
+                                .background(Circle().fill(AppTheme.bgSoft))
+                                .overlay(Circle().stroke(AppTheme.borderStrong.opacity(0.75), lineWidth: 1))
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            .disabled(!canPlay)
+
+                            Spacer(minLength: 0)
+                        }
                     }
-                    .font(.system(size: 11, weight: .regular, design: .monospaced))
-                    .foregroundColor(AppTheme.dim)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
-            .padding(.vertical, 18)
+            .padding(.vertical, controlsExpanded ? 18 : 14)
             DividerLine()
         }
         .onAppear {
             scrubberValue = playback.currentTime
+            playback.loadLocalWaveformIfAvailable(for: meeting)
         }
         .onChange(of: playback.currentTime) { newValue in
             if !isScrubbing {
@@ -4200,6 +4539,190 @@ private struct ConversationAudioRow: View {
             return "play.slash.fill"
         }
         return playback.isPlaying ? "pause.fill" : "play.fill"
+    }
+}
+
+private struct AudioWaveformScrubber: View {
+    let value: Double
+    let duration: Double
+    let samples: [CGFloat]
+    let isEnabled: Bool
+    let onScrubStart: () -> Void
+    let onScrubChanged: (Double) -> Void
+    let onScrubEnded: (Double) -> Void
+
+    @State private var isDragging = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(1, proxy.size.width)
+            let progress = progressRatio
+            ZStack(alignment: .leading) {
+                waveformCanvas(
+                    samples: displaySamples,
+                    progress: progress
+                )
+                .padding(.vertical, 6)
+
+                Capsule()
+                    .fill(AppTheme.fg)
+                    .frame(width: 2, height: 52)
+                    .offset(x: min(max(0, width * progress), max(0, width - 2)))
+            }
+            .opacity(isEnabled ? 1 : 0.45)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        guard isEnabled else {
+                            return
+                        }
+                        if !isDragging {
+                            isDragging = true
+                            onScrubStart()
+                        }
+                        onScrubChanged(time(at: gesture.location.x, width: width))
+                    }
+                    .onEnded { gesture in
+                        guard isEnabled else {
+                            isDragging = false
+                            return
+                        }
+                        isDragging = false
+                        onScrubEnded(time(at: gesture.location.x, width: width))
+                    }
+            )
+        }
+        .frame(height: 62)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Audio position")
+        .accessibilityValue(MeetingTimeFormatter.timestamp(value))
+    }
+
+    private var progressRatio: CGFloat {
+        guard duration > 0, value.isFinite else {
+            return 0
+        }
+        return CGFloat(min(max(value / duration, 0), 1))
+    }
+
+    private var displaySamples: [CGFloat] {
+        if !samples.isEmpty {
+            return samples
+        }
+        return Self.placeholderSamples
+    }
+
+    private func time(at xPosition: CGFloat, width: CGFloat) -> Double {
+        let ratio = min(max(xPosition / max(1, width), 0), 1)
+        return Double(ratio) * max(0, duration)
+    }
+
+    private func waveformCanvas(
+        samples: [CGFloat],
+        progress: CGFloat
+    ) -> some View {
+        Canvas { context, canvasSize in
+            drawWaveform(
+                in: context,
+                size: canvasSize,
+                samples: samples,
+                color: AppTheme.dim.opacity(0.24),
+                clipProgress: 1
+            )
+            drawWaveform(
+                in: context,
+                size: canvasSize,
+                samples: samples,
+                color: AppTheme.fg,
+                clipProgress: progress
+            )
+        }
+    }
+
+    private func drawWaveform(
+        in context: GraphicsContext,
+        size: CGSize,
+        samples: [CGFloat],
+        color: Color,
+        clipProgress: CGFloat
+    ) {
+        guard !samples.isEmpty, size.width > 0, size.height > 0 else {
+            return
+        }
+
+        var drawingContext = context
+        drawingContext.clip(
+            to: Path(
+                CGRect(
+                    x: 0,
+                    y: 0,
+                    width: size.width * min(max(clipProgress, 0), 1),
+                    height: size.height
+                )
+            )
+        )
+
+        let spacing: CGFloat = 2
+        let barWidth = max(2, (size.width - spacing * CGFloat(samples.count - 1)) / CGFloat(samples.count))
+        for index in samples.indices {
+            let amplitude = min(max(samples[index], 0.06), 1)
+            let height = max(4, size.height * amplitude)
+            let rect = CGRect(
+                x: CGFloat(index) * (barWidth + spacing),
+                y: (size.height - height) / 2,
+                width: barWidth,
+                height: height
+            )
+            drawingContext.fill(
+                Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                with: .color(color)
+            )
+        }
+    }
+
+    private static let placeholderSamples: [CGFloat] = (0..<72).map { index in
+        let primary = abs(sin(Double(index) * 0.41))
+        let secondary = abs(cos(Double(index) * 0.17 + 0.8))
+        return CGFloat(0.12 + min(0.86, primary * 0.58 + secondary * 0.24))
+    }
+}
+
+private struct AudioTransportButton: View {
+    enum Size {
+        case standard
+        case large
+    }
+
+    let systemName: String
+    var size: Size = .standard
+    var disabled = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                if size == .large {
+                    Circle()
+                        .fill(AppTheme.bgSoft)
+                }
+                Image(systemName: systemName)
+                    .font(.system(size: iconSize, weight: .medium))
+                    .foregroundColor(disabled ? AppTheme.dim : AppTheme.fg)
+            }
+            .frame(width: buttonSize, height: buttonSize)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .disabled(disabled)
+        .accessibilityHidden(disabled)
+    }
+
+    private var buttonSize: CGFloat {
+        size == .large ? 44 : 38
+    }
+
+    private var iconSize: CGFloat {
+        size == .large ? 18 : 17
     }
 }
 
@@ -4282,10 +4805,14 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
+    @Published private(set) var waveformSamples: [CGFloat] = []
+    @Published private(set) var playbackRate: Double = 1
     @Published private(set) var errorMessage: String?
 
     private var player: AVAudioPlayer?
     private var loadedMeetingID: String?
+    private var waveformMeetingID: String?
+    private var waveformTask: Task<Void, Never>?
     private var stopAt: Double?
     private var timer: Timer?
     private let downloader: MeetingAudioDownloadService?
@@ -4305,6 +4832,36 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         return max(0, meeting.durationSeconds ?? 0)
     }
 
+    var playbackRateLabel: String {
+        switch playbackRate {
+        case 1.25:
+            return "1.25x"
+        case 1.5:
+            return "1.5x"
+        case 2:
+            return "2x"
+        default:
+            return "1x"
+        }
+    }
+
+    func cyclePlaybackRate() {
+        let rates = [1.0, 1.25, 1.5, 2.0]
+        let currentIndex = rates.firstIndex { abs($0 - playbackRate) < 0.01 } ?? 0
+        playbackRate = rates[(currentIndex + 1) % rates.count]
+        if let player {
+            applyPlaybackRate(to: player)
+        }
+    }
+
+    func loadLocalWaveformIfAvailable(for meeting: StoredMeeting) {
+        guard waveformMeetingID != meeting.id,
+              let localURL = MeetingAudioFileStore.load(meetingId: meeting.id) else {
+            return
+        }
+        loadWaveform(from: localURL, meetingID: meeting.id)
+    }
+
     func previewSeek(to seconds: Double) {
         currentTime = clampedTime(seconds)
     }
@@ -4321,7 +4878,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
             do {
                 let player = try await preparePlayer(for: meeting)
                 stopAt = nil
-                player.play()
+                play(player)
                 isPlaying = true
                 startTimer()
             } catch {
@@ -4340,7 +4897,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                 player.currentTime = max(0, chunk.start)
                 currentTime = player.currentTime
                 stopAt = max(chunk.start, chunk.end)
-                player.play()
+                play(player)
                 isPlaying = true
                 startTimer()
             } catch {
@@ -4359,7 +4916,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                 player.currentTime = clampedTime(seconds)
                 currentTime = player.currentTime
                 if resumePlayback {
-                    player.play()
+                    play(player)
                     isPlaying = true
                     startTimer()
                 } else {
@@ -4371,12 +4928,37 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         }
     }
 
+    func skip(by seconds: Double, meeting: StoredMeeting) {
+        Task { @MainActor in
+            guard canPlay(meeting) else {
+                return
+            }
+            do {
+                let player = try await preparePlayer(for: meeting)
+                stopAt = nil
+                player.currentTime = clampedTime(player.currentTime + seconds)
+                currentTime = player.currentTime
+                if isPlaying {
+                    play(player)
+                    startTimer()
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     func stop() {
         timer?.invalidate()
         timer = nil
         player?.stop()
+        try? Self.deactivatePlaybackAudioSession()
         player = nil
         loadedMeetingID = nil
+        waveformMeetingID = nil
+        waveformTask?.cancel()
+        waveformTask = nil
+        waveformSamples = []
         stopAt = nil
         currentTime = 0
         duration = 0
@@ -4396,23 +4978,65 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         if let localURL = MeetingAudioFileStore.load(meetingId: meeting.id) {
             audioURL = localURL
         } else if meeting.hasAudio, let downloader {
-            audioURL = try await downloader.downloadAudio(meetingId: meeting.id)
+            audioURL = try await downloader.downloadAudio(meetingId: meeting.id, locationName: meeting.locationName)
         } else {
             throw MeetingsServiceError.backendFailed
         }
 
+        try Self.configurePlaybackAudioSession()
         let newPlayer = try AVAudioPlayer(contentsOf: audioURL)
         newPlayer.delegate = self
+        applyPlaybackRate(to: newPlayer)
         newPlayer.prepareToPlay()
         player = newPlayer
         loadedMeetingID = meeting.id
         duration = newPlayer.duration
         currentTime = newPlayer.currentTime
+        loadWaveform(from: audioURL, meetingID: meeting.id)
         return newPlayer
+    }
+
+    private func loadWaveform(from audioURL: URL, meetingID: String) {
+        waveformTask?.cancel()
+        waveformMeetingID = meetingID
+        waveformTask = Task { [weak self] in
+            let samples = await AudioWaveformAnalyzer.samples(for: audioURL, targetSampleCount: 96)
+            await MainActor.run {
+                guard let self,
+                      !Task.isCancelled,
+                      self.waveformMeetingID == meetingID else {
+                    return
+                }
+                self.waveformSamples = samples
+            }
+        }
+    }
+
+    private func applyPlaybackRate(to player: AVAudioPlayer) {
+        player.enableRate = true
+        player.rate = Float(playbackRate)
+    }
+
+    private func play(_ player: AVAudioPlayer) {
+        try? Self.configurePlaybackAudioSession()
+        applyPlaybackRate(to: player)
+        player.play()
+        player.rate = Float(playbackRate)
+    }
+
+    private static func configurePlaybackAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playback, mode: .default, options: [])
+        try session.setActive(true)
+    }
+
+    private static func deactivatePlaybackAudioSession() throws {
+        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func pause() {
         player?.pause()
+        try? Self.deactivatePlaybackAudioSession()
         timer?.invalidate()
         timer = nil
         isPlaying = false
@@ -4441,6 +5065,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
             timer?.invalidate()
             timer = nil
             isPlaying = false
+            try? Self.deactivatePlaybackAudioSession()
         } else {
             isPlaying = player.isPlaying
         }
@@ -4458,6 +5083,68 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
             self.stopAt = nil
             self.isPlaying = false
             self.currentTime = player.currentTime
+            try? Self.deactivatePlaybackAudioSession()
+        }
+    }
+}
+
+private enum AudioWaveformAnalyzer {
+    static func samples(for audioURL: URL, targetSampleCount: Int) async -> [CGFloat] {
+        await Task.detached(priority: .utility) {
+            readSamples(for: audioURL, targetSampleCount: targetSampleCount)
+        }.value
+    }
+
+    private static func readSamples(for audioURL: URL, targetSampleCount: Int) -> [CGFloat] {
+        let bucketCount = max(24, targetSampleCount)
+        do {
+            let audioFile = try AVAudioFile(forReading: audioURL)
+            let totalFrames = max(1, Int(audioFile.length))
+            let processingFormat = audioFile.processingFormat
+            let readCapacity: AVAudioFrameCount = 8_192
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: processingFormat,
+                frameCapacity: readCapacity
+            ) else {
+                return []
+            }
+
+            var peaks = Array(repeating: Float(0), count: bucketCount)
+            var absoluteFrameIndex = 0
+            while audioFile.framePosition < audioFile.length {
+                if Task.isCancelled {
+                    return []
+                }
+                try audioFile.read(into: buffer, frameCount: readCapacity)
+                let frameLength = Int(buffer.frameLength)
+                guard frameLength > 0, let channelData = buffer.floatChannelData else {
+                    break
+                }
+
+                let channelCount = max(1, Int(processingFormat.channelCount))
+                for frameIndex in 0..<frameLength {
+                    var amplitude: Float = 0
+                    for channelIndex in 0..<channelCount {
+                        amplitude = max(amplitude, abs(channelData[channelIndex][frameIndex]))
+                    }
+                    let bucketIndex = min(
+                        bucketCount - 1,
+                        (absoluteFrameIndex + frameIndex) * bucketCount / totalFrames
+                    )
+                    peaks[bucketIndex] = max(peaks[bucketIndex], amplitude)
+                }
+                absoluteFrameIndex += frameLength
+            }
+
+            guard let maxPeak = peaks.max(), maxPeak > 0 else {
+                return []
+            }
+            return peaks.map { peak in
+                let normalized = sqrt(Double(peak / maxPeak))
+                return CGFloat(min(max(normalized, 0.08), 1))
+            }
+        } catch {
+            return []
         }
     }
 }
@@ -4575,6 +5262,14 @@ private enum MeetingTimeFormatter {
 
     static func timestamp(_ seconds: Double) -> String {
         clock(seconds)
+    }
+
+    static func fullTimestamp(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        return String(format: "%02d:%02d:%02d", hours, minutes, secs)
     }
 
     private static func clock(_ seconds: Double) -> String {

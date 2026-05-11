@@ -70,7 +70,7 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>Microphone access is needed to record meetings for transcription and summaries.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Location is used to add optional city-level context to conversation summaries.</string>
+    <string>Location is used to tag recordings, save meeting audio by place, and add optional city-level context to summaries.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Local network access is needed to reach the meeting backend running on your Mac during MVP testing.</string>
     <key>NSAppTransportSecurity</key>

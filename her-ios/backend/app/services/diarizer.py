@@ -64,14 +64,14 @@ class WhisperXTranscriber:
         except Exception as exc:  # noqa: BLE001
             logger.warning("whisperx alignment skipped: %s", exc)
 
-        diarize_segments = self._diarize(audio)
+        duration = float(audio.shape[-1]) / 16_000 if hasattr(audio, "shape") else None
+        diarize_segments = self._diarize_with_single_speaker_retry(audio, duration)
         if diarize_segments is not None:
             result = whisperx.assign_word_speakers(diarize_segments, result)
             self._assign_diarization_speakers(result, diarize_segments)
 
         segments = self._materialize_segments(result.get("segments", []))
         transcript_text = self._format_transcript(segments)
-        duration = float(audio.shape[-1]) / 16_000 if hasattr(audio, "shape") else None
 
         return TranscriptResponse(
             transcript=transcript_text,
@@ -379,7 +379,89 @@ class WhisperXTranscriber:
                 self._align_models[language_code] = cached
             return cached
 
-    def _diarize(self, audio):
+    def _diarize_with_single_speaker_retry(self, audio, duration_seconds: float | None):
+        diarize_segments = self._diarize(audio)
+        if not self._should_retry_single_speaker_diarization(diarize_segments, duration_seconds):
+            return diarize_segments
+
+        min_speakers = 2
+        max_speakers = max(min_speakers, self.settings.diarization_single_speaker_retry_max_speakers)
+        retry_segments = self._diarize(audio, min_speakers=min_speakers, max_speakers=max_speakers)
+        if self._retry_diarization_is_usable(
+            retry_segments,
+            original_segments=diarize_segments,
+            duration_seconds=duration_seconds,
+        ):
+            logger.info(
+                "Accepted single-speaker diarization retry with min_speakers=%s max_speakers=%s.",
+                min_speakers,
+                max_speakers,
+            )
+            return retry_segments
+
+        logger.info("Rejected single-speaker diarization retry; keeping auto diarization result.")
+        return diarize_segments
+
+    def _should_retry_single_speaker_diarization(
+        self,
+        diarize_segments: Any,
+        duration_seconds: float | None,
+    ) -> bool:
+        if not self.settings.diarization_single_speaker_retry_enabled:
+            return False
+        if self.settings.diarization_min_speakers > 0 or self.settings.diarization_max_speakers > 0:
+            return False
+        min_duration = self.settings.diarization_single_speaker_retry_min_duration_seconds
+        if duration_seconds is None or duration_seconds < min_duration:
+            return False
+
+        speaker_seconds = self._diarization_speaker_seconds(diarize_segments)
+        min_speaker_seconds = self._retry_min_speaker_seconds(duration_seconds)
+        strong_speakers = [
+            speaker for speaker, seconds in speaker_seconds.items() if seconds >= min_speaker_seconds
+        ]
+        return len(strong_speakers) <= 1
+
+    def _retry_diarization_is_usable(
+        self,
+        retry_segments: Any,
+        *,
+        original_segments: Any,
+        duration_seconds: float | None,
+    ) -> bool:
+        retry_seconds = self._diarization_speaker_seconds(retry_segments)
+        min_speaker_seconds = self._retry_min_speaker_seconds(duration_seconds)
+        strong_speakers = [
+            speaker for speaker, seconds in retry_seconds.items() if seconds >= min_speaker_seconds
+        ]
+        if len(strong_speakers) < 2:
+            return False
+
+        original_coverage = sum(self._diarization_speaker_seconds(original_segments).values())
+        retry_coverage = sum(retry_seconds.values())
+        if original_coverage > 0 and retry_coverage < original_coverage * 0.75:
+            return False
+        return retry_coverage > 0
+
+    def _retry_min_speaker_seconds(self, duration_seconds: float | None) -> float:
+        configured = max(0.0, self.settings.diarization_single_speaker_retry_min_speaker_seconds)
+        if duration_seconds is None:
+            return configured
+        return max(configured, duration_seconds * 0.01)
+
+    def _diarization_speaker_seconds(self, diarize_segments: Any) -> dict[str, float]:
+        speaker_seconds: dict[str, float] = {}
+        for start, end, speaker in self._diarization_intervals(diarize_segments):
+            speaker_seconds[speaker] = speaker_seconds.get(speaker, 0.0) + max(0.0, end - start)
+        return speaker_seconds
+
+    def _diarize(
+        self,
+        audio,
+        *,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ):
         if not self.settings.diarization_enabled:
             return None
         diarize_model = self._get_diarize_model()
@@ -387,10 +469,16 @@ class WhisperXTranscriber:
             return None
         try:
             kwargs: dict[str, int] = {}
-            if self.settings.diarization_min_speakers > 0:
-                kwargs["min_speakers"] = self.settings.diarization_min_speakers
-            if self.settings.diarization_max_speakers > 0:
-                kwargs["max_speakers"] = self.settings.diarization_max_speakers
+            resolved_min_speakers = (
+                min_speakers if min_speakers is not None else self.settings.diarization_min_speakers
+            )
+            resolved_max_speakers = (
+                max_speakers if max_speakers is not None else self.settings.diarization_max_speakers
+            )
+            if resolved_min_speakers > 0:
+                kwargs["min_speakers"] = resolved_min_speakers
+            if resolved_max_speakers > 0:
+                kwargs["max_speakers"] = resolved_max_speakers
             return diarize_model(audio, **kwargs)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Diarization failed: %s", exc)

@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     diarization_enabled: bool = True
     diarization_min_speakers: int = 0
     diarization_max_speakers: int = 0
+    diarization_single_speaker_retry_enabled: bool = True
+    diarization_single_speaker_retry_min_duration_seconds: int = 60
+    diarization_single_speaker_retry_min_speaker_seconds: float = 3.0
+    diarization_single_speaker_retry_max_speakers: int = 6
     voice_profile_match_threshold: float = 0.62
 
     @field_validator("transcription_provider", mode="before")

@@ -43,6 +43,9 @@ def health() -> dict[str, Any]:
         "whisperModel": settings.whisper_model,
         "whisperDevice": settings.whisper_device,
         "diarizationEnabled": settings.diarization_enabled,
+        "diarizationMinSpeakers": settings.diarization_min_speakers,
+        "diarizationMaxSpeakers": settings.diarization_max_speakers,
+        "singleSpeakerRetryEnabled": settings.diarization_single_speaker_retry_enabled,
         "huggingFaceConfigured": bool(settings.huggingface_token),
     }
 

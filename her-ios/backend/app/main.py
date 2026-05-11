@@ -41,7 +41,11 @@ from app.services.auth import (
 )
 from app.services.meeting_contents import build_outline_from_segments
 from app.services.storage import MeetingStore
-from app.services.summarizer import SummaryService, SummaryUnavailableError
+from app.services.summarizer import (
+    SummaryService,
+    SummaryUnavailableError,
+    fallback_overview_from_transcript,
+)
 from app.services.transcription_router import build_transcriber
 from app.services.voice_profiles import VoiceEmbedder
 from app.settings import get_settings
@@ -304,7 +308,11 @@ def create_summary(
     _: UserResponse = Depends(current_user),
 ) -> SummaryResponse:
     try:
-        return summarizer.summarize(request.transcript, mode=request.summaryMode)
+        return summarizer.summarize(
+            request.transcript,
+            mode=request.summaryMode,
+            language=request.language,
+        )
     except SummaryUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -333,6 +341,7 @@ async def process_meeting(
             user.id,
             transcript.transcript,
             transcript.segments,
+            transcript.language,
             location_name,
             summary_mode,
         )
@@ -359,7 +368,7 @@ async def process_meeting(
             createdAt=now,
         )
         store.save(meeting, user_id=user.id)
-        stored_audio_path = persist_meeting_audio(path, user.id, meeting.id)
+        stored_audio_path = persist_meeting_audio(path, user.id, meeting.id, location_name)
         audio_stored = True
         content_type = mimetypes.guess_type(stored_audio_path.name)[0] or audio.content_type
         store.attach_meeting_audio(meeting.id, user.id, stored_audio_path, content_type)
@@ -474,6 +483,7 @@ def generate_meeting_summary(
             meeting.transcript,
             meeting.segments,
             mode=payload.summaryMode if payload else "reasoning",
+            language=meeting.language,
         )
     except SummaryUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -581,6 +591,7 @@ def run_meeting_job(job_id: str) -> None:
             job["user_id"],
             transcript.transcript,
             transcript.segments,
+            transcript.language,
             job.get("location_name"),
             job.get("summary_mode", "reasoning"),
         )
@@ -607,7 +618,7 @@ def run_meeting_job(job_id: str) -> None:
             createdAt=now,
         )
         store.save(meeting, user_id=job["user_id"])
-        stored_audio_path = persist_meeting_audio(audio_path, job["user_id"], meeting.id)
+        stored_audio_path = persist_meeting_audio(audio_path, job["user_id"], meeting.id, job.get("location_name"))
         audio_stored = True
         content_type = mimetypes.guess_type(stored_audio_path.name)[0]
         store.attach_meeting_audio(meeting.id, job["user_id"], stored_audio_path, content_type)
@@ -639,9 +650,14 @@ async def persist_job_upload(upload: UploadFile) -> Path:
     return path
 
 
-def persist_meeting_audio(audio_path: Path, user_id: str, meeting_id: str) -> Path:
+def persist_meeting_audio(
+    audio_path: Path,
+    user_id: str,
+    meeting_id: str,
+    location_name: str | None = None,
+) -> Path:
     suffix = audio_path.suffix or ".m4a"
-    audio_dir = settings.data_dir / "meeting-audio" / user_id
+    audio_dir = settings.data_dir / "meeting-audio" / user_id / location_bucket(location_name)
     audio_dir.mkdir(parents=True, exist_ok=True)
     destination = audio_dir / f"{meeting_id}{suffix}"
     if audio_path.resolve() == destination.resolve():
@@ -650,21 +666,47 @@ def persist_meeting_audio(audio_path: Path, user_id: str, meeting_id: str) -> Pa
     return destination
 
 
+def location_bucket(location_name: str | None) -> str:
+    clean_location = (location_name or "").strip()
+    if not clean_location or clean_location.lower() == "location unavailable":
+        return "unknown-location"
+
+    bucket = []
+    last_was_separator = False
+    for character in clean_location:
+        if character.isalnum():
+            bucket.append(character)
+            last_was_separator = False
+        elif not last_was_separator:
+            bucket.append("-")
+            last_was_separator = True
+
+    value = "".join(bucket).strip("-")
+    return (value or "unknown-location")[:80]
+
+
 def summarize_or_make_unavailable(
     user_id: str,
     transcript: str,
     segments,
+    language: str | None,
     location_name: str | None,
     summary_mode: SummaryMode = "reasoning",
 ) -> SummaryResponse:
     try:
-        return summarizer.summarize(transcript, segments, mode=summary_mode)
+        return summarizer.summarize(
+            transcript,
+            segments,
+            mode=summary_mode,
+            language=language,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("AI summary unavailable; saving meeting without summary: %s", exc)
         title = store.next_meeting_title(user_id, fallback_meeting_title(location_name))
+        overview = fallback_overview_from_transcript(transcript)
         return SummaryResponse(
             title=title,
-            overview="Summary unavailable until AI is available.",
+            overview=overview or title,
             keyTopics=[],
             decisions=[],
             actionItems=[],

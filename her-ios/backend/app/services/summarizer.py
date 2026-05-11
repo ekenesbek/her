@@ -35,9 +35,16 @@ class SummaryService:
         transcript: str,
         segments: list[TranscriptSegment] | None = None,
         mode: SummaryMode = "reasoning",
+        language: str | None = None,
     ) -> SummaryResponse:
+        formatted_transcript = format_transcript_for_summary(transcript, segments)
+        primary_language = primary_dialogue_language(formatted_transcript, language)
         if mode == "full_transcript":
-            return full_transcript_summary(transcript, segments)
+            return full_transcript_summary(
+                transcript,
+                segments,
+                language=primary_language,
+            )
 
         if not self.client:
             raise SummaryUnavailableError("AI summary is not configured.")
@@ -47,17 +54,16 @@ class SummaryService:
             messages=[
                 {
                     "role": "system",
-                    "content": summary_system_prompt(mode),
+                    "content": summary_system_prompt(mode, primary_language),
                 },
                 {
                     "role": "user",
-                    "content": format_transcript_for_summary(transcript, segments),
+                    "content": formatted_transcript,
                 },
             ],
         )
 
         content = response.choices[0].message.content
-        formatted_transcript = format_transcript_for_summary(transcript, segments)
         payload = parse_summary_payload(
             content or "",
             formatted_transcript,
@@ -206,10 +212,20 @@ SUMMARY_MODE_INSTRUCTIONS: dict[SummaryMode, str] = {
 }
 
 
-def summary_system_prompt(mode: SummaryMode) -> str:
+SUMMARY_LANGUAGE_NAMES = {
+    "en": "English",
+    "ru": "Russian",
+    "kk": "Kazakh",
+}
+
+KAZAKH_CYRILLIC_CHARS = set("ӘәҒғҚқҢңӨөҰұҮүҺһІі")
+
+
+def summary_system_prompt(mode: SummaryMode, primary_language: str | None = None) -> str:
     return (
         "You summarize meeting transcripts for a personal AI assistant. "
         f"Summary mode: {SUMMARY_MODE_NAMES[mode]}. {SUMMARY_MODE_INSTRUCTIONS[mode]} "
+        f"{summary_language_instruction(primary_language)} "
         "Return only valid JSON. Preserve names, decisions, owners, dates, risks, and "
         "follow-up questions. If an array has no evidence, return an empty array. JSON shape: "
         '{"summaryMode": string, "title": string, "overview": string, "keyTopics": string[], "decisions": string[], '
@@ -228,16 +244,81 @@ def summary_system_prompt(mode: SummaryMode) -> str:
     )
 
 
+def summary_language_instruction(primary_language: str | None) -> str:
+    language_name = SUMMARY_LANGUAGE_NAMES.get(primary_language or "")
+    target = language_name or "the predominant language of the transcript"
+    return (
+        f"Primary dialogue language: {target}. Write every generated natural-language value "
+        f"in {target}: title, overview, keyTopics, decisions, actionItems, followUps, and each "
+        "outline.title. Keep JSON keys and summaryMode enum values exactly as specified. "
+        "Do not default to English. If the conversation mixes languages, use the predominant "
+        "dialogue language for the generated summary while preserving quoted names, addresses, "
+        "and transcript fragments as spoken."
+    )
+
+
+def primary_dialogue_language(transcript: str, language: str | None = None) -> str | None:
+    normalized = normalize_language_code(language)
+    detected = detect_primary_language_from_text(transcript)
+    if detected == "ru" and normalized == "kk":
+        return "kk"
+    if detected:
+        return detected
+
+    if normalized:
+        return normalized
+    return None
+
+
+def normalize_language_code(language: str | None) -> str | None:
+    clean = (language or "").strip().lower().replace("_", "-")
+    if not clean or clean in {"auto", "multi", "multilingual", "und", "unknown", "none"}:
+        return None
+    primary = clean.split("-", 1)[0]
+    if primary in SUMMARY_LANGUAGE_NAMES:
+        return primary
+    return None
+
+
+def detect_primary_language_from_text(text: str) -> str | None:
+    latin_count = 0
+    cyrillic_count = 0
+    kazakh_count = 0
+    for character in text:
+        codepoint = ord(character)
+        if character in KAZAKH_CYRILLIC_CHARS:
+            kazakh_count += 1
+            cyrillic_count += 1
+        elif 0x0400 <= codepoint <= 0x052F:
+            cyrillic_count += 1
+        elif ("A" <= character <= "Z") or ("a" <= character <= "z"):
+            latin_count += 1
+
+    if cyrillic_count < 12 and latin_count < 12:
+        return None
+    if cyrillic_count >= latin_count * 1.2:
+        if kazakh_count >= max(2, int(cyrillic_count * 0.015)):
+            return "kk"
+        return "ru"
+    if latin_count >= cyrillic_count * 1.2:
+        return "en"
+    return None
+
+
 def full_transcript_summary(
     transcript: str,
     segments: list[TranscriptSegment] | None = None,
+    language: str | None = None,
 ) -> SummaryResponse:
     formatted = format_transcript_for_summary(transcript, segments).strip()
+    title = fallback_title_from_transcript(transcript)
+    if title == "Meeting summary":
+        title = "Full transcript"
     outline = build_outline_from_segments(transcript, segments)
     return SummaryResponse(
-        title="Full transcript",
+        title=title,
         overview=formatted or transcript,
-        keyTopics=["Full transcript"],
+        keyTopics=[title],
         decisions=[],
         actionItems=[],
         followUps=[],
@@ -371,6 +452,19 @@ def fallback_title_from_transcript(transcript: str) -> str:
     return "Meeting summary"
 
 
+def fallback_overview_from_transcript(transcript: str) -> str:
+    cleaned = clean_summary_text(transcript)
+    if not cleaned:
+        return ""
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    overview = " ".join(sentence.strip() for sentence in sentences[:2] if sentence.strip())
+    if not overview:
+        overview = cleaned
+    if len(overview) > 520:
+        overview = overview[:517].rstrip(" ,;:-") + "..."
+    return overview
+
+
 def format_meeting_chat_context(meeting: MeetingResponse) -> str:
     outline = "\n".join(
         f"- {item.start:.0f}s: {item.title}" for item in meeting.outline
@@ -397,7 +491,9 @@ def meeting_chat_messages(
                 "Use only the provided meeting transcript, outline, and summary. "
                 "If the answer is not present, say that it is not in this conversation. "
                 "Preserve the user's language and do not translate quoted transcript text. "
-                "Use the prior chat turns only to resolve references and continue the meeting Q&A."
+                "Use the prior chat turns only to resolve references and continue the meeting Q&A. "
+                "Format for a narrow iPhone chat: do not use markdown tables, pipe tables, or code fences. "
+                "If tabular information is requested, write numbered items with short field labels instead."
             ),
         },
         {

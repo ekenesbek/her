@@ -207,7 +207,7 @@ final class ConversationSessionViewModel: ObservableObject {
             )
             applyProcessingResult(result)
             if let meetingId = result.meetingId {
-                MeetingAudioFileStore.save(url: recovery.url, meetingId: meetingId)
+                MeetingAudioFileStore.save(url: recovery.url, meetingId: meetingId, locationName: nil)
             }
             if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 phase = .failed
@@ -248,7 +248,7 @@ final class ConversationSessionViewModel: ObservableObject {
             )
             applyProcessingResult(result)
             if let meetingId = result.meetingId {
-                MeetingAudioFileStore.save(url: recordingURL, meetingId: meetingId)
+                MeetingAudioFileStore.save(url: recordingURL, meetingId: meetingId, locationName: lastProcessedLocationName)
             }
             if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 fail("Transcription finished, but no speech was detected.")
@@ -291,7 +291,7 @@ final class ConversationSessionViewModel: ObservableObject {
                 if let saved = try? await meetingsService.saveMeeting(payload) {
                     currentMeetingId = saved.id
                     if let lastProcessedRecordingURL {
-                        MeetingAudioFileStore.save(url: lastProcessedRecordingURL, meetingId: saved.id)
+                        MeetingAudioFileStore.save(url: lastProcessedRecordingURL, meetingId: saved.id, locationName: lastProcessedLocationName)
                     }
                 }
             }

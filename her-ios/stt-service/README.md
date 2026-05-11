@@ -23,6 +23,7 @@ HUGGINGFACE_TOKEN=<token>
 DIARIZATION_ENABLED=true
 DIARIZATION_MIN_SPEAKERS=0
 DIARIZATION_MAX_SPEAKERS=0
+DIARIZATION_SINGLE_SPEAKER_RETRY_ENABLED=true
 ```
 
 The main iOS backend can then delegate transcription to this service:
@@ -40,4 +41,4 @@ EXTERNAL_TRANSCRIPTION_URL=http://127.0.0.1:8000
 - `POST /v1/embedding` with multipart field `audio`, using `pyannote/embedding`.
 - `POST /v2/embedding` with multipart field `audio`, using `pyannote/wespeaker-voxceleb-resnet34-LM`.
 
-Use `DIARIZATION_MIN_SPEAKERS=0` and `DIARIZATION_MAX_SPEAKERS=0` by default so pyannote auto-detects speaker count. Pin those only for a known meeting format.
+Use `DIARIZATION_MIN_SPEAKERS=0` and `DIARIZATION_MAX_SPEAKERS=0` by default so pyannote auto-detects speaker count. Pin those only for a known meeting format. With `DIARIZATION_SINGLE_SPEAKER_RETRY_ENABLED=true`, long recordings that auto-detect as one speaker get one validation retry with speaker-count hints; the retry is accepted only when it produces multiple durable speakers without losing most speech coverage.
