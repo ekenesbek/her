@@ -83,7 +83,7 @@ final class MeetingsStore: ObservableObject {
         guard let service else {
             throw MeetingsServiceError.backendFailed
         }
-        let updated = try await service.generateSummary(meetingId: meeting.id)
+        let updated = try await service.generateSummary(meetingId: meeting.id, mode: .reasoning)
         if let index = meetings.firstIndex(where: { $0.id == updated.id }) {
             meetings[index] = updated
         } else {
@@ -107,7 +107,7 @@ struct MeetingSavePayload {
 protocol MeetingsService {
     func listMeetings() async throws -> [StoredMeeting]
     func saveMeeting(_ payload: MeetingSavePayload) async throws -> StoredMeeting
-    func generateSummary(meetingId: String) async throws -> StoredMeeting
+    func generateSummary(meetingId: String, mode: MeetingSummaryMode) async throws -> StoredMeeting
 }
 
 protocol MeetingAudioDownloadService {
@@ -174,12 +174,14 @@ struct BackendMeetingsService: MeetingsService {
         return try Self.decoder().decode(BackendMeetingRecord.self, from: data).storedMeeting
     }
 
-    func generateSummary(meetingId: String) async throws -> StoredMeeting {
+    func generateSummary(meetingId: String, mode: MeetingSummaryMode) async throws -> StoredMeeting {
         var request = URLRequest(url: endpoint.appendingPathComponent(meetingId).appendingPathComponent("summary"))
         request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token = TokenSource.shared.token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        request.httpBody = try JSONEncoder().encode(BackendSummaryModeBody(summaryMode: mode.rawValue))
 
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
@@ -255,6 +257,7 @@ private struct BackendMeetingSaveBody: Encodable {
     let outline: [MeetingOutlineItem]
     let generatedAt: Date
     let summaryStatus: String
+    let summaryMode: String
 
     init(payload: MeetingSavePayload) {
         transcript = payload.transcript
@@ -273,7 +276,12 @@ private struct BackendMeetingSaveBody: Encodable {
         outline = payload.summary.outline
         generatedAt = payload.summary.generatedAt
         summaryStatus = payload.summary.summaryStatus
+        summaryMode = payload.summary.summaryMode.rawValue
     }
+}
+
+private struct BackendSummaryModeBody: Encodable {
+    let summaryMode: String
 }
 
 private struct BackendMeetingListResponse: Decodable {
@@ -300,6 +308,7 @@ private struct BackendMeetingRecord: Decodable {
     let outline: [MeetingOutlineItem]?
     let generatedAt: Date
     let summaryStatus: String?
+    let summaryMode: MeetingSummaryMode?
 
     var storedMeeting: StoredMeeting {
         StoredMeeting(
@@ -322,7 +331,8 @@ private struct BackendMeetingRecord: Decodable {
                 followUps: followUps,
                 outline: outline ?? [],
                 generatedAt: generatedAt,
-                summaryStatus: summaryStatus ?? "generated"
+                summaryStatus: summaryStatus ?? "generated",
+                summaryMode: summaryMode ?? .reasoning
             )
         )
     }

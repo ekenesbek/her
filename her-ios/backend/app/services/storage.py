@@ -142,6 +142,7 @@ class MeetingStore:
             outline=summary.outline,
             generatedAt=summary.generatedAt,
             summaryStatus=summary.summaryStatus,
+            summaryMode=summary.summaryMode,
         )
         self.save(updated, user_id=user_id)
         return updated
@@ -200,6 +201,7 @@ class MeetingStore:
         source: str | None = None,
         device_name: str | None = None,
         location_name: str | None = None,
+        summary_mode: str = "reasoning",
     ) -> MeetingJobResponse:
         job_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
@@ -208,9 +210,9 @@ class MeetingStore:
                 """
                 INSERT INTO meeting_jobs (
                     id, user_id, audio_path, source, device_name, location_name,
-                    status, meeting_id, error, created_at, updated_at
+                    summary_mode, status, meeting_id, error, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -219,6 +221,7 @@ class MeetingStore:
                     source,
                     device_name,
                     location_name,
+                    summary_mode,
                     "queued",
                     None,
                     None,
@@ -253,7 +256,7 @@ class MeetingStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, user_id, audio_path, source, device_name, location_name, status
+                SELECT id, user_id, audio_path, source, device_name, location_name, summary_mode, status
                 FROM meeting_jobs
                 WHERE id = ?
                 """,
@@ -380,6 +383,7 @@ class MeetingStore:
             self._ensure_meetings_user_id_column(connection)
             self._ensure_meeting_content_columns(connection)
             self._ensure_meeting_summary_status_column(connection)
+            self._ensure_meeting_summary_mode_column(connection)
             self._ensure_meeting_audio_columns(connection)
             self._ensure_voice_profiles_table(connection)
             self._ensure_meeting_jobs_table(connection)
@@ -426,6 +430,13 @@ class MeetingStore:
                 "ALTER TABLE meetings ADD COLUMN summary_status TEXT NOT NULL DEFAULT 'generated'"
             )
 
+    def _ensure_meeting_summary_mode_column(self, connection: sqlite3.Connection) -> None:
+        columns = self._table_columns(connection, "meetings")
+        if "summary_mode" not in columns:
+            connection.execute(
+                "ALTER TABLE meetings ADD COLUMN summary_mode TEXT NOT NULL DEFAULT 'reasoning'"
+            )
+
     def _ensure_meeting_audio_columns(self, connection: sqlite3.Connection) -> None:
         columns = self._table_columns(connection, "meetings")
         if "audio_path" not in columns:
@@ -461,6 +472,7 @@ class MeetingStore:
                 source TEXT,
                 device_name TEXT,
                 location_name TEXT,
+                summary_mode TEXT NOT NULL DEFAULT 'reasoning',
                 status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'completed', 'failed')),
                 meeting_id TEXT,
                 error TEXT,
@@ -481,6 +493,10 @@ class MeetingStore:
         for column in ("source", "device_name", "location_name"):
             if column not in columns:
                 connection.execute(f"ALTER TABLE meeting_jobs ADD COLUMN {column} TEXT")
+        if "summary_mode" not in columns:
+            connection.execute(
+                "ALTER TABLE meeting_jobs ADD COLUMN summary_mode TEXT NOT NULL DEFAULT 'reasoning'"
+            )
 
     def _ensure_meeting_chat_messages_table(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -596,6 +612,7 @@ class MeetingStore:
                 device_name TEXT,
                 location_name TEXT,
                 summary_status TEXT NOT NULL DEFAULT 'generated',
+                summary_mode TEXT NOT NULL DEFAULT 'reasoning',
                 outline_json TEXT NOT NULL DEFAULT '[]',
                 segments_json TEXT NOT NULL DEFAULT '[]',
                 audio_path TEXT,
@@ -681,10 +698,11 @@ class MeetingStore:
                 device_name,
                 location_name,
                 summary_status,
+                summary_mode,
                 outline_json,
                 segments_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 user_id = excluded.user_id,
                 created_at = excluded.created_at,
@@ -698,6 +716,7 @@ class MeetingStore:
                 device_name = excluded.device_name,
                 location_name = excluded.location_name,
                 summary_status = excluded.summary_status,
+                summary_mode = excluded.summary_mode,
                 outline_json = excluded.outline_json,
                 segments_json = excluded.segments_json
             """,
@@ -715,6 +734,7 @@ class MeetingStore:
                 meeting.deviceName,
                 meeting.locationName,
                 meeting.summaryStatus,
+                meeting.summaryMode,
                 json.dumps(
                     [item.model_dump(mode="json") for item in meeting.outline],
                     ensure_ascii=False,
@@ -758,6 +778,7 @@ class MeetingStore:
             title=row["title"],
             overview=row["overview"],
             summaryStatus=row["summary_status"],
+            summaryMode=row["summary_mode"],
             decisions=items["decision"],
             actionItems=items["action"],
             followUps=items["follow_up"],

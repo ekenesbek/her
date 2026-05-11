@@ -23,6 +23,8 @@ from app.schemas import (
     MeetingListResponse,
     MeetingResponse,
     MeetingSaveRequest,
+    SummaryMode,
+    SummaryModeRequest,
     SummaryRequest,
     SummaryResponse,
     TranscriptResponse,
@@ -37,18 +39,17 @@ from app.services.auth import (
     verify_apple_id_token,
     verify_google_id_token,
 )
-from app.services.diarizer import WhisperXTranscriber
 from app.services.meeting_contents import build_outline_from_segments
 from app.services.storage import MeetingStore
 from app.services.summarizer import SummaryService, SummaryUnavailableError
-from app.services.transcriber import WhisperTranscriber
+from app.services.transcription_router import build_transcriber
 from app.services.voice_profiles import VoiceEmbedder
 from app.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-transcriber: object = WhisperXTranscriber(settings) if settings.diarization_enabled else WhisperTranscriber(settings)
+transcriber = build_transcriber(settings)
 summarizer = SummaryService(settings)
 store = MeetingStore(settings.data_dir)
 voice_embedder = VoiceEmbedder(settings)
@@ -97,6 +98,7 @@ def health() -> HealthResponse:
         status="ok",
         version=app.version,
         database=str(store.db_path),
+        transcriptionProvider=settings.transcription_provider,
         whisperModel=settings.whisper_model,
         summaryModel=settings.openai_summary_model,
         openaiConfigured=settings.llm_configured,
@@ -302,7 +304,7 @@ def create_summary(
     _: UserResponse = Depends(current_user),
 ) -> SummaryResponse:
     try:
-        return summarizer.summarize(request.transcript)
+        return summarizer.summarize(request.transcript, mode=request.summaryMode)
     except SummaryUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -316,6 +318,7 @@ async def process_meeting(
     source: str | None = Form(default=None),
     device_name: str | None = Form(default=None),
     location_name: str | None = Form(default=None),
+    summary_mode: SummaryMode = Form(default="reasoning"),
     user: UserResponse = Depends(current_user),
 ) -> MeetingResponse:
     path = await persist_upload(audio)
@@ -331,6 +334,7 @@ async def process_meeting(
             transcript.transcript,
             transcript.segments,
             location_name,
+            summary_mode,
         )
         now = datetime.now(UTC)
         meeting = MeetingResponse(
@@ -351,6 +355,7 @@ async def process_meeting(
             outline=summary.outline,
             generatedAt=summary.generatedAt,
             summaryStatus=summary.summaryStatus,
+            summaryMode=summary.summaryMode,
             createdAt=now,
         )
         store.save(meeting, user_id=user.id)
@@ -370,6 +375,7 @@ async def create_meeting_job(
     source: str | None = Form(default=None),
     device_name: str | None = Form(default=None),
     location_name: str | None = Form(default=None),
+    summary_mode: SummaryMode = Form(default="reasoning"),
     user: UserResponse = Depends(current_user),
 ) -> MeetingJobResponse:
     path = await persist_job_upload(audio)
@@ -379,6 +385,7 @@ async def create_meeting_job(
         source=source,
         device_name=device_name,
         location_name=location_name,
+        summary_mode=summary_mode,
     )
     submit_meeting_job(job.id)
     return job
@@ -456,13 +463,18 @@ def download_meeting_audio(
 @app.post("/v1/meetings/{meeting_id}/summary", response_model=MeetingResponse)
 def generate_meeting_summary(
     meeting_id: str,
+    payload: SummaryModeRequest | None = None,
     user: UserResponse = Depends(current_user),
 ) -> MeetingResponse:
     meeting = store.get(meeting_id, user_id=user.id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found.")
     try:
-        summary = summarizer.summarize(meeting.transcript, meeting.segments)
+        summary = summarizer.summarize(
+            meeting.transcript,
+            meeting.segments,
+            mode=payload.summaryMode if payload else "reasoning",
+        )
     except SummaryUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -570,6 +582,7 @@ def run_meeting_job(job_id: str) -> None:
             transcript.transcript,
             transcript.segments,
             job.get("location_name"),
+            job.get("summary_mode", "reasoning"),
         )
         now = datetime.now(UTC)
         meeting = MeetingResponse(
@@ -590,6 +603,7 @@ def run_meeting_job(job_id: str) -> None:
             outline=summary.outline,
             generatedAt=summary.generatedAt,
             summaryStatus=summary.summaryStatus,
+            summaryMode=summary.summaryMode,
             createdAt=now,
         )
         store.save(meeting, user_id=job["user_id"])
@@ -641,9 +655,10 @@ def summarize_or_make_unavailable(
     transcript: str,
     segments,
     location_name: str | None,
+    summary_mode: SummaryMode = "reasoning",
 ) -> SummaryResponse:
     try:
-        return summarizer.summarize(transcript, segments)
+        return summarizer.summarize(transcript, segments, mode=summary_mode)
     except Exception as exc:  # noqa: BLE001
         logger.warning("AI summary unavailable; saving meeting without summary: %s", exc)
         title = store.next_meeting_title(user_id, fallback_meeting_title(location_name))
@@ -657,6 +672,7 @@ def summarize_or_make_unavailable(
             outline=build_outline_from_segments(transcript, segments),
             generatedAt=datetime.now(UTC),
             summaryStatus="unavailable",
+            summaryMode=summary_mode,
         )
 
 

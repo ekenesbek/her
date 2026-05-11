@@ -2,6 +2,80 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# IOS-12: Add Omi-Style Transcription Providers And GPU Service
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-10
+
+## Goal
+
+Make Her's Stage 1 meeting backend able to use a paid diarizing STT provider or a separate GPU-hosted transcription service while preserving the current local WhisperX path as the fallback.
+
+## Context
+
+Omi's backend separates real-time/pre-recorded STT, diarization, and speaker embedding into provider-backed services. Her currently runs transcription and diarization inside the iOS FastAPI backend, which is slow on CPU and makes it harder to swap in a paid API or GPU worker.
+
+## Scope
+
+In scope:
+- Add a backend transcription provider switch for `local`, `deepgram`, and `external`.
+- Add a Deepgram pre-recorded transcription adapter with diarization output mapped to Her transcript segments.
+- Add an external HTTP transcription adapter for a GPU service running on port 8000.
+- Add a minimal standalone GPU STT service with Omi-like health, transcription, diarization, and embedding endpoints.
+- Keep the existing file-upload and meeting-job API contracts.
+
+Out of scope:
+- Stage 2 scheduled/background runs or credential vault behavior.
+- Stage 3 cross-meeting/global memory.
+- Removing local WhisperX before the external provider is proven on real recordings.
+
+## Implementation Plan
+
+- [x] Inspect current transcription, diarization, settings, and task state.
+- [x] Add provider settings and health visibility.
+- [x] Add Deepgram and external transcriber adapters.
+- [x] Add standalone GPU service skeleton.
+- [x] Update docs/env examples.
+- [x] Run backend compile and adapter smoke tests.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `python3 -m compileall her-ios/stt-service`
+- `PYTHONPATH=her-ios/backend python3 - <<'PY' ...` Deepgram response parser smoke using representative diarized `utterances`, word-level payloads, and multilingual `languages` output.
+- `PYTHONPATH=her-ios/backend python3 - <<'PY' ...` external adapter smoke using a mocked `httpx.Client`.
+- `PYTHONPATH=her-ios/backend TRANSCRIPTION_PROVIDER=external EXTERNAL_TRANSCRIPTION_URL=http://127.0.0.1:8000 python3 - <<'PY' ...` verified provider selection builds `ExternalTranscriber`.
+- `PYTHONPATH=her-ios/stt-service python3 - <<'PY' ...` verified GPU service import and `/health` shape. The ambient pyenv printed its existing `hashlib` blake2 warnings, but assertions passed.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `git diff --check`
+- Deployed `her-ios/stt-service` and backend code to `82.200.144.228` under `/opt/her-stt-service`, installed Python/CUDA dependencies in a venv, copied the existing Hugging Face token from the old backend server without printing it, created and enabled `her-stt.service`, and verified public `GET http://82.200.144.228:8000/health`.
+- GPU smoke on `82.200.144.228`: full `/Users/ekenesbek/Downloads/Кошек_батыра_улица_50.mp3` returned in one request with `durationSeconds=912.2333125`, `segmentCount=218`, speakers `SPEAKER_00` and `SPEAKER_01`, and segment counts `SPEAKER_00=140`, `SPEAKER_01=78`.
+- Deployed the provider-router backend update to `51.195.200.207`; previous backend files backed up at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-215916-external-stt.tgz`.
+- Set the main backend runtime env to `TRANSCRIPTION_PROVIDER=external`, `EXTERNAL_TRANSCRIPTION_URL=http://82.200.144.228:8000`, restarted `meta-ios-backend.service`, and verified `GET /health` returns `transcriptionProvider=external`.
+- Main backend smoke on `51.195.200.207`: building `Settings()` from `/etc/meta-ios-backend.env` creates `ExternalTranscriber`, and a 30-second excerpt transcribed through the GPU service with language `ru`.
+
+## Result
+
+Added `TRANSCRIPTION_PROVIDER=local|deepgram|external`. The existing iOS backend endpoints keep their file-upload/job contracts, but transcriber construction now routes through a provider factory. `/health` now exposes the active `transcriptionProvider`.
+
+Added a Deepgram pre-recorded STT adapter. It posts completed audio to `/v1/listen` with `nova-3`, diarization, utterances, punctuation, and smart formatting enabled; Deepgram speaker ids are normalized into Her's `SPEAKER_00` format and materialized as `TranscriptSegment` rows. The default `DEEPGRAM_LANGUAGE=multi` avoids English-only behavior for mixed-language recordings.
+
+Added an external GPU adapter. The main backend can now delegate transcription to `EXTERNAL_TRANSCRIPTION_URL/v1/transcribe` and parse the same `TranscriptResponse` shape it already uses locally.
+
+Added `her-ios/stt-service`, a standalone FastAPI service intended for a GPU host on port 8000. It exposes `GET /health`, `POST /v1/transcribe`, `POST /v1/diarization`, `POST /v1/embedding`, and `POST /v2/embedding`, reusing the backend WhisperX transcriber for full transcription and pyannote endpoints for diarization/embeddings.
+
+Docs and env examples now describe local, Deepgram, and external GPU modes. `httpx` was added to backend dependencies for the paid/external adapters.
+
+Deployed the GPU STT service to `82.200.144.228:8000` and switched the main iOS backend on `51.195.200.207` to use it through `TRANSCRIPTION_PROVIDER=external`. The SSH host key fingerprint `SHA256:WwT06DiGy0GLlKpGP0qeNZOiIhKsleyylDWZe1nqlKQ` was confirmed by the human before updating `known_hosts`.
+
+## Next
+
+Result is ready for human review. Review gate: record or upload a new multi-speaker meeting through the iOS app and confirm the saved transcript alternates speakers and finishes much faster than the old CPU path. After approval: commit, push/PR only if requested, then archive/update task state.
+
 # IOS-11: Add Streaming Audio Processing For Faster Transcription
 
 Status: planned
@@ -65,7 +139,7 @@ Needs human review of the task scope. After approval: implement the smallest coh
 
 # BUG-2: Clean AI Summaries And Add Audio Scrubber
 
-Status: blocked
+Status: review
 Priority: P1
 Owner: agent
 Stream: ios
@@ -87,6 +161,7 @@ In scope:
 - Make summary titles fall back to transcript content when the AI returns a speaker-label-based title.
 - Tune deployed diarization speaker-count settings for multi-person meetings.
 - Add a draggable audio scrubber/progress track in the iOS contents audio row.
+- Fix speaker assignment so backend transcript segments preserve pyannote speaker turns without relying on fixed `DIARIZATION_MIN_SPEAKERS` / `DIARIZATION_MAX_SPEAKERS` values.
 
 Out of scope:
 - Reprocessing old meetings automatically.
@@ -98,6 +173,7 @@ Out of scope:
 - [x] Patch local fallback titles to ignore speaker labels.
 - [x] Add iOS scrubber seek UI and playback controller seek support.
 - [x] Verify backend/iOS builds and deploy backend.
+- [x] Patch WhisperX/pyannote assignment to assign speakers at word level and split transcript segments when the speaker changes inside one Whisper segment.
 - [ ] Install iOS app after the physical iPhone is available to CoreDevice.
 
 ## Verification
@@ -108,9 +184,14 @@ Out of scope:
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
 - Deployed backend to `51.195.200.207`; previous backend files backed up at `/home/ubuntu/meta-ios-deploy-backups/backend-20260510-155126-bug2-summary-scrubber.tgz`.
 - Remote backend compile, `systemctl restart meta-ios-backend.service`, `GET /health`, and remote summary sanitizer smoke.
+- `PYTHONPATH=her-ios/backend python3 - <<'PY' ...` word-level diarization assignment smoke verified one Whisper segment is split into `SPEAKER_00` and `SPEAKER_01` turns by diarization overlap.
+- `python3 -m compileall her-ios/backend/app/services/diarizer.py`
+- Server smoke on `/Users/ekenesbek/Downloads/Кошек_батыра_улица_50.mp3` copied to `/tmp/koshek_batyra_50.mp3`: a 180-second excerpt with `DIARIZATION_MIN_SPEAKERS=0` and `DIARIZATION_MAX_SPEAKERS=0` produced pyannote speakers `SPEAKER_00` and `SPEAKER_01`; patched assignment was run 3 times and consistently returned 57 transcript segments split across both speakers (`SPEAKER_00`: 30, `SPEAKER_01`: 27).
+- Deployed `app/services/diarizer.py` to `51.195.200.207`, backed up the previous file at `/home/ubuntu/meta-ios-deploy-backups/diarizer-20260510-183913.py`, compiled it on the server, restarted `meta-ios-backend.service`, and verified `GET /health`.
 
 Blocked:
 - Signed device build/install did not run because `xcrun devicectl list devices` reports `iPhone (Yerasyl)` as `unavailable`, and `devicectl device install app` cannot locate the device.
+- Full 15-minute mp3 diagnostic on the VPS was stopped after roughly 16 minutes because it was still in WhisperX ASR/VAD on CPU and produced no additional speaker-assignment signal beyond the completed excerpt run.
 
 ## Result
 
@@ -120,9 +201,11 @@ The deployed server now has `DIARIZATION_MIN_SPEAKERS=2` and `DIARIZATION_MAX_SP
 
 iOS contents audio row now has a draggable scrubber/progress track. Dragging the track seeks the audio; playback still supports full audio, chunk playback, highlighted active transcript chunks, and backend download when local audio is missing.
 
+Backend diarization assignment no longer depends on fixed speaker-count settings to preserve speaker turns. After `pyannote/speaker-diarization-3.1` returns intervals, the backend now reapplies those intervals to aligned WhisperX words by overlap/nearest interval and materializes separate transcript segments whenever the word-level speaker changes inside one Whisper segment. This prevents long Whisper segments from being saved as a single dominant `SPEAKER_00` when pyannote already found multiple speakers.
+
 ## Next
 
-Blocked on the iPhone becoming available to CoreDevice. Unlock/reconnect the device and trust the computer if prompted; then rerun signed device build, install, and launch. After that: record a new 3-speaker meeting and verify summary title/content, speaker separation, and scrubber behavior.
+Result is ready for human review. Record or upload a new multi-speaker meeting through the server and verify the contents transcript shows alternating speaker turns instead of one speaker for the whole meeting. The iPhone install smoke remains blocked until the device is available to CoreDevice. After approval: commit, push/PR only if requested, then archive/update task state.
 
 # IOS-10: Persist Meeting Audio And Improve Transcript Playback
 
@@ -224,6 +307,7 @@ In scope:
 - Stream chat answers into the active assistant bubble and keep the chat input readable in iOS dark mode.
 - Persist meeting chat messages per meeting and include prior turns in the next chat context.
 - Use a location-based meeting title when AI summary is unavailable, then retitle from AI summary when it succeeds.
+- Add autopilot summary generation modes: the LLM chooses among reasoning summary, full transcript, clean detailed, meeting note, call note, strategic meeting with speaker profiling, and concise rewrite based on the transcript contents.
 - Deploy backend env/code and install the updated iOS build.
 
 Out of scope:
@@ -239,6 +323,8 @@ Out of scope:
 - [x] Add streaming meeting chat responses and force readable chat input text in dark mode.
 - [x] Persist chat messages and hydrate them in the iOS chat tab.
 - [x] Add location fallback titles and summary retitle behavior.
+- [x] Add summary mode contracts/prompts and persist the LLM-selected mode on saved meetings.
+- [x] Keep iOS on autopilot generation while decoding and displaying the mode chosen by the backend.
 
 ## Verification
 
@@ -261,14 +347,23 @@ Out of scope:
 - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
 - `git diff --check`
 - Secret scan over tracked project paths found no pasted API key.
+- `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-summary-autopilot-smoke python3 - <<'PY' ...` verified autopilot response parsing, fixed-mode override behavior, full transcript generation without an LLM client, and the autopilot prompt. The ambient pyenv still prints its existing `hashlib` blake2 warnings, but the smoke assertions completed.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+
+Not run:
+- FastAPI `TestClient` route smoke in the ambient `python3`; it failed before app import because `jwt` / PyJWT is not installed in that interpreter.
+- Device install and real recording generation with LLM-selected modes.
 
 ## Result
 
 Backend settings now support platform-managed Alem OSS through `ALEM_OSS_API_KEY` and `ALEM_OSS_BASE_URL`, while keeping the existing OpenAI-compatible path. Summary generation uses the configured LLM when available, so it no longer falls back to the first transcript lines. If AI summary is unavailable, the backend still saves the transcript/meeting with `summaryStatus=unavailable` and a location-based title. Added authenticated `GET /v1/meetings/{meeting_id}/chat`, `POST /v1/meetings/{meeting_id}/chat`, streaming `POST /v1/meetings/{meeting_id}/chat/stream`, and `POST /v1/meetings/{meeting_id}/summary`. Chat messages are persisted in SQLite per meeting, prior turns are included in the next LLM call, and regenerating a summary retitles the saved meeting without deleting chat history. iOS hydrates saved chat messages, streams new deltas into the active assistant bubble, exposes summary generation for unsummarized saved meetings, and keeps chat input text readable in dark mode. Backend code and runtime env are deployed to `51.195.200.207`, and the updated iOS build was installed and launched on the connected iPhone.
 
+Added autopilot summary modes. The backend contract accepts and returns `summaryMode` for direct summaries, meeting processing jobs, synchronous processing, manual saved-meeting regeneration, and saved meetings. SQLite migrates meetings and jobs with a default `reasoning` mode. In `reasoning` mode, `SummaryService` now asks the LLM to inspect the transcript and choose the best internal output mode among meeting note, call note, clean detailed, strategic meeting/speaker profiling, concise rewrite, and full transcript. The selected mode is parsed from the LLM response and persisted with the meeting. Explicit `full_transcript` remains deterministic without an LLM client for compatibility. iOS no longer shows a manual selector; it sends autopilot generation requests and labels generated summaries with the backend-selected mode.
+
 ## Next
 
-Ready for human review: open a meeting, ask two chat questions, leave and reopen it, and confirm the thread is still there and the second answer can refer to the first. Also verify a meeting saved without AI summary gets a location-based title and that pressing Generate summary later retitles it from the AI summary. After approval: commit, push/PR only if requested, then archive/update the task. Next task candidate from `todo/tasks.md`: review/approve the current `IOS-7` and `IOS-8` meeting-processing changes.
+Ready for human review: record or reuse a few short conversations with different content types, confirm the backend chooses an appropriate mode, and confirm the generated summary shape matches the transcript. Also open a meeting, ask two chat questions, leave and reopen it, and confirm the thread is still there and the second answer can refer to the first. After approval: commit, push/PR only if requested, then archive/update the task. Next task candidate from `todo/tasks.md`: review/approve the current `IOS-7` and `IOS-8` meeting-processing changes.
 
 # IOS-8: Add Meeting Contents Outline And Speaker Transcript
 

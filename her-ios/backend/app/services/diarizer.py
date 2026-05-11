@@ -67,6 +67,7 @@ class WhisperXTranscriber:
         diarize_segments = self._diarize(audio)
         if diarize_segments is not None:
             result = whisperx.assign_word_speakers(diarize_segments, result)
+            self._assign_diarization_speakers(result, diarize_segments)
 
         segments = self._materialize_segments(result.get("segments", []))
         transcript_text = self._format_transcript(segments)
@@ -133,6 +134,10 @@ class WhisperXTranscriber:
             text = (segment.get("text") or "").strip()
             if not text:
                 continue
+            word_segments = self._materialize_word_speaker_segments(segment)
+            if word_segments:
+                out.extend(word_segments)
+                continue
             out.append(
                 TranscriptSegment(
                     start=float(segment.get("start", 0.0)),
@@ -142,6 +147,192 @@ class WhisperXTranscriber:
                 )
             )
         return out
+
+    def _materialize_word_speaker_segments(self, segment: dict) -> list[TranscriptSegment]:
+        words = segment.get("words")
+        if not isinstance(words, list):
+            return []
+
+        groups: list[dict[str, Any]] = []
+        for word in words:
+            if not isinstance(word, dict):
+                continue
+            word_text = str(word.get("word") or "").strip()
+            if not word_text:
+                continue
+            speaker = word.get("speaker") or segment.get("speaker")
+            start = self._float_or_none(word.get("start"))
+            end = self._float_or_none(word.get("end"))
+            if start is None:
+                start = self._float_or_none(segment.get("start")) or 0.0
+            if end is None or end < start:
+                end = start
+
+            if groups and groups[-1]["speaker"] == speaker:
+                groups[-1]["words"].append(word_text)
+                groups[-1]["end"] = max(float(groups[-1]["end"]), end)
+            else:
+                groups.append(
+                    {
+                        "speaker": speaker,
+                        "start": start,
+                        "end": end,
+                        "words": [word_text],
+                    }
+                )
+
+        if not groups:
+            return []
+
+        segment_text = (segment.get("text") or "").strip()
+        if len(groups) == 1:
+            group = groups[0]
+            return [
+                TranscriptSegment(
+                    start=float(segment.get("start", group["start"])),
+                    end=float(segment.get("end", group["end"])),
+                    text=segment_text,
+                    speaker=group["speaker"],
+                )
+            ]
+
+        return [
+            TranscriptSegment(
+                start=float(group["start"]),
+                end=float(group["end"]),
+                text=self._join_words(group["words"]),
+                speaker=group["speaker"],
+            )
+            for group in groups
+            if group["words"]
+        ]
+
+    def _assign_diarization_speakers(self, result: dict, diarize_segments: Any) -> None:
+        intervals = self._diarization_intervals(diarize_segments)
+        if not intervals:
+            return
+
+        for segment in result.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            segment_start = self._float_or_none(segment.get("start")) or 0.0
+            segment_end = self._float_or_none(segment.get("end"))
+            if segment_end is None or segment_end < segment_start:
+                segment_end = segment_start
+
+            word_speaker_seconds: dict[str, float] = {}
+            words = segment.get("words")
+            if isinstance(words, list):
+                for word in words:
+                    if not isinstance(word, dict):
+                        continue
+                    word_start = self._float_or_none(word.get("start"))
+                    if word_start is None:
+                        continue
+                    word_end = self._float_or_none(word.get("end"))
+                    if word_end is None or word_end < word_start:
+                        word_end = word_start
+                    speaker = self._speaker_for_interval(
+                        intervals,
+                        word_start,
+                        word_end,
+                        fill_nearest=True,
+                    )
+                    if speaker:
+                        word["speaker"] = speaker
+                        word_speaker_seconds[speaker] = (
+                            word_speaker_seconds.get(speaker, 0.0)
+                            + max(0.01, word_end - word_start)
+                        )
+
+            if word_speaker_seconds:
+                segment["speaker"] = max(word_speaker_seconds.items(), key=lambda item: item[1])[0]
+                continue
+
+            speaker = self._speaker_for_interval(
+                intervals,
+                segment_start,
+                segment_end,
+                fill_nearest=True,
+            )
+            if speaker:
+                segment["speaker"] = speaker
+
+    def _diarization_intervals(self, diarize_segments: Any) -> list[tuple[float, float, str]]:
+        intervals: list[tuple[float, float, str]] = []
+        if hasattr(diarize_segments, "iterrows"):
+            for _, row in diarize_segments.iterrows():
+                start = self._float_or_none(row.get("start"))
+                end = self._float_or_none(row.get("end"))
+                speaker = row.get("speaker")
+                if start is None or end is None or end <= start or speaker is None:
+                    continue
+                intervals.append((start, end, str(speaker)))
+        elif hasattr(diarize_segments, "itertracks"):
+            for turn, _, speaker in diarize_segments.itertracks(yield_label=True):
+                start = self._float_or_none(getattr(turn, "start", None))
+                end = self._float_or_none(getattr(turn, "end", None))
+                if start is None or end is None or end <= start or speaker is None:
+                    continue
+                intervals.append((start, end, str(speaker)))
+        intervals.sort(key=lambda item: item[0])
+        return intervals
+
+    def _speaker_for_interval(
+        self,
+        intervals: list[tuple[float, float, str]],
+        start: float,
+        end: float,
+        *,
+        fill_nearest: bool,
+    ) -> str | None:
+        if end < start:
+            end = start
+
+        overlaps: dict[str, float] = {}
+        for diarize_start, diarize_end, speaker in intervals:
+            if diarize_start > end:
+                break
+            intersection = min(diarize_end, end) - max(diarize_start, start)
+            if intersection > 0:
+                overlaps[speaker] = overlaps.get(speaker, 0.0) + intersection
+        if overlaps:
+            return max(overlaps.items(), key=lambda item: item[1])[0]
+
+        if not fill_nearest:
+            return None
+
+        midpoint = (start + end) / 2
+        nearest: tuple[float, str] | None = None
+        for diarize_start, diarize_end, speaker in intervals:
+            if diarize_start <= midpoint <= diarize_end:
+                return speaker
+            distance = min(abs(midpoint - diarize_start), abs(midpoint - diarize_end))
+            if nearest is None or distance < nearest[0]:
+                nearest = (distance, speaker)
+        return nearest[1] if nearest else None
+
+    def _join_words(self, words: list[str]) -> str:
+        text = " ".join(word.strip() for word in words if word.strip())
+        replacements = {
+            " ,": ",",
+            " .": ".",
+            " !": "!",
+            " ?": "?",
+            " :": ":",
+            " ;": ";",
+            " )": ")",
+            "( ": "(",
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        return text.strip()
+
+    def _float_or_none(self, value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _format_transcript(self, segments: list[TranscriptSegment]) -> str:
         if not segments:

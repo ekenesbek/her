@@ -202,7 +202,8 @@ final class ConversationSessionViewModel: ObservableObject {
                 recordingURL: recovery.url,
                 source: "recording",
                 deviceName: nil,
-                locationName: nil
+                locationName: nil,
+                summaryMode: .reasoning
             )
             applyProcessingResult(result)
             if let meetingId = result.meetingId {
@@ -242,7 +243,8 @@ final class ConversationSessionViewModel: ObservableObject {
                 recordingURL: recordingURL,
                 source: "recording",
                 deviceName: activeInputName == "Not recording" ? nil : activeInputName,
-                locationName: lastProcessedLocationName
+                locationName: lastProcessedLocationName,
+                summaryMode: .reasoning
             )
             applyProcessingResult(result)
             if let meetingId = result.meetingId {
@@ -266,13 +268,13 @@ final class ConversationSessionViewModel: ObservableObject {
         do {
             phase = .summarizing
             if let currentMeetingId, let meetingsService {
-                let saved = try await meetingsService.generateSummary(meetingId: currentMeetingId)
+                let saved = try await meetingsService.generateSummary(meetingId: currentMeetingId, mode: .reasoning)
                 summary = saved.summary
                 phase = .completed
                 return
             }
 
-            let generated = try await summaryService.summarize(transcript: transcript)
+            let generated = try await summaryService.summarize(transcript: transcript, mode: .reasoning)
             summary = generated
 
             if let meetingsService {

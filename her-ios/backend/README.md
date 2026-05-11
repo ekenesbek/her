@@ -21,6 +21,12 @@ http://Yerasyls-MacBook-Pro.local:8787
 
 The default summary/chat model is `gpt-oss`. Set `ALEM_OSS_API_KEY` for the platform-managed Alem OSS provider, or set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_SUMMARY_MODEL` in `.env` to use another OpenAI-compatible provider.
 
+The transcription backend is selected with `TRANSCRIPTION_PROVIDER`:
+
+- `local`: run `faster-whisper` or WhisperX inside this FastAPI process. This remains the default and fallback.
+- `deepgram`: send the completed audio file to Deepgram pre-recorded STT with diarization enabled. Set `DEEPGRAM_API_KEY`, and optionally `DEEPGRAM_MODEL`, `DEEPGRAM_LANGUAGE`, and `DEEPGRAM_TIMEOUT_SECONDS`. The default `DEEPGRAM_LANGUAGE=multi` keeps Nova-3 out of English-only mode for mixed-language recordings.
+- `external`: send the completed audio file to a separate GPU STT service at `EXTERNAL_TRANSCRIPTION_URL`, for example `http://127.0.0.1:8000`. See `her-ios/stt-service/README.md`.
+
 ## Endpoints
 
 - `GET /health`
@@ -51,7 +57,7 @@ Older JSON-blob databases are migrated automatically on startup.
 
 ## Notes
 
-`faster-whisper` runs locally and downloads the configured model on first use. `turbo` is the practical free default for this MVP because it is close to `large-v3` quality while being much faster. Use `base` or `small` for weaker CPU-only machines, and `large-v3` when quality matters more than speed.
+`faster-whisper` runs locally and downloads the configured model on first use when `TRANSCRIPTION_PROVIDER=local`. `turbo` is the practical free default for this MVP because it is close to `large-v3` quality while being much faster. Use `base` or `small` for weaker CPU-only machines, and `large-v3` when quality matters more than speed. For faster and more stable speaker diarization on long recordings, use `TRANSCRIPTION_PROVIDER=deepgram` with a paid STT key or run `her-ios/stt-service` on a GPU host and set `TRANSCRIPTION_PROVIDER=external`.
 
 For the current platform-managed Alem OSS summary/chat model, keep secrets in `.env`:
 

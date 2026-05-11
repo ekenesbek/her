@@ -1,7 +1,7 @@
 import Foundation
 
 protocol SummaryService {
-    func summarize(transcript: String) async throws -> MeetingSummary
+    func summarize(transcript: String, mode: MeetingSummaryMode) async throws -> MeetingSummary
 }
 
 enum SummaryServiceFactory {
@@ -15,7 +15,22 @@ enum SummaryServiceFactory {
 }
 
 struct LocalSummaryService: SummaryService {
-    func summarize(transcript: String) async throws -> MeetingSummary {
+    func summarize(transcript: String, mode: MeetingSummaryMode) async throws -> MeetingSummary {
+        if mode == .fullTranscript {
+            return MeetingSummary(
+                title: mode.title,
+                overview: transcript,
+                keyTopics: [mode.title],
+                decisions: [],
+                actionItems: [],
+                followUps: [],
+                outline: [MeetingOutlineItem(start: 0, title: mode.title)],
+                generatedAt: Date(),
+                summaryStatus: "generated",
+                summaryMode: mode
+            )
+        }
+
         let sentences = transcript
             .split(whereSeparator: { ".!?\n".contains($0) })
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -36,7 +51,7 @@ struct LocalSummaryService: SummaryService {
         )
 
         return MeetingSummary(
-            title: makeTitle(from: transcript),
+            title: mode == .reasoning ? makeTitle(from: transcript) : mode.title,
             overview: overview.isEmpty ? "No transcript content was available to summarize." : overview,
             keyTopics: makeKeyTopics(from: transcript, sentences: sentences),
             decisions: decisions.isEmpty ? ["No explicit decisions detected."] : decisions,
@@ -44,7 +59,8 @@ struct LocalSummaryService: SummaryService {
             followUps: followUps.isEmpty ? ["No follow-ups detected."] : followUps,
             outline: [MeetingOutlineItem(start: 0, title: makeTitle(from: transcript))],
             generatedAt: Date(),
-            summaryStatus: "generated"
+            summaryStatus: "generated",
+            summaryMode: mode
         )
     }
 
@@ -104,14 +120,14 @@ struct BackendSummaryService: SummaryService {
         self.session = session
     }
 
-    func summarize(transcript: String) async throws -> MeetingSummary {
+    func summarize(transcript: String, mode: MeetingSummaryMode) async throws -> MeetingSummary {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token = TokenSource.shared.token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        request.httpBody = try JSONEncoder().encode(SummaryRequest(transcript: transcript))
+        request.httpBody = try JSONEncoder().encode(SummaryRequest(transcript: transcript, summaryMode: mode.rawValue))
 
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
@@ -141,13 +157,15 @@ struct BackendSummaryService: SummaryService {
             followUps: decoded.followUps,
             outline: decoded.outline ?? [],
             generatedAt: decoded.generatedAt,
-            summaryStatus: decoded.summaryStatus ?? "generated"
+            summaryStatus: decoded.summaryStatus ?? "generated",
+            summaryMode: decoded.summaryMode ?? mode
         )
     }
 }
 
 private struct SummaryRequest: Encodable {
     let transcript: String
+    let summaryMode: String
 }
 
 private struct BackendSummaryResponse: Decodable {
@@ -160,6 +178,7 @@ private struct BackendSummaryResponse: Decodable {
     let outline: [MeetingOutlineItem]?
     let generatedAt: Date
     let summaryStatus: String?
+    let summaryMode: MeetingSummaryMode?
 }
 
 enum SummaryError: LocalizedError {

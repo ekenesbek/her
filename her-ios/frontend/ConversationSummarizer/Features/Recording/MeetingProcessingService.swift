@@ -1,7 +1,7 @@
 import Foundation
 
 protocol MeetingProcessingService {
-    func process(recordingURL: URL, source: String?, deviceName: String?, locationName: String?) async throws -> MeetingProcessingResult
+    func process(recordingURL: URL, source: String?, deviceName: String?, locationName: String?, summaryMode: MeetingSummaryMode) async throws -> MeetingProcessingResult
 }
 
 struct MeetingProcessingResult {
@@ -37,13 +37,14 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         self.session = session
     }
 
-    func process(recordingURL: URL, source: String?, deviceName: String?, locationName: String?) async throws -> MeetingProcessingResult {
+    func process(recordingURL: URL, source: String?, deviceName: String?, locationName: String?, summaryMode: MeetingSummaryMode) async throws -> MeetingProcessingResult {
         do {
             let submitted = try await submitJob(
                 recordingURL: recordingURL,
                 source: source,
                 deviceName: deviceName,
-                locationName: locationName
+                locationName: locationName,
+                summaryMode: summaryMode
             )
             return try await pollJob(id: submitted.id)
         } catch MeetingProcessingError.backendFailed(statusCode: 404, detail: _) {
@@ -54,7 +55,7 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         }
     }
 
-    private func submitJob(recordingURL: URL, source: String?, deviceName: String?, locationName: String?) async throws -> BackendMeetingJobResponse {
+    private func submitJob(recordingURL: URL, source: String?, deviceName: String?, locationName: String?, summaryMode: MeetingSummaryMode) async throws -> BackendMeetingJobResponse {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: jobsEndpoint)
         request.httpMethod = "POST"
@@ -69,7 +70,8 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
             fields: [
                 "source": source,
                 "device_name": deviceName,
-                "location_name": locationName
+                "location_name": locationName,
+                "summary_mode": summaryMode.rawValue
             ]
         )
 
@@ -299,6 +301,7 @@ private struct BackendProcessedMeeting: Decodable {
     let outline: [MeetingOutlineItem]?
     let generatedAt: Date
     let summaryStatus: String?
+    let summaryMode: MeetingSummaryMode?
 
     var summary: MeetingSummary? {
         let status = summaryStatus ?? "generated"
@@ -314,7 +317,8 @@ private struct BackendProcessedMeeting: Decodable {
             followUps: followUps,
             outline: outline ?? [],
             generatedAt: generatedAt,
-            summaryStatus: status
+            summaryStatus: status,
+            summaryMode: summaryMode ?? .reasoning
         )
     }
 }

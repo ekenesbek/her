@@ -12,6 +12,7 @@ from app.schemas import (
     MeetingChatResponse,
     MeetingOutlineItem,
     MeetingResponse,
+    SummaryMode,
     SummaryResponse,
     TranscriptSegment,
 )
@@ -33,7 +34,11 @@ class SummaryService:
         self,
         transcript: str,
         segments: list[TranscriptSegment] | None = None,
+        mode: SummaryMode = "reasoning",
     ) -> SummaryResponse:
+        if mode == "full_transcript":
+            return full_transcript_summary(transcript, segments)
+
         if not self.client:
             raise SummaryUnavailableError("AI summary is not configured.")
 
@@ -42,21 +47,7 @@ class SummaryService:
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You summarize meeting transcripts for a personal AI assistant. "
-                        "Return only valid JSON. Preserve names, decisions, owners, "
-                        "dates, risks, and follow-up questions. If an array has no evidence, "
-                        "return an empty array. JSON shape: "
-                        '{"title": string, "overview": string, "keyTopics": string[], "decisions": string[], '
-                        '"actionItems": string[], "followUps": string[], '
-                        '"outline": [{"start": number, "title": string}]}. '
-                        "The outline should be a compact chronological table of contents. "
-                        "Use the timestamps supplied in the transcript input. Do not translate text. "
-                        "Speaker labels such as SPEAKER_00, Speaker 1, and Participant 1 are machine labels, "
-                        "not real names or topics. Never use those labels in the title, key topics, "
-                        "overview, or outline titles unless the transcript explicitly gives a real person name. "
-                        "The title must describe what was discussed, not who the diarization label was."
-                    ),
+                    "content": summary_system_prompt(mode),
                 },
                 {
                     "role": "user",
@@ -67,7 +58,11 @@ class SummaryService:
 
         content = response.choices[0].message.content
         formatted_transcript = format_transcript_for_summary(transcript, segments)
-        payload = parse_summary_payload(content or "", formatted_transcript)
+        payload = parse_summary_payload(
+            content or "",
+            formatted_transcript,
+            requested_mode=mode,
+        )
         outline = payload["outline"] or build_outline_from_segments(transcript, segments)
         return SummaryResponse(
             title=payload["title"],
@@ -79,6 +74,7 @@ class SummaryService:
             outline=outline,
             generatedAt=datetime.now(UTC),
             summaryStatus="generated",
+            summaryMode=payload["summaryMode"],
         )
 
     def answer_question(
@@ -153,6 +149,105 @@ class SummaryUnavailableError(RuntimeError):
     pass
 
 
+SUMMARY_MODE_NAMES: dict[SummaryMode, str] = {
+    "reasoning": "Reasoning Summary",
+    "full_transcript": "Full Transcript",
+    "clean_detailed": "Clean Detailed Summary",
+    "meeting_note": "Meeting Note",
+    "call_note": "Call Note",
+    "strategic_meeting": "Strategic Meeting Summary and Speaker Profiling",
+    "concise_rewrite": "Simple Clear Concise Rewrite",
+}
+
+
+SUMMARY_MODE_INSTRUCTIONS: dict[SummaryMode, str] = {
+    "reasoning": (
+        "Act as an autopilot. Inspect the transcript, infer the content type and user value, "
+        "choose the most suitable output mode, and then generate that output. Choose one of: "
+        "meeting_note for team discussions and internal notes; call_note for sales, support, "
+        "service, or phone-call style conversations; clean_detailed for operational extraction "
+        "with tasks, contacts, tags, addresses, or scheduling; strategic_meeting for minutes-ready "
+        "strategic discussions with speaker/group-dynamics analysis; concise_rewrite for drafts "
+        "or monologues that mainly need polished prose; full_transcript only when a faithful "
+        "external-use transcript is clearly the best output. Return the chosen mode in summaryMode."
+    ),
+    "full_transcript": (
+        "Return a faithful chronological transcript without summarizing or interpreting. Preserve "
+        "speaker changes when available. Put the complete transcript in overview, keep decision, "
+        "actionItems, and followUps empty unless they are explicit transcript lines, and use the "
+        "outline only as timestamp navigation."
+    ),
+    "clean_detailed": (
+        "Produce a clean and highly detailed operational summary. Extract tasks, promises, names, "
+        "contact details, addresses, scheduling details, service requests, and critical tags such "
+        "as [URGENT], [QUOTE], [FOLLOW-UP], [CALLBACK], [SCHEDULING], [COMPLETED], and [ISSUE] "
+        "when the transcript supports them."
+    ),
+    "meeting_note": (
+        "Create structured meeting notes for a team. Include meeting information if present, main "
+        "topics, subtopics, conclusions, decisions, open questions, and next arrangements. Keep the "
+        "tone concise and reusable for internal notes."
+    ),
+    "call_note": (
+        "Create a call note for sales or support. Capture call information, a concise conversation "
+        "summary, customer or counterpart needs, commitments, next steps, owners, follow-up timing, "
+        "and key details such as names, contact data, addresses, and references."
+    ),
+    "strategic_meeting": (
+        "Create minutes-ready strategic notes. Include context, purpose, main topics, decisions, "
+        "follow-up actions, open questions, speaker interaction profiling based only on transcript "
+        "evidence, group dynamics, risks, and concrete suggestions for unresolved issues."
+    ),
+    "concise_rewrite": (
+        "Rewrite the transcript into polished, simple, clear, and concise prose. Remove filler, "
+        "redundancy, and loose phrasing while preserving essential facts, intent, names, decisions, "
+        "and action items."
+    ),
+}
+
+
+def summary_system_prompt(mode: SummaryMode) -> str:
+    return (
+        "You summarize meeting transcripts for a personal AI assistant. "
+        f"Summary mode: {SUMMARY_MODE_NAMES[mode]}. {SUMMARY_MODE_INSTRUCTIONS[mode]} "
+        "Return only valid JSON. Preserve names, decisions, owners, dates, risks, and "
+        "follow-up questions. If an array has no evidence, return an empty array. JSON shape: "
+        '{"summaryMode": string, "title": string, "overview": string, "keyTopics": string[], "decisions": string[], '
+        '"actionItems": string[], "followUps": string[], '
+        '"outline": [{"start": number, "title": string}]}. '
+        "summaryMode must be one of reasoning, full_transcript, clean_detailed, meeting_note, "
+        "call_note, strategic_meeting, or concise_rewrite. If the requested mode is not Reasoning "
+        "Summary, set summaryMode to the requested mode. If the requested mode is Reasoning "
+        "Summary, set summaryMode to the mode you selected for the transcript. "
+        "The outline should be a compact chronological table of contents unless the selected mode "
+        "requires a transcript-like output. Use the timestamps supplied in the transcript input. "
+        "Do not translate text. Speaker labels such as SPEAKER_00, Speaker 1, and Participant 1 "
+        "are machine labels, not real names or topics. Never use those labels in the title, key "
+        "topics, overview, or outline titles unless the transcript explicitly gives a real person "
+        "name. The title must describe what was discussed, not who the diarization label was."
+    )
+
+
+def full_transcript_summary(
+    transcript: str,
+    segments: list[TranscriptSegment] | None = None,
+) -> SummaryResponse:
+    formatted = format_transcript_for_summary(transcript, segments).strip()
+    outline = build_outline_from_segments(transcript, segments)
+    return SummaryResponse(
+        title="Full transcript",
+        overview=formatted or transcript,
+        keyTopics=["Full transcript"],
+        decisions=[],
+        actionItems=[],
+        followUps=[],
+        outline=outline,
+        generatedAt=datetime.now(UTC),
+        summaryStatus="generated",
+        summaryMode="full_transcript",
+    )
+
+
 def normalize_openai_base_url(raw_url: str) -> str:
     parsed = urlparse(raw_url.strip().rstrip("/"))
     path = parsed.path.rstrip("/")
@@ -164,7 +259,11 @@ def normalize_openai_base_url(raw_url: str) -> str:
     return urlunparse(parsed._replace(path=path or ""))
 
 
-def parse_summary_payload(content: str, transcript: str = "") -> dict[str, Any]:
+def parse_summary_payload(
+    content: str,
+    transcript: str = "",
+    requested_mode: SummaryMode = "reasoning",
+) -> dict[str, Any]:
     trimmed = content.strip()
     if trimmed.startswith("```"):
         lines = trimmed.splitlines()
@@ -178,7 +277,9 @@ def parse_summary_payload(content: str, transcript: str = "") -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("Summary response was not a JSON object.")
 
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {
+        "summaryMode": selected_summary_mode(payload, requested_mode),
+    }
     for key, fallback in {
         "title": "Meeting summary",
         "overview": "",
@@ -211,6 +312,15 @@ def parse_summary_payload(content: str, transcript: str = "") -> dict[str, Any]:
     if not normalized["keyTopics"]:
         normalized["keyTopics"] = [normalized["title"]]
     return normalized
+
+
+def selected_summary_mode(payload: dict[str, Any], requested_mode: SummaryMode) -> SummaryMode:
+    if requested_mode != "reasoning":
+        return requested_mode
+    raw_mode = str(payload.get("summaryMode", payload.get("mode", ""))).strip()
+    if raw_mode in SUMMARY_MODE_NAMES:
+        return raw_mode  # type: ignore[return-value]
+    return "reasoning"
 
 
 def normalize_outline(value: list[Any]) -> list[MeetingOutlineItem]:

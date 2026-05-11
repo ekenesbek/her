@@ -21,7 +21,8 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-9 | review | P1 | ios | current worktree | Wire Alem OSS summaries and meeting chat | `todo/ios.md` |
 | IOS-10 | review | P1 | ios | current worktree | Persist meeting audio and improve transcript playback | `todo/ios.md` |
 | IOS-11 | planned | P1 | ios | current worktree | Add streaming audio processing for faster transcription | `todo/ios.md` |
-| BUG-2 | blocked | P1 | ios | current worktree | Clean AI summaries and add audio scrubber | `todo/ios.md` |
+| IOS-12 | review | P1 | ios | current worktree | Add Omi-style transcription providers and GPU service | `todo/ios.md` |
+| BUG-2 | review | P1 | ios | current worktree | Clean AI summaries and add audio scrubber | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 

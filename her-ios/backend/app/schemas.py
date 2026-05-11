@@ -8,6 +8,7 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     version: str
     database: str
+    transcriptionProvider: str
     whisperModel: str
     summaryModel: str
     openaiConfigured: bool
@@ -43,11 +44,21 @@ class VoiceProfileListResponse(BaseModel):
     profiles: list[VoiceProfileResponse]
 
 
+SummaryStatus = Literal["generated", "unavailable"]
+SummaryMode = Literal[
+    "reasoning",
+    "full_transcript",
+    "clean_detailed",
+    "meeting_note",
+    "call_note",
+    "strategic_meeting",
+    "concise_rewrite",
+]
+
+
 class SummaryRequest(BaseModel):
     transcript: str = Field(min_length=1)
-
-
-SummaryStatus = Literal["generated", "unavailable"]
+    summaryMode: SummaryMode = "reasoning"
 
 
 class SummaryResponse(BaseModel):
@@ -60,6 +71,7 @@ class SummaryResponse(BaseModel):
     outline: list[MeetingOutlineItem] = Field(default_factory=list)
     generatedAt: datetime
     summaryStatus: SummaryStatus = "generated"
+    summaryMode: SummaryMode = "reasoning"
 
 
 class MeetingResponse(SummaryResponse):
@@ -92,6 +104,11 @@ class MeetingSaveRequest(BaseModel):
     outline: list[MeetingOutlineItem] = Field(default_factory=list)
     generatedAt: datetime
     summaryStatus: SummaryStatus = "generated"
+    summaryMode: SummaryMode = "reasoning"
+
+
+class SummaryModeRequest(BaseModel):
+    summaryMode: SummaryMode = "reasoning"
 
 
 class MeetingListResponse(BaseModel):

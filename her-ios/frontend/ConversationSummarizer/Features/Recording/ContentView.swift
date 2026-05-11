@@ -3886,7 +3886,7 @@ private struct SummaryPanel: View {
     var body: some View {
         AppCard {
             VStack(alignment: .leading, spacing: 16) {
-                SectionTitle(label: "SUMMARY", title: summary.title, icon: "doc.text.magnifyingglass")
+                SectionTitle(label: summary.summaryMode.title.uppercased(), title: summary.title, icon: summary.summaryMode.icon)
 
                 if let onGenerateSummary {
                     WwPrimaryButton(isGenerating ? "Generating summary..." : "Generate summary", disabled: isGenerating) {

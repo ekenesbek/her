@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,11 +20,19 @@ class Settings(BaseSettings):
     whisper_cpu_threads: int = 0
     whisper_num_workers: int = 1
     whisperx_batch_size: int = 4
+    transcription_provider: Literal["local", "deepgram", "external"] = "local"
     transcription_chunking_enabled: bool = True
     transcription_chunk_seconds: int = 30
     transcription_chunk_overlap_seconds: int = 3
     transcription_chunk_min_duration_seconds: int = 30
     transcription_chunk_workers: int = 2
+    deepgram_api_key: str | None = None
+    deepgram_base_url: str = "https://api.deepgram.com"
+    deepgram_model: str = "nova-3"
+    deepgram_language: str | None = "multi"
+    deepgram_timeout_seconds: float = 600.0
+    external_transcription_url: str | None = None
+    external_transcription_timeout_seconds: float = 1800.0
 
     openai_api_key: str | None = None
     openai_base_url: str | None = None
@@ -42,9 +51,22 @@ class Settings(BaseSettings):
     diarization_max_speakers: int = 0
     voice_profile_match_threshold: float = 0.62
 
-    @field_validator("whisper_language", mode="before")
+    @field_validator("transcription_provider", mode="before")
     @classmethod
-    def normalize_empty_whisper_language(cls, value: object) -> object:
+    def normalize_transcription_provider(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator(
+        "whisper_language",
+        "deepgram_api_key",
+        "deepgram_language",
+        "external_transcription_url",
+        mode="before",
+    )
+    @classmethod
+    def normalize_empty_string(cls, value: object) -> object:
         if isinstance(value, str):
             normalized = value.strip()
             return normalized or None

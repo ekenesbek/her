@@ -1,5 +1,55 @@
 import Foundation
 
+enum MeetingSummaryMode: String, Codable, CaseIterable, Identifiable, Equatable {
+    case reasoning = "reasoning"
+    case fullTranscript = "full_transcript"
+    case cleanDetailed = "clean_detailed"
+    case meetingNote = "meeting_note"
+    case callNote = "call_note"
+    case strategicMeeting = "strategic_meeting"
+    case conciseRewrite = "concise_rewrite"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .reasoning:
+            return "Reasoning Summary"
+        case .fullTranscript:
+            return "Full Transcript"
+        case .cleanDetailed:
+            return "Clean + Detailed"
+        case .meetingNote:
+            return "Meeting Note"
+        case .callNote:
+            return "Call Note"
+        case .strategicMeeting:
+            return "Strategic Minutes"
+        case .conciseRewrite:
+            return "Clear Rewrite"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .reasoning:
+            return "sparkles"
+        case .fullTranscript:
+            return "doc.plaintext"
+        case .cleanDetailed:
+            return "text.badge.checkmark"
+        case .meetingNote:
+            return "note.text"
+        case .callNote:
+            return "phone"
+        case .strategicMeeting:
+            return "chart.bar.doc.horizontal"
+        case .conciseRewrite:
+            return "checkmark.circle"
+        }
+    }
+}
+
 struct MeetingOutlineItem: Codable, Equatable, Identifiable {
     var id = UUID()
     let start: Double
@@ -51,6 +101,7 @@ struct MeetingSummary: Codable, Equatable, Identifiable {
     let outline: [MeetingOutlineItem]
     let generatedAt: Date
     let summaryStatus: String
+    let summaryMode: MeetingSummaryMode
 
     init(
         id: UUID = UUID(),
@@ -62,7 +113,8 @@ struct MeetingSummary: Codable, Equatable, Identifiable {
         followUps: [String],
         outline: [MeetingOutlineItem] = [],
         generatedAt: Date,
-        summaryStatus: String = "generated"
+        summaryStatus: String = "generated",
+        summaryMode: MeetingSummaryMode = .reasoning
     ) {
         self.id = id
         self.title = title
@@ -74,6 +126,7 @@ struct MeetingSummary: Codable, Equatable, Identifiable {
         self.outline = outline
         self.generatedAt = generatedAt
         self.summaryStatus = summaryStatus
+        self.summaryMode = summaryMode
     }
 
     var isGenerated: Bool {
