@@ -372,9 +372,19 @@ struct ContentView: View {
                 case .detail:
                     ExactConversationDetailScreen(
                         meeting: selectedMeeting,
+                        currentUserName: currentUserDisplayName,
                         onBack: { route = .conversations },
                         onGenerateSummary: { meeting in
                             selectedMeeting = try? await meetingsStore.generateSummary(for: meeting)
+                        },
+                        onUpdateTranscript: { meeting, transcript, segments in
+                            let updated = try await meetingsStore.updateTranscript(
+                                for: meeting,
+                                transcript: transcript,
+                                segments: segments
+                            )
+                            selectedMeeting = updated
+                            return updated
                         }
                     )
                 case .memory:
@@ -473,6 +483,16 @@ struct ContentView: View {
         Task { @MainActor in
             await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName)
         }
+    }
+
+    private var currentUserDisplayName: String {
+        if let name = authStore.session?.user.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        if let email = authStore.session?.user.email?.trimmingCharacters(in: .whitespacesAndNewlines), !email.isEmpty {
+            return email.components(separatedBy: "@").first ?? email
+        }
+        return settings.ownerDisplayName
     }
 }
 
@@ -1282,8 +1302,10 @@ private extension StoredMeeting {
 
 private struct ExactConversationDetailScreen: View {
     let meeting: StoredMeeting?
+    let currentUserName: String
     let onBack: () -> Void
     let onGenerateSummary: (StoredMeeting) async -> Void
+    let onUpdateTranscript: (StoredMeeting, String, [MeetingTranscriptSegment]) async throws -> StoredMeeting
     private let tabs = ["contents", "summary", "chat"]
     @State private var selectedTab = 0
     @State private var isGeneratingSummary = false
@@ -1303,7 +1325,14 @@ private struct ExactConversationDetailScreen: View {
                     ScrollViewReader { scrollProxy in
                         ScrollView(showsIndicators: false) {
                             VStack(alignment: .leading, spacing: 16) {
-                                ConversationContentsPanel(meeting: meeting, scrollProxy: scrollProxy)
+                                ConversationContentsPanel(
+                                    meeting: meeting,
+                                    scrollProxy: scrollProxy,
+                                    currentUserName: currentUserName,
+                                    onUpdateTranscript: { transcript, segments in
+                                        try await onUpdateTranscript(meeting, transcript, segments)
+                                    }
+                                )
                             }
                             .padding(.horizontal, 22)
                             .padding(.bottom, 14)
@@ -4237,9 +4266,9 @@ private struct SummaryPanel: View {
 private struct ConversationContentsPanel: View {
     let meeting: StoredMeeting
     let scrollProxy: ScrollViewProxy
+    let currentUserName: String
+    let onUpdateTranscript: (String, [MeetingTranscriptSegment]) async throws -> StoredMeeting
     @State private var speakerNames: [String: String] = [:]
-    @State private var renamingSpeakerKey: String?
-    @State private var speakerDraft = ""
     @State private var lastScrolledChunkID: String?
     @StateObject private var playback = MeetingAudioPlaybackController()
 
@@ -4263,14 +4292,23 @@ private struct ConversationContentsPanel: View {
                     ForEach(displayChunks) { chunk in
                         ConversationTranscriptSegmentRow(
                             chunk: chunk,
-                            speakerName: displayName(for: chunk.speakerKey),
+                            speakerName: displayName(for: chunk),
                             isActive: activeChunkID == chunk.id,
-                            onPlay: {
-                                playback.playChunk(chunk, meeting: meeting)
+                            isPlaying: playback.isPlaying && activeChunkID == chunk.id,
+                            playbackTime: playback.currentTime,
+                            recentSpeakerNames: SpeakerNamePreferences.recentNames(),
+                            currentUserName: currentUserName,
+                            onTogglePlay: {
+                                toggleChunkPlayback(chunk)
                             },
-                            onRename: {
-                                speakerDraft = displayName(for: chunk.speakerKey)
-                                renamingSpeakerKey = chunk.speakerKey
+                            onPlayFromText: {
+                                toggleChunkPlayback(chunk)
+                            },
+                            onSaveSpeakerName: { name, scope in
+                                saveSpeakerName(name, for: chunk, scope: scope)
+                            },
+                            onSaveText: { text in
+                                try await saveTranscriptEdit(chunk, text: text)
                             }
                         )
                         .id(chunk.id)
@@ -4282,32 +4320,12 @@ private struct ConversationContentsPanel: View {
         .onAppear {
             speakerNames = SpeakerNamePreferences.load(meetingId: meeting.id)
         }
-        .alert("Rename speaker", isPresented: renameBinding) {
-            TextField("Speaker name", text: $speakerDraft)
-            Button("Save") {
-                saveSpeakerName()
-            }
-            Button("Cancel", role: .cancel) {
-                renamingSpeakerKey = nil
-            }
-        }
         .onChange(of: playback.currentTime) { _ in
             scrollToActiveChunkIfNeeded()
         }
         .onDisappear {
             playback.stop()
         }
-    }
-
-    private var renameBinding: Binding<Bool> {
-        Binding(
-            get: { renamingSpeakerKey != nil },
-            set: { isPresented in
-                if !isPresented {
-                    renamingSpeakerKey = nil
-                }
-            }
-        )
     }
 
     private var displaySegments: [MeetingTranscriptSegment] {
@@ -4354,6 +4372,14 @@ private struct ConversationContentsPanel: View {
         return trimmed.isEmpty ? "Speaker" : trimmed
     }
 
+    private func displayName(for chunk: TranscriptDisplayChunk) -> String {
+        let segmentKey = SpeakerNamePreferences.segmentKey(chunk.id)
+        if let renamed = speakerNames[segmentKey], !renamed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return renamed
+        }
+        return displayName(for: chunk.speakerKey)
+    }
+
     private func displayName(for speakerKey: String) -> String {
         if let renamed = speakerNames[speakerKey], !renamed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return renamed
@@ -4381,18 +4407,80 @@ private struct ConversationContentsPanel: View {
         return keys
     }
 
-    private func saveSpeakerName() {
-        guard let key = renamingSpeakerKey else {
-            return
-        }
-        let trimmed = speakerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func saveSpeakerName(
+        _ name: String,
+        for chunk: TranscriptDisplayChunk,
+        scope: SpeakerRenameScope
+    ) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = scope == .speaker ? chunk.speakerKey : SpeakerNamePreferences.segmentKey(chunk.id)
         if trimmed.isEmpty {
             speakerNames.removeValue(forKey: key)
         } else {
             speakerNames[key] = trimmed
+            SpeakerNamePreferences.rememberRecentName(trimmed)
         }
         SpeakerNamePreferences.save(speakerNames, meetingId: meeting.id)
-        renamingSpeakerKey = nil
+    }
+
+    private func saveTranscriptEdit(_ chunk: TranscriptDisplayChunk, text: String) async throws {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw TranscriptInlineEditError.emptyText
+        }
+        let updatedSegments = segments(replacing: chunk, with: trimmed)
+        let updatedTranscript = MeetingTranscriptTextBuilder.text(from: updatedSegments)
+        _ = try await onUpdateTranscript(updatedTranscript, updatedSegments)
+    }
+
+    private func toggleChunkPlayback(_ chunk: TranscriptDisplayChunk) {
+        if playback.isPlaying && activeChunkID == chunk.id {
+            playback.pausePlayback()
+        } else {
+            playback.playFrom(chunk.start, meeting: meeting)
+        }
+    }
+
+    private func segments(
+        replacing chunk: TranscriptDisplayChunk,
+        with text: String
+    ) -> [MeetingTranscriptSegment] {
+        let currentSegments = displaySegments
+        let indexes = chunk.segmentIndexes.sorted()
+        guard let firstIndex = indexes.first, firstIndex < currentSegments.count else {
+            return [
+                MeetingTranscriptSegment(
+                    start: chunk.start,
+                    end: chunk.end,
+                    text: text,
+                    speaker: chunk.speakerKey
+                )
+            ]
+        }
+
+        let skipIndexes = Set(indexes)
+        let lastIndex = min(indexes.last ?? firstIndex, currentSegments.count - 1)
+        var updated: [MeetingTranscriptSegment] = []
+
+        for (index, segment) in currentSegments.enumerated() {
+            if index == firstIndex {
+                let lastSegment = currentSegments[lastIndex]
+                updated.append(
+                    MeetingTranscriptSegment(
+                        start: segment.start,
+                        end: max(segment.end, lastSegment.end),
+                        text: text,
+                        speaker: segment.speaker
+                    )
+                )
+            } else if skipIndexes.contains(index) {
+                continue
+            } else {
+                updated.append(segment)
+            }
+        }
+
+        return updated
     }
 
     private func scrollToActiveChunkIfNeeded() {
@@ -4732,26 +4820,34 @@ private struct TranscriptDisplayChunk: Identifiable, Equatable {
     let end: Double
     let speakerKey: String
     let text: String
+    let segmentIndexes: [Int]
 
     static func group(
         segments: [MeetingTranscriptSegment],
         speakerKey: (MeetingTranscriptSegment) -> String
     ) -> [TranscriptDisplayChunk] {
-        let usableSegments = segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        var groups: [[MeetingTranscriptSegment]] = []
-        var current: [MeetingTranscriptSegment] = []
+        let usableSegments = segments.enumerated().filter { _, segment in
+            !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        var groups: [[(offset: Int, element: MeetingTranscriptSegment)]] = []
+        var current: [(offset: Int, element: MeetingTranscriptSegment)] = []
 
-        for segment in usableSegments {
+        for indexedSegment in usableSegments {
             guard let previous = current.last else {
-                current = [segment]
+                current = [indexedSegment]
                 continue
             }
 
-            if shouldStartNewGroup(next: segment, after: previous, current: current, speakerKey: speakerKey) {
+            if shouldStartNewGroup(
+                next: indexedSegment.element,
+                after: previous.element,
+                current: current.map { $0.element },
+                speakerKey: speakerKey
+            ) {
                 groups.append(current)
-                current = [segment]
+                current = [indexedSegment]
             } else {
-                current.append(segment)
+                current.append(indexedSegment)
             }
         }
 
@@ -4760,7 +4856,7 @@ private struct TranscriptDisplayChunk: Identifiable, Equatable {
         }
 
         return groups.compactMap { group in
-            guard let first = group.first, let last = group.last else {
+            guard let first = group.first?.element, let last = group.last?.element else {
                 return nil
             }
             let key = speakerKey(first)
@@ -4771,7 +4867,8 @@ private struct TranscriptDisplayChunk: Identifiable, Equatable {
                 start: first.start,
                 end: max(first.end, last.end),
                 speakerKey: key,
-                text: group.map(\.text).joined(separator: " ")
+                text: group.map { $0.element.text }.joined(separator: " "),
+                segmentIndexes: group.map { $0.offset }
             )
         }
     }
@@ -4906,6 +5003,25 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         }
     }
 
+    func playFrom(_ seconds: Double, meeting: StoredMeeting) {
+        Task { @MainActor in
+            guard canPlay(meeting) else {
+                return
+            }
+            do {
+                let player = try await preparePlayer(for: meeting)
+                stopAt = nil
+                player.currentTime = clampedTime(seconds)
+                currentTime = player.currentTime
+                play(player)
+                isPlaying = true
+                startTimer()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     func seek(to seconds: Double, meeting: StoredMeeting, resumePlayback: Bool) {
         Task { @MainActor in
             guard canPlay(meeting) else {
@@ -4946,6 +5062,10 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    func pausePlayback() {
+        pause()
     }
 
     func stop() {
@@ -5036,6 +5156,9 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
 
     private func pause() {
         player?.pause()
+        if let player {
+            currentTime = player.currentTime
+        }
         try? Self.deactivatePlaybackAudioSession()
         timer?.invalidate()
         timer = nil
@@ -5190,25 +5313,71 @@ private struct ConversationTranscriptSegmentRow: View {
     let chunk: TranscriptDisplayChunk
     let speakerName: String
     let isActive: Bool
-    let onPlay: () -> Void
-    let onRename: () -> Void
+    let isPlaying: Bool
+    let playbackTime: Double
+    let recentSpeakerNames: [String]
+    let currentUserName: String
+    let onTogglePlay: () -> Void
+    let onPlayFromText: () -> Void
+    let onSaveSpeakerName: (String, SpeakerRenameScope) -> Void
+    let onSaveText: (String) async throws -> Void
+
+    @State private var textDraft: String
+    @State private var speakerDraft: String
+    @State private var isEditingText = false
+    @State private var isRenamingSpeaker = false
+    @State private var isSavingText = false
+    @State private var textErrorMessage: String?
+    @FocusState private var focusedField: FocusedField?
+
+    init(
+        chunk: TranscriptDisplayChunk,
+        speakerName: String,
+        isActive: Bool,
+        isPlaying: Bool,
+        playbackTime: Double,
+        recentSpeakerNames: [String],
+        currentUserName: String,
+        onTogglePlay: @escaping () -> Void,
+        onPlayFromText: @escaping () -> Void,
+        onSaveSpeakerName: @escaping (String, SpeakerRenameScope) -> Void,
+        onSaveText: @escaping (String) async throws -> Void
+    ) {
+        self.chunk = chunk
+        self.speakerName = speakerName
+        self.isActive = isActive
+        self.isPlaying = isPlaying
+        self.playbackTime = playbackTime
+        self.recentSpeakerNames = recentSpeakerNames
+        self.currentUserName = currentUserName
+        self.onTogglePlay = onTogglePlay
+        self.onPlayFromText = onPlayFromText
+        self.onSaveSpeakerName = onSaveSpeakerName
+        self.onSaveText = onSaveText
+        _textDraft = State(initialValue: chunk.text)
+        _speakerDraft = State(initialValue: speakerName)
+    }
+
+    private enum FocusedField: Hashable {
+        case text
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 14) {
-                Button(action: onPlay) {
+                Button(action: onTogglePlay) {
                     HStack(spacing: 6) {
-                        Image(systemName: isActive ? "pause.fill" : "play.fill")
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 10, weight: .semibold))
                         Text(MeetingTimeFormatter.timestamp(chunk.start))
                             .font(.system(size: 15, weight: .regular, design: .monospaced))
                     }
-                    .foregroundColor(isActive ? AppTheme.fg : AppTheme.dim)
+                    .foregroundColor(isPlaying ? AppTheme.fg : AppTheme.dim)
                     .frame(width: 86, alignment: .leading)
                 }
                 .buttonStyle(PlainButtonStyle())
 
-                Button(action: onRename) {
+                Button(action: beginSpeakerRenaming) {
                     Text(speakerName)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundColor(AppTheme.fg)
@@ -5218,12 +5387,51 @@ private struct ConversationTranscriptSegmentRow: View {
                 Spacer(minLength: 0)
             }
 
-            Text(chunk.text)
-                .font(.system(size: 18, weight: .regular))
-                .foregroundColor(isActive ? AppTheme.fg : AppTheme.muted)
-                .lineSpacing(6)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            if isEditingText {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextEditor(text: $textDraft)
+                        .font(.system(size: 18, weight: .regular))
+                        .foregroundColor(AppTheme.fg)
+                        .focused($focusedField, equals: .text)
+                        .frame(minHeight: textEditorHeight)
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(AppTheme.bg))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+
+                    HStack(spacing: 8) {
+                        InlineEditActionButton(
+                            systemName: isSavingText ? "hourglass" : "checkmark",
+                            disabled: isSavingText,
+                            action: commitTextEdit
+                        )
+                        InlineEditActionButton(
+                            systemName: "xmark",
+                            disabled: isSavingText,
+                            action: cancelTextEdit
+                        )
+
+                        if let textErrorMessage {
+                            Text(textErrorMessage)
+                                .font(.system(size: 12, weight: .regular))
+                                .foregroundColor(AppTheme.danger)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                }
+            } else {
+                playbackHighlightedText
+                    .font(.system(size: 18, weight: .regular))
+                    .lineSpacing(6)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        TapGesture(count: 2)
+                            .onEnded { beginTextEditing() }
+                            .exclusively(before: TapGesture(count: 1).onEnded { onPlayFromText() })
+                    )
+            }
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 10)
@@ -5231,8 +5439,422 @@ private struct ConversationTranscriptSegmentRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(isActive ? AppTheme.bgSoft : Color.clear)
         )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onPlay)
+        .onChange(of: chunk.text) { newValue in
+            if !isEditingText {
+                textDraft = newValue
+            }
+        }
+        .onChange(of: speakerName) { newValue in
+            if !isRenamingSpeaker {
+                speakerDraft = newValue
+            }
+        }
+        .sheet(isPresented: $isRenamingSpeaker) {
+            SpeakerRenamePopup(
+                initialName: speakerName,
+                recentNames: recentSpeakerNames,
+                currentUserName: currentUserName,
+                onCancel: cancelSpeakerRename,
+                onSave: commitSpeakerRename
+            )
+            .speakerRenameSheetStyle()
+        }
+    }
+
+    private var textEditorHeight: CGFloat {
+        let lineCount = max(3, textDraft.components(separatedBy: .newlines).count + textDraft.count / 42)
+        return min(220, CGFloat(lineCount * 25 + 24))
+    }
+
+    private var playbackHighlightedText: Text {
+        guard isActive && isPlaying else {
+            return Text(chunk.text).foregroundColor(AppTheme.fg)
+        }
+
+        let highlightedCount = highlightedPlaybackWordCount
+        var rendered = Text("")
+        var wordIndex = 0
+
+        for token in TranscriptPlaybackTextToken.tokenize(chunk.text) {
+            if token.isWord {
+                let color = wordIndex < highlightedCount ? AppTheme.playbackBlue : AppTheme.fg
+                rendered = rendered + Text(token.value).foregroundColor(color)
+                wordIndex += 1
+            } else {
+                rendered = rendered + Text(token.value).foregroundColor(AppTheme.fg)
+            }
+        }
+
+        return rendered
+    }
+
+    private var highlightedPlaybackWordCount: Int {
+        guard isActive && isPlaying else {
+            return 0
+        }
+
+        let wordCount = TranscriptPlaybackTextToken.wordCount(in: chunk.text)
+        guard wordCount > 0 else {
+            return 0
+        }
+
+        let duration = max(0.1, chunk.end - chunk.start)
+        let readableLeadSeconds = min(0.9, max(0.25, duration * 0.12))
+        let progress = min(max((playbackTime + readableLeadSeconds - chunk.start) / duration, 0), 1)
+        guard progress > 0 else {
+            return 0
+        }
+
+        return min(wordCount, max(1, Int(ceil(progress * Double(wordCount)))))
+    }
+
+    private func beginSpeakerRenaming() {
+        speakerDraft = speakerName
+        isRenamingSpeaker = true
+    }
+
+    private func commitSpeakerRename(_ name: String, scope: SpeakerRenameScope) {
+        speakerDraft = name
+        onSaveSpeakerName(name, scope)
+        isRenamingSpeaker = false
+    }
+
+    private func cancelSpeakerRename() {
+        speakerDraft = speakerName
+        isRenamingSpeaker = false
+    }
+
+    private func beginTextEditing() {
+        textDraft = chunk.text
+        textErrorMessage = nil
+        isEditingText = true
+        DispatchQueue.main.async {
+            focusedField = .text
+        }
+    }
+
+    private func commitTextEdit() {
+        guard !isSavingText else {
+            return
+        }
+        let trimmed = textDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            textErrorMessage = TranscriptInlineEditError.emptyText.localizedDescription
+            return
+        }
+
+        isSavingText = true
+        textErrorMessage = nil
+        Task { @MainActor in
+            do {
+                try await onSaveText(trimmed)
+                isEditingText = false
+                focusedField = nil
+            } catch {
+                textErrorMessage = error.localizedDescription
+            }
+            isSavingText = false
+        }
+    }
+
+    private func cancelTextEdit() {
+        textDraft = chunk.text
+        textErrorMessage = nil
+        isEditingText = false
+        focusedField = nil
+    }
+}
+
+private struct TranscriptPlaybackTextToken {
+    let value: String
+    let isWord: Bool
+
+    static func tokenize(_ text: String) -> [TranscriptPlaybackTextToken] {
+        var tokens: [TranscriptPlaybackTextToken] = []
+        var buffer = ""
+        var currentIsWord: Bool?
+
+        for character in text {
+            let isWord = !character.isTranscriptWhitespace
+            if currentIsWord == isWord {
+                buffer.append(character)
+            } else {
+                append(buffer, isWord: currentIsWord, to: &tokens)
+                buffer = String(character)
+                currentIsWord = isWord
+            }
+        }
+
+        append(buffer, isWord: currentIsWord, to: &tokens)
+        return tokens
+    }
+
+    static func wordCount(in text: String) -> Int {
+        tokenize(text).filter(\.isWord).count
+    }
+
+    private static func append(
+        _ value: String,
+        isWord: Bool?,
+        to tokens: inout [TranscriptPlaybackTextToken]
+    ) {
+        guard let isWord, !value.isEmpty else {
+            return
+        }
+        tokens.append(TranscriptPlaybackTextToken(value: value, isWord: isWord))
+    }
+}
+
+private extension Character {
+    var isTranscriptWhitespace: Bool {
+        unicodeScalars.allSatisfy { scalar in
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+        }
+    }
+}
+
+private struct InlineEditActionButton: View {
+    let systemName: String
+    var disabled = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(disabled ? AppTheme.dim : AppTheme.fg)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(AppTheme.bgSoft))
+                .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+        }
+        .buttonStyle(PlainButtonStyle())
+        .disabled(disabled)
+    }
+}
+
+private enum SpeakerRenameScope {
+    case segment
+    case speaker
+}
+
+private struct SpeakerRenamePopup: View {
+    let initialName: String
+    let recentNames: [String]
+    let currentUserName: String
+    let onCancel: () -> Void
+    let onSave: (String, SpeakerRenameScope) -> Void
+
+    @State private var draft: String
+    @State private var scope: SpeakerRenameScope = .speaker
+    @FocusState private var isNameFocused: Bool
+
+    init(
+        initialName: String,
+        recentNames: [String],
+        currentUserName: String,
+        onCancel: @escaping () -> Void,
+        onSave: @escaping (String, SpeakerRenameScope) -> Void
+    ) {
+        self.initialName = initialName
+        self.recentNames = recentNames
+        self.currentUserName = currentUserName
+        self.onCancel = onCancel
+        self.onSave = onSave
+        _draft = State(initialValue: initialName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 16) {
+                Text("Name this speaker")
+                    .font(.system(size: 25, weight: .regular))
+                    .foregroundColor(AppTheme.fg)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+
+                Spacer(minLength: 12)
+
+                Button(action: onCancel) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(AppTheme.fg)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+
+            DividerLine()
+
+            TextField(initialName, text: $draft)
+                .font(.system(size: 16, weight: .regular))
+                .foregroundColor(AppTheme.fg)
+                .focused($isNameFocused)
+                .textFieldStyle(.plain)
+                .submitLabel(.done)
+                .onSubmit {
+                    isNameFocused = false
+                }
+                .padding(.horizontal, 11)
+                .frame(height: 48)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(AppTheme.bg))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+
+            if let userName = selfName {
+                Button(action: { draft = userName }) {
+                    Text("\(userName)(you)")
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundColor(AppTheme.muted)
+                        .padding(.horizontal, 9)
+                        .frame(height: 32)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                                .foregroundColor(AppTheme.borderStrong)
+                        )
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Recently used names")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundColor(AppTheme.muted)
+                    .padding(.bottom, 8)
+
+                ForEach(recentDisplayNames, id: \.self) { name in
+                    Button(action: { draft = name }) {
+                        Text(name)
+                            .font(.system(size: 17, weight: .regular))
+                            .foregroundColor(AppTheme.fg)
+                            .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .overlay(alignment: .bottom) {
+                        DividerLine()
+                    }
+                }
+            }
+
+            VStack(spacing: 0) {
+                SpeakerRenameScopeRow(
+                    title: "Apply to this segment",
+                    subtitle: nil,
+                    isSelected: scope == .segment,
+                    action: { scope = .segment }
+                )
+
+                SpeakerRenameScopeRow(
+                    title: "Apply to all segments from this speaker",
+                    subtitle: "The notes will be automatically updated according to the template.",
+                    isSelected: scope == .speaker,
+                    action: { scope = .speaker }
+                )
+            }
+
+            Button(action: save) {
+                Text("Save")
+                    .font(.system(size: 17, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.bg)
+                    .frame(maxWidth: .infinity, minHeight: 46)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(AppTheme.fg))
+            }
+            .buttonStyle(PlainButtonStyle())
+            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+            .padding(.top, 4)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 20)
+        .padding(.bottom, 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(AppTheme.bg.ignoresSafeArea())
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                isNameFocused = true
+            }
+        }
+    }
+
+    private var recentDisplayNames: [String] {
+        let userName = selfName
+        let filtered = recentNames.filter { name in
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !trimmed.isEmpty && trimmed != draft && trimmed != userName
+        }
+        let defaults = ["Арман", "Азамат", "Асгард", "Ерасыл"].filter { !filtered.contains($0) && $0 != userName }
+        return Array((filtered + defaults).prefix(4))
+    }
+
+    private var selfName: String? {
+        let trimmed = currentUserName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty && trimmed != "Owner" else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private func save() {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        onSave(trimmed, scope)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func speakerRenameSheetStyle() -> some View {
+        if #available(iOS 16.0, *) {
+            self
+                .presentationDetents([.fraction(0.75)])
+                .presentationDragIndicator(.visible)
+        } else {
+            self
+        }
+    }
+}
+
+private struct SpeakerRenameScopeRow: View {
+    let title: String
+    let subtitle: String?
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundColor(AppTheme.fg)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundColor(AppTheme.dim)
+                            .lineSpacing(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Spacer(minLength: 12)
+
+                ZStack {
+                    Circle()
+                        .stroke(isSelected ? AppTheme.fg : AppTheme.borderStrong, lineWidth: isSelected ? 2 : 1.5)
+                        .frame(width: 19, height: 19)
+                    if isSelected {
+                        Circle()
+                            .fill(AppTheme.fg)
+                            .frame(width: 10, height: 10)
+                    }
+                }
+            }
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -5249,6 +5871,59 @@ private struct ContentsSectionTitle: View {
                     .frame(height: 1)
                     .offset(y: 4)
             }
+    }
+}
+
+private enum TranscriptInlineEditError: LocalizedError {
+    case emptyText
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyText:
+            return "Transcript text cannot be empty."
+        }
+    }
+}
+
+private enum MeetingTranscriptTextBuilder {
+    static func text(from segments: [MeetingTranscriptSegment]) -> String {
+        let nonEmptySegments = segments.filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !nonEmptySegments.isEmpty else {
+            return ""
+        }
+
+        let speakerKeys = uniqueSpeakerKeys(in: nonEmptySegments)
+        let shouldPrefixSpeaker = speakerKeys.count > 1 || speakerKeys.contains { key in
+            !key.localizedCaseInsensitiveContains("speaker")
+        }
+
+        return nonEmptySegments.map { segment in
+            let cleanText = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard shouldPrefixSpeaker else {
+                return cleanText
+            }
+            let speaker = speakerKey(for: segment)
+            return "\(speaker): \(cleanText)"
+        }
+        .joined(separator: "\n")
+    }
+
+    private static func uniqueSpeakerKeys(in segments: [MeetingTranscriptSegment]) -> [String] {
+        var keys: [String] = []
+        for segment in segments {
+            let key = speakerKey(for: segment)
+            if !keys.contains(key) {
+                keys.append(key)
+            }
+        }
+        return keys
+    }
+
+    private static func speakerKey(for segment: MeetingTranscriptSegment) -> String {
+        let trimmed = segment.speaker?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Speaker" : trimmed
     }
 }
 
@@ -5349,12 +6024,32 @@ private enum MeetingContentsBuilder {
 }
 
 private enum SpeakerNamePreferences {
+    private static let recentNamesKey = "her.meeting.recentSpeakerNames"
+
     static func load(meetingId: String) -> [String: String] {
         UserDefaults.standard.dictionary(forKey: key(meetingId)) as? [String: String] ?? [:]
     }
 
     static func save(_ names: [String: String], meetingId: String) {
         UserDefaults.standard.set(names, forKey: key(meetingId))
+    }
+
+    static func segmentKey(_ chunkID: String) -> String {
+        "segment.\(chunkID)"
+    }
+
+    static func recentNames() -> [String] {
+        UserDefaults.standard.stringArray(forKey: recentNamesKey) ?? []
+    }
+
+    static func rememberRecentName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        var names = recentNames().filter { $0 != trimmed }
+        names.insert(trimmed, at: 0)
+        UserDefaults.standard.set(Array(names.prefix(12)), forKey: recentNamesKey)
     }
 
     private static func key(_ meetingId: String) -> String {
@@ -7267,6 +7962,7 @@ private enum AppTheme {
     static let dim = Color(hex: 0x7a7a7a)
     static let accent = Color(hex: 0x0f0f0f)
     static let accentSoft = Color(hex: 0xf3f2ee)
+    static let playbackBlue = Color(hex: 0x1c5cff)
     static let danger = Color(hex: 0xa00000)
     static let success = Color(hex: 0x2f6b2f)
     static let warn = Color(hex: 0xa06a00)

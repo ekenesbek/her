@@ -23,6 +23,7 @@ from app.schemas import (
     MeetingListResponse,
     MeetingResponse,
     MeetingSaveRequest,
+    MeetingTranscriptUpdateRequest,
     SummaryMode,
     SummaryModeRequest,
     SummaryRequest,
@@ -443,6 +444,23 @@ def get_meeting(
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found.")
     return meeting
+
+
+@app.patch("/v1/meetings/{meeting_id}/transcript", response_model=MeetingResponse)
+def update_meeting_transcript(
+    meeting_id: str,
+    payload: MeetingTranscriptUpdateRequest,
+    user: UserResponse = Depends(current_user),
+) -> MeetingResponse:
+    updated = store.update_meeting_transcript(
+        meeting_id,
+        user.id,
+        payload.transcript,
+        payload.segments,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    return updated
 
 
 @app.get("/v1/meetings/{meeting_id}/audio")

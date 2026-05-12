@@ -52,6 +52,7 @@ struct StoredMeeting: Identifiable, Equatable {
         }
         return "\(seconds)s"
     }
+
 }
 
 @MainActor
@@ -91,6 +92,27 @@ final class MeetingsStore: ObservableObject {
         }
         return updated
     }
+
+    func updateTranscript(
+        for meeting: StoredMeeting,
+        transcript: String,
+        segments: [MeetingTranscriptSegment]
+    ) async throws -> StoredMeeting {
+        guard let service else {
+            throw MeetingsServiceError.backendFailed
+        }
+        let updated = try await service.updateTranscript(
+            meetingId: meeting.id,
+            transcript: transcript,
+            segments: segments
+        )
+        if let index = meetings.firstIndex(where: { $0.id == updated.id }) {
+            meetings[index] = updated
+        } else {
+            meetings.insert(updated, at: 0)
+        }
+        return updated
+    }
 }
 
 struct MeetingSavePayload {
@@ -108,6 +130,7 @@ protocol MeetingsService {
     func listMeetings() async throws -> [StoredMeeting]
     func saveMeeting(_ payload: MeetingSavePayload) async throws -> StoredMeeting
     func generateSummary(meetingId: String, mode: MeetingSummaryMode) async throws -> StoredMeeting
+    func updateTranscript(meetingId: String, transcript: String, segments: [MeetingTranscriptSegment]) async throws -> StoredMeeting
 }
 
 protocol MeetingAudioDownloadService {
@@ -182,6 +205,25 @@ struct BackendMeetingsService: MeetingsService {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         request.httpBody = try JSONEncoder().encode(BackendSummaryModeBody(summaryMode: mode.rawValue))
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw MeetingsServiceError.backendFailed
+        }
+
+        return try Self.decoder().decode(BackendMeetingRecord.self, from: data).storedMeeting
+    }
+
+    func updateTranscript(meetingId: String, transcript: String, segments: [MeetingTranscriptSegment]) async throws -> StoredMeeting {
+        var request = URLRequest(url: endpoint.appendingPathComponent(meetingId).appendingPathComponent("transcript"))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONEncoder().encode(
+            BackendMeetingTranscriptUpdateBody(transcript: transcript, segments: segments)
+        )
 
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
@@ -283,6 +325,11 @@ private struct BackendMeetingSaveBody: Encodable {
 
 private struct BackendSummaryModeBody: Encodable {
     let summaryMode: String
+}
+
+private struct BackendMeetingTranscriptUpdateBody: Encodable {
+    let transcript: String
+    let segments: [MeetingTranscriptSegment]
 }
 
 private struct BackendMeetingListResponse: Decodable {

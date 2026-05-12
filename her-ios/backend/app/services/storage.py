@@ -147,6 +147,20 @@ class MeetingStore:
         self.save(updated, user_id=user_id)
         return updated
 
+    def update_meeting_transcript(
+        self,
+        meeting_id: str,
+        user_id: str,
+        transcript: str,
+        segments: list[TranscriptSegment],
+    ) -> MeetingResponse | None:
+        meeting = self.get(meeting_id, user_id=user_id)
+        if meeting is None:
+            return None
+        updated = meeting.model_copy(update={"transcript": transcript, "segments": segments})
+        self.save(updated, user_id=user_id)
+        return self.get(meeting_id, user_id=user_id)
+
     def list_chat_messages(
         self,
         meeting_id: str,

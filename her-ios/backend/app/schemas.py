@@ -108,6 +108,11 @@ class MeetingSaveRequest(BaseModel):
     summaryMode: SummaryMode = "reasoning"
 
 
+class MeetingTranscriptUpdateRequest(BaseModel):
+    transcript: str = Field(min_length=1)
+    segments: list[TranscriptSegment] = Field(default_factory=list)
+
+
 class SummaryModeRequest(BaseModel):
     summaryMode: SummaryMode = "reasoning"
 

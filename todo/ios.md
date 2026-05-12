@@ -188,7 +188,12 @@ Out of scope:
 - [x] Remove duplicated transcribing status, collapse duplicate expand controls into one toggle, shrink audio transport controls, and restore iOS playback session setup.
 - [x] Verify backend/iOS builds and deploy backend.
 - [x] Patch WhisperX/pyannote assignment to assign speakers at word level and split transcript segments when the speaker changes inside one Whisper segment.
-- [ ] Install iOS app after the physical iPhone is available to CoreDevice.
+- [x] Add double-tap transcript text editing with persisted meeting segment updates.
+- [x] Replace speaker double-tap rename with a single-tap bottom-sheet rename flow.
+- [x] Compact the speaker rename popup, keep keyboard Done from saving, and use the signed-in username chip.
+- [x] Add word-by-word blue playback progress inside the active transcript chunk.
+- [x] Add a small readable lead to transcript word highlighting so it does not feel behind audio.
+- [x] Install iOS app after the physical iPhone is available to CoreDevice.
 
 ## Verification
 
@@ -209,14 +214,54 @@ Out of scope:
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
 - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after adding word-by-word blue playback progress inside the active transcript chunk.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after adding a readable lead to transcript word highlighting.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after compacting the speaker rename popup, changing keyboard Done to dismiss focus only, applying a 75% sheet detent, and replacing the hardcoded self-name chip with the current username.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after switching speaker rename to single tap with a bottom-sheet style popup.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after making repeat single-tap on the active transcript text pause playback.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after switching playback to interrupt other audio and reapplying speed after play.
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
 - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `python3 -m compileall her-ios/backend/app` after the transcript edit endpoint update.
+- `PYTHONPATH=her-ios/backend python3 - <<'PY' ...` storage smoke verified `update_meeting_transcript` updates transcript/segments for the correct user and returns `None` for a missing meeting.
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after the double-tap transcript editor update.
+- Deployed `app/main.py`, `app/schemas.py`, and `app/services/storage.py` to `51.195.200.207`; backup created at `/home/ubuntu/meta-ios-deploy-backups/backend-20260511-170746-transcript-edit.tgz`.
+- Remote backend compile, `systemctl restart meta-ios-backend.service`, `GET /health`, `systemctl is-active meta-ios-backend.service`, and OpenAPI route check verified `PATCH /v1/meetings/{meeting_id}/transcript`.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after switching transcript text edits to inline keyboard editing, speaker renaming to popup, and timestamp playback to continuous mode.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 
 Blocked:
-- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` failed because the iPhone was locked. The updated app was installed successfully.
-- Installing the latest playback-session/rate build did not run because `xcrun devicectl list devices` reports `iPhone (Yerasyl)` as `unavailable`, and `devicectl device install app` cannot locate the device.
 - Full 15-minute mp3 diagnostic on the VPS was stopped after roughly 16 minutes because it was still in WhisperX ASR/VAD on CPU and produced no additional speaker-assignment signal beyond the completed excerpt run.
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` failed because the iPhone was locked. The updated app was installed successfully.
 
 ## Result
 
@@ -234,9 +279,13 @@ Playback now uses `.playback` with no mix/duck options so other audio is interru
 
 Backend diarization assignment no longer depends on fixed speaker-count settings to preserve speaker turns. After `pyannote/speaker-diarization-3.1` returns intervals, the backend now reapplies those intervals to aligned WhisperX words by overlap/nearest interval and materializes separate transcript segments whenever the word-level speaker changes inside one Whisper segment. This prevents long Whisper segments from being saved as a single dominant `SPEAKER_00` when pyannote already found multiple speakers.
 
+Transcript chunks can now be edited inline from the contents transcript. Single tap on transcript text plays audio from that timestamp continuously instead of stopping at the chunk end. Double tap replaces the text in place with a focused editor and opens the keyboard without a separate sheet. Saving updates the affected transcript segment range, rebuilds the meeting transcript text, updates local state, and persists the edit through the new authenticated `PATCH /v1/meetings/{meeting_id}/transcript` backend endpoint. The endpoint is deployed on `51.195.200.207`.
+
+Speaker labels now open a bottom-sheet rename popup on single tap so a person's name can be entered for `Speaker 1`, `Speaker 2`, and similar labels. The popup uses a compact 75% sheet on supported iOS versions, includes an inline name field, a quick current-username chip, recent name suggestions, and an option to apply the name either only to the selected segment or to all segments from that speaker. Pressing Done on the keyboard now only dismisses the keyboard; saving still requires the Save button. The small timestamp play button and transcript text now start continuous playback from that timestamp; pressing either again while its row is active pauses audio at the current playback time. While audio is playing, the active transcript chunk now highlights elapsed words in blue based on playback progress with a small readable lead, and returns previous chunks to black when playback moves forward.
+
 ## Next
 
-Result is ready for human review. Record or upload a new multi-speaker meeting through the server and verify the contents transcript shows alternating speaker turns instead of one speaker for the whole meeting. The iPhone install smoke remains blocked until the device is available to CoreDevice. After approval: commit, push/PR only if requested, then archive/update task state.
+Result is ready for human review. Record or upload a new multi-speaker meeting through the server and verify the contents transcript shows alternating speaker turns instead of one speaker for the whole meeting; on the installed iPhone build, verify double-tap inline text editing saves and survives a conversation refresh, and single-tap speaker renaming opens the new popup. After approval: commit, push/PR only if requested, then archive/update task state.
 
 # IOS-10: Persist Meeting Audio And Improve Transcript Playback
 
