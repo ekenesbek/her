@@ -1654,11 +1654,15 @@ private struct ChatFormattedText: View {
     }
 
     var body: some View {
-        Group {
-            if let attributed = ChatMessageFormatter.attributedString(from: value) {
-                Text(attributed)
-            } else {
-                Text(ChatMessageFormatter.plainText(from: value))
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(ChatMessageFormatter.displayLines(from: value).enumerated()), id: \.offset) { _, line in
+                if line.isEmpty {
+                    Spacer(minLength: 3)
+                } else if let attributed = ChatMessageFormatter.attributedString(from: line) {
+                    Text(attributed)
+                } else {
+                    Text(ChatMessageFormatter.plainText(from: line))
+                }
             }
         }
         .font(.system(size: 14, weight: .regular, design: .serif))
@@ -1816,9 +1820,27 @@ private enum ChatMessageFormatter {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func displayLines(from text: String) -> [String] {
+        let lines = normalizedMarkdown(from: text)
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return lines.isEmpty ? [""] : lines
+    }
+
     private static func normalizedMarkdown(from text: String) -> String {
         text
             .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(
+                of: #"([.!?;:])(\*\*[^\n])"#,
+                with: "$1\n$2",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"([.!?;:])(__[^\n])"#,
+                with: "$1\n$2",
+                options: .regularExpression
+            )
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

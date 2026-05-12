@@ -193,6 +193,7 @@ Out of scope:
 - [x] Compact the speaker rename popup, keep keyboard Done from saving, and use the signed-in username chip.
 - [x] Add word-by-word blue playback progress inside the active transcript chunk.
 - [x] Add a small readable lead to transcript word highlighting so it does not feel behind audio.
+- [x] Preserve chat message line breaks when rendering markdown-formatted answers.
 - [x] Install iOS app after the physical iPhone is available to CoreDevice.
 
 ## Verification
@@ -217,6 +218,12 @@ Out of scope:
 - `git diff --check`
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after adding word-by-word blue playback progress inside the active transcript chunk.
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after preserving chat markdown line breaks.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build` after preserving chat markdown line breaks.
 - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
@@ -281,7 +288,7 @@ Backend diarization assignment no longer depends on fixed speaker-count settings
 
 Transcript chunks can now be edited inline from the contents transcript. Single tap on transcript text plays audio from that timestamp continuously instead of stopping at the chunk end. Double tap replaces the text in place with a focused editor and opens the keyboard without a separate sheet. Saving updates the affected transcript segment range, rebuilds the meeting transcript text, updates local state, and persists the edit through the new authenticated `PATCH /v1/meetings/{meeting_id}/transcript` backend endpoint. The endpoint is deployed on `51.195.200.207`.
 
-Speaker labels now open a bottom-sheet rename popup on single tap so a person's name can be entered for `Speaker 1`, `Speaker 2`, and similar labels. The popup uses a compact 75% sheet on supported iOS versions, includes an inline name field, a quick current-username chip, recent name suggestions, and an option to apply the name either only to the selected segment or to all segments from that speaker. Pressing Done on the keyboard now only dismisses the keyboard; saving still requires the Save button. The small timestamp play button and transcript text now start continuous playback from that timestamp; pressing either again while its row is active pauses audio at the current playback time. While audio is playing, the active transcript chunk now highlights elapsed words in blue based on playback progress with a small readable lead, and returns previous chunks to black when playback moves forward.
+Speaker labels now open a bottom-sheet rename popup on single tap so a person's name can be entered for `Speaker 1`, `Speaker 2`, and similar labels. The popup uses a compact 75% sheet on supported iOS versions, includes an inline name field, a quick current-username chip, recent name suggestions, and an option to apply the name either only to the selected segment or to all segments from that speaker. Pressing Done on the keyboard now only dismisses the keyboard; saving still requires the Save button. The small timestamp play button and transcript text now start continuous playback from that timestamp; pressing either again while its row is active pauses audio at the current playback time. While audio is playing, the active transcript chunk now highlights elapsed words in blue based on playback progress with a small readable lead, and returns previous chunks to black when playback moves forward. Chat answers now render markdown lines explicitly so headings, numbered items, and paragraph breaks do not collapse into one unreadable block.
 
 ## Next
 
