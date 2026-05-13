@@ -294,6 +294,64 @@ Speaker labels now open a bottom-sheet rename popup on single tap so a person's 
 
 Result is ready for human review. Record or upload a new multi-speaker meeting through the server and verify the contents transcript shows alternating speaker turns instead of one speaker for the whole meeting; on the installed iPhone build, verify double-tap inline text editing saves and survives a conversation refresh, and single-tap speaker renaming opens the new popup. After approval: commit, push/PR only if requested, then archive/update task state.
 
+# BUG-3: Recover Recording After Phone Interruptions
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-12
+
+## Goal
+
+When a phone call or iOS audio interruption stops microphone capture, Her must preserve the captured audio, stop showing fake elapsed recording time, and let the user either continue recording into the same meeting or finish and transcribe the captured audio.
+
+## Context
+
+A real meeting was interrupted by incoming calls. The recording UI later showed roughly 26-50 minutes, but the actual saved audio only contained the first ~2 minutes before the call. The current iOS recorder uses a wall-clock timer while recording and does not surface `AVAudioSession` interruption state, so the UI can imply audio exists after iOS has stopped microphone capture.
+
+## Scope
+
+In scope:
+- Listen for iOS audio session interruptions while recording.
+- Finalize the current audio segment when interruption begins.
+- Show an interrupted/paused state with `Continue recording` and `Finish` actions.
+- Resume into a new segment when the user chooses continue.
+- Ensure elapsed time reflects real recorded audio duration, not wall-clock time.
+- Transcribe the captured audio when the user chooses finish.
+
+Out of scope:
+- Blocking all incoming phone calls at the system level.
+- Recording phone call audio.
+- Cloud/background synchronization of interrupted recording state.
+
+## Implementation Plan
+
+- [x] Inspect current recorder, timer, and recording screen state.
+- [x] Add recorder support for finalizing interrupted segments and measuring actual captured duration.
+- [x] Add view-model interruption handling plus continue/finish actions.
+- [x] Update recording UI copy and controls for the interrupted state.
+- [x] Run iOS build, sign/install on the connected iPhone, and report risks.
+
+## Verification
+
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `git diff --check`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `python3 -m compileall her-ios/backend/app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` was attempted but iOS rejected the launch because the iPhone was locked. The updated app was installed successfully.
+
+## Result
+
+Implemented interruption recovery for the iOS recorder. `MeetingRecorder` now tracks completed recording segments, reports elapsed time from actual recorded audio duration, preserves interrupted segment paths for local recovery, and combines multiple segments into one `.m4a` before transcription. `ConversationSessionViewModel` listens for `AVAudioSession.interruptionNotification`; when iOS interrupts microphone capture, it finalizes the current segment, stops the real-duration timer, and moves the session into an `interrupted` phase. The recording screen now shows a paused/interrupted state with `Continue recording` and `Finish and transcribe` actions. Continuing starts a new segment in the same meeting; finishing transcribes the captured audio instead of relying on wall-clock time.
+
+## Next
+
+Result is ready for human review. Unlock the iPhone, open Her manually, start a short recording, trigger an interruption if practical, and verify the screen shows `Recording paused` with `Continue recording` / `Finish and transcribe`. After approval: commit, push/PR if requested, then archive/update task state.
+
 # IOS-10: Persist Meeting Audio And Improve Transcript Playback
 
 Status: review
@@ -320,6 +378,8 @@ In scope:
 - Improve WhisperX diarization by using full-file speaker context and profile matching against transcript speaker labels.
 - Group transcript rows into 3-5 sentence speaker-prioritized chunks.
 - Add chunk playback from the contents transcript, with remote audio download when local audio is missing.
+- Stop contents playback when the app leaves the foreground.
+- Keep same-chunk playback responsive: immediate single tap, pause/resume at current time, and segment-aware blue progress.
 
 Out of scope:
 - Cloud sync beyond the current backend server.
@@ -333,6 +393,8 @@ Out of scope:
 - [x] Tie recording start to location permission/location refresh and store audio by location.
 - [x] Adjust diarization/profile matching for full-meeting speaker consistency.
 - [x] Add iOS audio download/playback controller and grouped transcript chunks.
+- [x] Stop transcript/audio playback on iOS inactive/background lifecycle.
+- [x] Tune transcript playback tap latency, resume behavior, and word progress timing.
 - [x] Run backend/iOS verification and update docs.
 
 ## Verification
@@ -347,6 +409,13 @@ Out of scope:
 - Remote backend compile in `/opt/meta-ios/backend/.venv`, `systemctl restart meta-ios-backend.service`, `GET /health`, and route import smoke for `/v1/meetings/{meeting_id}/audio`.
 - Signed iOS device build succeeded.
 - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after adding lifecycle playback stop.
+- `python3 -m compileall her-ios/backend/app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
 - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
 - `python3 -m compileall her-ios/backend/app` after adding location-scoped backend audio storage.
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after adding location permission and local audio bucketing.
@@ -355,11 +424,15 @@ Out of scope:
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
 - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build` after same-chunk pause/resume and segment-aware progress changes.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 
 Not run:
 - Real multi-speaker recording review after deployment.
 - Cross-device audio download playback, because only one physical iPhone is connected here.
-- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` after the location-audio build; iOS rejected launch because the phone was locked.
+- Launching the latest same-chunk pause/resume build through `devicectl`; installation succeeded, but CoreDevice lost the device before launch.
 
 ## Result
 
@@ -367,11 +440,11 @@ Backend meetings now keep original uploaded audio for completed `/v1/meetings/jo
 
 WhisperX no longer runs external chunk-level diarization when diarization is enabled; it transcribes the full file so pyannote/WhisperX has full-meeting speaker context. Added optional `DIARIZATION_MIN_SPEAKERS` and `DIARIZATION_MAX_SPEAKERS` knobs. Voice profile matching now first extracts embeddings from the actual transcript speaker time ranges, so enrolled-user matching aligns with the same speaker labels shown in the transcript. The pyannote fallback pipeline token argument was also fixed for the installed server version.
 
-iOS contents now groups transcript display rows into speaker-prioritized chunks instead of rendering every raw sentence. A speaker change always starts a new chunk; same-speaker text is grouped up to roughly 3-5 sentences or a time/pause boundary. Tapping a chunk plays only that time range. While audio is playing, the active chunk is highlighted and the scroll view follows it. If the local recording file is missing but the backend has audio, iOS downloads the meeting audio through the authenticated backend endpoint, saves it locally, and then plays it.
+iOS contents now groups transcript display rows into speaker-prioritized chunks instead of rendering every raw sentence. A speaker change always starts a new chunk; same-speaker text is grouped into shorter chunks at sentence, pause, or duration boundaries. Tapping a chunk starts playback from that chunk; tapping the same active chunk pauses at the current audio time and keeps the blue progress visible; tapping it again resumes from the paused time. The tap path now preloads local audio and avoids waiting for the double-tap edit recognizer before starting playback. Blue word progress is now calculated against each transcript segment timestamp inside the chunk instead of linearly across the whole chunk. While audio is playing, the active chunk is highlighted and the scroll view follows it. Contents playback now stops when iOS moves Her to inactive/background, including while a playback request is still loading. If the local recording file is missing but the backend has audio, iOS downloads the meeting audio through the authenticated backend endpoint, saves it locally, and then plays it.
 
 Recording start now asks for real iOS location access when authorization has not been decided yet, then refreshes the current city-level location while recording. The recording screen shows pending/unavailable location states instead of silently using no location. Local audio is moved into `Documents/MeetingAudio/{location-bucket}/{meetingId}.*` when a meeting id is known, and downloaded backend audio uses the same location bucket. The deployed backend now stores new uploaded meeting audio under `DATA_DIR/meeting-audio/{user_id}/{location-bucket}/{meeting_id}.*`, while the SQLite `audio_path` keeps old flat-path meetings playable.
 
-The updated Debug iOS app was rebuilt, code-sign verified, and installed on `iPhone (Yerasyl)`. Launch through `devicectl` was blocked because the phone was locked; open Her manually after unlocking to test the prompt.
+The updated Debug iOS app was rebuilt, code-sign verified, and installed on `iPhone (Yerasyl)`. The earlier build launched through `devicectl`; the latest same-chunk pause/resume build installed successfully, but CoreDevice lost the device before launch.
 
 Docs/env guidance now mention persisted meeting audio and diarization speaker-count knobs. Backend code is deployed to `51.195.200.207`, and the updated iOS app is installed on `iPhone (Yerasyl)`.
 
@@ -379,7 +452,7 @@ Known limitations: older meetings whose audio was deleted by previous backend ve
 
 ## Next
 
-Result is ready for human review. Review gate: record a new multi-speaker meeting, open contents, verify speaker chunks, tap a chunk to play only that range, and confirm the active text follows playback. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue review of the IOS-7/8/9 meeting-processing stack after this real recording test.
+Result is ready for human review. Review gate: unlock/connect the iPhone, install the latest signed build, then open contents and verify: first tap starts faster, same active chunk tap pauses/resumes from the current time, blue progress stays visible while paused, active text follows playback, and background/close stops audio. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue review of the IOS-7/8/9 meeting-processing stack after this real recording test.
 
 # IOS-9: Wire Alem OSS Summaries And Meeting Chat
 

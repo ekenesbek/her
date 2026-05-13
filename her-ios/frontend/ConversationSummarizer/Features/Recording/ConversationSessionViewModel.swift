@@ -28,6 +28,7 @@ final class ConversationSessionViewModel: ObservableObject {
 
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var intentObservers: [NSObjectProtocol] = []
+    private var audioSessionObservers: [NSObjectProtocol] = []
 
     init(
         recorder: MeetingRecorder,
@@ -40,10 +41,12 @@ final class ConversationSessionViewModel: ObservableObject {
         self.meetingProcessor = meetingProcessor
         self.meetingsService = meetingsService
         registerIntentObservers()
+        registerAudioSessionObservers()
     }
 
     deinit {
         intentObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        audioSessionObservers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
     private func registerIntentObservers() {
@@ -55,7 +58,9 @@ final class ConversationSessionViewModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                if self.phase != .recording {
+                if self.phase == .interrupted {
+                    _ = await self.continueRecording()
+                } else if self.phase != .recording {
                     _ = await self.startRecording()
                 }
             }
@@ -69,6 +74,8 @@ final class ConversationSessionViewModel: ObservableObject {
                 guard let self else { return }
                 if self.phase == .recording {
                     await self.stopAndTranscribe()
+                } else if self.phase == .interrupted {
+                    await self.stopAndTranscribe()
                 }
             }
         }
@@ -81,12 +88,28 @@ final class ConversationSessionViewModel: ObservableObject {
                 guard let self else { return }
                 if self.phase == .recording {
                     await self.stopAndTranscribe()
+                } else if self.phase == .interrupted {
+                    _ = await self.continueRecording()
                 } else if self.canTapPrimaryButton {
                     _ = await self.startRecording()
                 }
             }
         }
         intentObservers = [start, stop, toggle]
+    }
+
+    private func registerAudioSessionObservers() {
+        let center = NotificationCenter.default
+        let interruption = center.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor in
+                self?.handleAudioSessionInterruption(notification)
+            }
+        }
+        audioSessionObservers = [interruption]
     }
 
     private func playFeedback(_ phrase: String, success: Bool) {
@@ -103,6 +126,8 @@ final class ConversationSessionViewModel: ObservableObject {
             return "Start Recording"
         case .recording:
             return "Stop Recording"
+        case .interrupted:
+            return "Continue Recording"
         case .transcribing:
             return "Transcribing..."
         case .summarizing:
@@ -114,13 +139,13 @@ final class ConversationSessionViewModel: ObservableObject {
         switch phase {
         case .transcribing, .summarizing:
             return false
-        case .idle, .recording, .transcriptReady, .completed, .failed:
+        case .idle, .recording, .interrupted, .transcriptReady, .completed, .failed:
             return true
         }
     }
 
     var canGenerateSummary: Bool {
-        !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && summary == nil && phase != .recording && phase != .transcribing && phase != .summarizing
+        !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && summary == nil && phase != .recording && phase != .interrupted && phase != .transcribing && phase != .summarizing
     }
 
     var summaryButtonTitle: String {
@@ -144,6 +169,8 @@ final class ConversationSessionViewModel: ObservableObject {
             Task { await startRecording() }
         case .recording:
             Task { await stopAndTranscribe() }
+        case .interrupted:
+            Task { await continueRecording() }
         case .transcribing, .summarizing:
             break
         }
@@ -176,10 +203,40 @@ final class ConversationSessionViewModel: ObservableObject {
             _ = try recorder.start()
             activeInputName = recorder.activeInputName
             audioLevel = 0
-            elapsedSeconds = 0
+            refreshElapsedFromRecorder()
             phase = .recording
             startTimer()
             playFeedback("Recording.", success: true)
+            return true
+        } catch {
+            fail(error.localizedDescription)
+            return false
+        }
+    }
+
+    @discardableResult
+    func continueRecording() async -> Bool {
+        errorMessage = nil
+
+        let micAllowed = await recorder.requestPermission()
+        guard micAllowed else {
+            fail("Microphone permission is required to continue recording.")
+            return false
+        }
+
+        guard meetingProcessor != nil else {
+            fail("Transcription backend is not configured. Set BackendAPIURL in Info.plist.")
+            return false
+        }
+
+        do {
+            _ = try recorder.continueRecording()
+            activeInputName = recorder.activeInputName
+            audioLevel = 0
+            refreshElapsedFromRecorder()
+            phase = .recording
+            startTimer()
+            playFeedback("Recording resumed.", success: true)
             return true
         } catch {
             fail(error.localizedDescription)
@@ -227,8 +284,10 @@ final class ConversationSessionViewModel: ObservableObject {
     }
 
     func stopAndTranscribe(locationName: String? = nil) async {
+        let wasInterrupted = phase == .interrupted
         stopTimer()
-        playFeedback("Stopped, transcribing.", success: true)
+        refreshElapsedFromRecorder()
+        playFeedback(wasInterrupted ? "Finishing captured audio." : "Stopped, transcribing.", success: true)
 
         do {
             let recordingURL = try recorder.stop()
@@ -304,9 +363,10 @@ final class ConversationSessionViewModel: ObservableObject {
 
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        refreshElapsedFromRecorder()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.elapsedSeconds += 1
+                self?.refreshElapsedFromRecorder()
             }
         }
 
@@ -342,6 +402,47 @@ final class ConversationSessionViewModel: ObservableObject {
         transcriptDurationSeconds = result.durationSeconds
         summary = result.summary
         currentMeetingId = result.meetingId
+        if let duration = result.durationSeconds, duration.isFinite, duration > 0 {
+            elapsedSeconds = Int(duration.rounded())
+        }
+    }
+
+    private func refreshElapsedFromRecorder() {
+        let duration = recorder.recordedDurationSeconds
+        guard duration.isFinite, duration >= 0 else {
+            return
+        }
+        elapsedSeconds = Int(duration.rounded())
+    }
+
+    private func handleAudioSessionInterruption(_ notification: Notification) {
+        let rawValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey]
+        let rawType = (rawValue as? UInt) ?? (rawValue as? NSNumber)?.uintValue
+        guard let rawType,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
+            return
+        }
+
+        switch type {
+        case .began:
+            guard phase == .recording else {
+                return
+            }
+            stopTimer()
+            _ = recorder.finishInterruptedSegment()
+            refreshElapsedFromRecorder()
+            activeInputName = "Recording interrupted"
+            audioLevel = 0
+            phase = .interrupted
+            errorMessage = "Recording paused by a phone call. Captured \(elapsedText). Continue recording or finish with the saved audio."
+        case .ended:
+            guard phase == .interrupted else {
+                return
+            }
+            errorMessage = "Recording is paused. Continue recording or finish with \(elapsedText) of captured audio."
+        @unknown default:
+            break
+        }
     }
 
     private func cleanLocationName(_ value: String?) -> String? {
@@ -356,6 +457,7 @@ final class ConversationSessionViewModel: ObservableObject {
 enum RecordingPhase: Equatable {
     case idle
     case recording
+    case interrupted
     case transcribing
     case transcriptReady
     case summarizing
@@ -368,6 +470,8 @@ enum RecordingPhase: Equatable {
             return "Ready"
         case .recording:
             return "Recording"
+        case .interrupted:
+            return "Recording interrupted"
         case .transcribing:
             return "Transcribing"
         case .transcriptReady:
