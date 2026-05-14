@@ -149,8 +149,8 @@ private final class LiveContextStore: NSObject, ObservableObject, CLLocationMana
     override init() {
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyKilometer
-        manager.distanceFilter = 1_000
+        manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+        manager.distanceFilter = 25
     }
 
     func refreshIfAuthorized() {
@@ -247,17 +247,54 @@ private final class LiveContextStore: NSObject, ObservableObject, CLLocationMana
                 return
             }
 
-            let place = placemarks?.first
-            let name = place?.locality
-                ?? place?.subAdministrativeArea
-                ?? place?.administrativeArea
-                ?? place?.country
+            let name = Self.displayName(for: placemarks?.first)
 
             DispatchQueue.main.async {
-                let cleanName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.locationName = cleanName?.isEmpty == false ? cleanName : nil
+                self.locationName = name
             }
         }
+    }
+
+    private static func displayName(for place: CLPlacemark?) -> String? {
+        guard let place else {
+            return nil
+        }
+
+        let street = joinedAddressPart([place.thoroughfare, place.subThoroughfare], separator: " ")
+        let city = cleaned(place.locality)
+            ?? cleaned(place.subAdministrativeArea)
+            ?? cleaned(place.administrativeArea)
+        if let street, let address = joinedAddressPart([street, city], separator: ", ") {
+            return address
+        }
+
+        let namedPlace = cleaned(place.name)
+        if let namedPlaceValue = namedPlace {
+            let namedPlaceIsCity = city.map { $0 == namedPlaceValue } ?? false
+            if !namedPlaceIsCity, let address = joinedAddressPart([namedPlaceValue, city], separator: ", ") {
+                return address
+            }
+        }
+
+        return city
+            ?? namedPlace
+            ?? cleaned(place.locality)
+            ?? cleaned(place.subAdministrativeArea)
+            ?? cleaned(place.administrativeArea)
+            ?? cleaned(place.country)
+    }
+
+    private static func joinedAddressPart(_ parts: [String?], separator: String) -> String? {
+        let cleanParts = parts.compactMap(cleaned)
+        guard !cleanParts.isEmpty else {
+            return nil
+        }
+        return cleanParts.joined(separator: separator)
+    }
+
+    private static func cleaned(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 
     private static let dayFormatter: DateFormatter = {
@@ -446,11 +483,23 @@ struct ContentView: View {
             }
         }
         .onChange(of: viewModel.phase) { newPhase in
+            if shouldKeepCurrentRecordingOpen(for: newPhase) {
+                route = .recording
+            }
             if newPhase == .completed || newPhase == .transcriptReady {
                 Task { @MainActor in
                     await meetingsStore.refresh()
                 }
             }
+        }
+    }
+
+    private func shouldKeepCurrentRecordingOpen(for phase: RecordingPhase) -> Bool {
+        switch phase {
+        case .transcribing, .transcriptReady, .summarizing, .completed, .failed:
+            return true
+        case .idle, .recording, .interrupted:
+            return false
         }
     }
 
@@ -493,6 +542,7 @@ struct ContentView: View {
         }
 
         Task { @MainActor in
+            route = .recording
             await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName)
         }
     }
@@ -515,6 +565,7 @@ struct ContentView: View {
         }
 
         Task { @MainActor in
+            route = .recording
             await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName)
         }
     }
@@ -2833,17 +2884,24 @@ private struct ExactSettingsHerScreen: View {
                     )
                     .padding(.top, 18)
 
-                    SettingsSectionHeader(title: "glasses", hint: bridge.audioRoute.primaryDetectedDevice == nil ? "not connected" : "connected")
-                    SettingsGlassesCard(bridge: bridge, onPair: onPair)
-
-                    SettingsSectionHeader(title: "voice profile", hint: voiceProfiles.isEmpty ? "not enrolled" : "\(voiceProfiles.count) enrolled")
+                    SettingsSectionHeader(title: "people", hint: voiceProfiles.isEmpty ? "empty" : "\(voiceProfiles.count) known")
                     WwCard(padding: 0) {
                         VStack(spacing: 0) {
-                            ForEach(voiceProfiles) { profile in
-                                VoiceProfileRow(profile: profile) {
-                                    Task { await deleteVoiceProfile(profile) }
-                                }
+                            if voiceProfiles.isEmpty {
+                                SettingsValueRow(
+                                    icon: "person.2",
+                                    label: "Known people",
+                                    subtitle: "Saved voices and speaker names will appear here",
+                                    value: "empty"
+                                )
                                 DividerLine()
+                            } else {
+                                ForEach(voiceProfiles) { profile in
+                                    VoiceProfileRow(profile: profile) {
+                                        Task { await deleteVoiceProfile(profile) }
+                                    }
+                                    DividerLine()
+                                }
                             }
                             Button(action: { presentingVoiceEnrollment = true }) {
                                 HStack(spacing: 14) {
@@ -2851,7 +2909,7 @@ private struct ExactSettingsHerScreen: View {
                                         .font(.system(size: 16))
                                         .frame(width: 24)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text("Teach Her your voice")
+                                        Text("Add your voice")
                                             .font(.system(size: 14.5, weight: .medium, design: .serif))
                                         Text("60-second sample so Her can label you in transcripts")
                                             .font(.system(size: 12, design: .serif))
@@ -3113,9 +3171,9 @@ private struct SettingsProfileCard: View {
                     .frame(height: 4)
 
                     HStack {
-                        MonoLabel("storage unavailable")
+                        MonoLabel("local backend")
                         Spacer()
-                        Text("manage →")
+                        Text("active")
                             .font(.system(size: 11, weight: .regular, design: .serif))
                             .italic()
                             .foregroundColor(AppTheme.fg)
@@ -7284,7 +7342,7 @@ private struct SetupVoiceProfilePage: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(AppTheme.muted)
                         .padding(.top, 2)
-                    Text("Stored privately. You can re-record or delete this anytime in Settings › Voice profile.")
+                    Text("Stored privately. You can re-record or delete this anytime in Settings › People.")
                         .font(.system(size: 12.5, weight: .regular, design: .serif))
                         .foregroundColor(AppTheme.muted)
                         .lineSpacing(4)

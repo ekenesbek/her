@@ -501,6 +501,7 @@ async def create_meeting_job(
     device_name: str | None = Form(default=None),
     location_name: str | None = Form(default=None),
     summary_mode: SummaryMode = Form(default="reasoning"),
+    generate_summary: bool = Form(default=True),
     user: UserResponse = Depends(current_user),
 ) -> MeetingJobResponse:
     path = await persist_job_upload(audio)
@@ -511,6 +512,7 @@ async def create_meeting_job(
         device_name=device_name,
         location_name=location_name,
         summary_mode=summary_mode,
+        generate_summary=generate_summary,
     )
     submit_meeting_job(job.id)
     return job
@@ -720,14 +722,24 @@ def run_meeting_job(job_id: str) -> None:
         if not transcript.transcript:
             raise RuntimeError("Whisper produced an empty transcript.")
 
-        summary = summarize_or_make_unavailable(
-            job["user_id"],
-            transcript.transcript,
-            transcript.segments,
-            transcript.language,
-            job.get("location_name"),
-            job.get("summary_mode", "reasoning"),
-        )
+        summary_mode = job.get("summary_mode", "reasoning")
+        if bool(job.get("generate_summary", True)):
+            summary = summarize_or_make_unavailable(
+                job["user_id"],
+                transcript.transcript,
+                transcript.segments,
+                transcript.language,
+                job.get("location_name"),
+                summary_mode,
+            )
+        else:
+            summary = make_unavailable_summary(
+                job["user_id"],
+                transcript.transcript,
+                transcript.segments,
+                job.get("location_name"),
+                summary_mode,
+            )
         now = datetime.now(UTC)
         meeting = MeetingResponse(
             id=str(uuid4()),
@@ -835,20 +847,30 @@ def summarize_or_make_unavailable(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("AI summary unavailable; saving meeting without summary: %s", exc)
-        title = store.next_meeting_title(user_id, fallback_meeting_title(location_name))
-        overview = fallback_overview_from_transcript(transcript)
-        return SummaryResponse(
-            title=title,
-            overview=overview or title,
-            keyTopics=[],
-            decisions=[],
-            actionItems=[],
-            followUps=[],
-            outline=build_outline_from_segments(transcript, segments),
-            generatedAt=datetime.now(UTC),
-            summaryStatus="unavailable",
-            summaryMode=summary_mode,
-        )
+        return make_unavailable_summary(user_id, transcript, segments, location_name, summary_mode)
+
+
+def make_unavailable_summary(
+    user_id: str,
+    transcript: str,
+    segments,
+    location_name: str | None,
+    summary_mode: SummaryMode = "reasoning",
+) -> SummaryResponse:
+    title = store.next_meeting_title(user_id, fallback_meeting_title(location_name))
+    overview = fallback_overview_from_transcript(transcript)
+    return SummaryResponse(
+        title=title,
+        overview=overview or title,
+        keyTopics=[],
+        decisions=[],
+        actionItems=[],
+        followUps=[],
+        outline=build_outline_from_segments(transcript, segments),
+        generatedAt=datetime.now(UTC),
+        summaryStatus="unavailable",
+        summaryMode=summary_mode,
+    )
 
 
 def fallback_meeting_title(location_name: str | None) -> str:

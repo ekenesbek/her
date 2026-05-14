@@ -71,7 +71,8 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
                 "source": source,
                 "device_name": deviceName,
                 "location_name": locationName,
-                "summary_mode": summaryMode.rawValue
+                "summary_mode": summaryMode.rawValue,
+                "generate_summary": "false"
             ]
         )
 

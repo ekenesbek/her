@@ -216,6 +216,7 @@ class MeetingStore:
         device_name: str | None = None,
         location_name: str | None = None,
         summary_mode: str = "reasoning",
+        generate_summary: bool = True,
     ) -> MeetingJobResponse:
         job_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
@@ -224,9 +225,9 @@ class MeetingStore:
                 """
                 INSERT INTO meeting_jobs (
                     id, user_id, audio_path, source, device_name, location_name,
-                    summary_mode, status, meeting_id, error, created_at, updated_at
+                    summary_mode, generate_summary, status, meeting_id, error, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -236,6 +237,7 @@ class MeetingStore:
                     device_name,
                     location_name,
                     summary_mode,
+                    1 if generate_summary else 0,
                     "queued",
                     None,
                     None,
@@ -270,7 +272,7 @@ class MeetingStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, user_id, audio_path, source, device_name, location_name, summary_mode, status
+                SELECT id, user_id, audio_path, source, device_name, location_name, summary_mode, generate_summary, status
                 FROM meeting_jobs
                 WHERE id = ?
                 """,
@@ -519,6 +521,7 @@ class MeetingStore:
                 device_name TEXT,
                 location_name TEXT,
                 summary_mode TEXT NOT NULL DEFAULT 'reasoning',
+                generate_summary INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'completed', 'failed')),
                 meeting_id TEXT,
                 error TEXT,
@@ -542,6 +545,10 @@ class MeetingStore:
         if "summary_mode" not in columns:
             connection.execute(
                 "ALTER TABLE meeting_jobs ADD COLUMN summary_mode TEXT NOT NULL DEFAULT 'reasoning'"
+            )
+        if "generate_summary" not in columns:
+            connection.execute(
+                "ALTER TABLE meeting_jobs ADD COLUMN generate_summary INTEGER NOT NULL DEFAULT 1"
             )
 
     def _ensure_meeting_chat_messages_table(self, connection: sqlite3.Connection) -> None:

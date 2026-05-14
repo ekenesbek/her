@@ -2,6 +2,137 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# IOS-15: Make Recording Jobs Transcript-First And Add People Settings
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-14
+
+## Goal
+
+Keep the post-recording flow on the recording screen while transcription runs, save the transcript as soon as it is ready, and make summary generation a separate user action. Add People to settings without introducing another page.
+
+## Context
+
+The iOS recording screen already has a transcribing/loading state and a `Generate summary` action after transcript readiness, but backend meeting jobs still generated summaries during job completion. That made the user wait for summary work before the recording job finished. Settings already listed voice profiles, but the section was framed narrowly as `voice profile` instead of a People area.
+
+## Scope
+
+In scope:
+- Let meeting jobs accept `generate_summary=false`.
+- Have the iOS recording job submit transcript-first jobs.
+- Keep/open the recording screen while current recording processing is transcribing or summarizing.
+- Keep the recording screen open through transcript-ready/completed/error states after Stop Recording.
+- Show a street-level recording location when Core Location returns address details.
+- Rename the voice-profile settings section to People and keep voice profiles there.
+- Remove the separate Glasses settings block.
+- Clarify the profile-card storage status so it does not imply storage is unavailable.
+- Document the transcript-first job flag.
+
+Out of scope:
+- New People detail pages or full contact/person management.
+- Stage 3 memory graph behavior.
+- Removing the existing generated-summary endpoint.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [x] Inspect the existing recording, job polling, summary generation, and settings People/voice-profile surfaces.
+- [x] Add a backend `generate_summary` job flag with a storage migration/default.
+- [x] Send `generate_summary=false` from iOS recording jobs.
+- [x] Route current recording processing back to the recording screen for loading.
+- [x] Keep the same recording screen through transcript-ready/completed states after Stop Recording.
+- [x] Increase location precision and format recording locations as street address plus city.
+- [x] Update settings copy/layout so voice profiles live under People.
+- [x] Run backend and iOS verification.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-job-summary-smoke python3 - <<'PY' ...` storage smoke verified `create_meeting_job(..., generate_summary=False)` persists `generate_summary=0`.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=00008140-00114D90227B001C' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` failed because the iPhone was locked; install succeeded.
+
+## Result
+
+Backend meeting jobs now accept `generate_summary=false`; old clients keep the previous default `true`. When false, the job saves the transcript, outline, audio link, and an unavailable summary placeholder, so the existing `POST /v1/meetings/{id}/summary` endpoint can generate the real summary later.
+
+iOS recording jobs now submit `generate_summary=false`, so stopping a recording should finish once transcription is saved instead of waiting for summary generation. Stop Recording now immediately keeps the user on the recording screen, and the same screen stays open through transcribing, transcript-ready, summarizing, completed, and failed states. Settings now has a People section backed by saved voice profiles, with an empty state and the existing voice enrollment action. The separate Glasses settings block was removed, and the profile-card storage status now reads `local backend` / `active` instead of `storage unavailable`.
+
+Recording location lookup now asks for nearer-ten-meter accuracy and formats available address components as street/house plus city, for example `Koshek Batyr 14, Almaty`, falling back to named place or city when iOS does not return street details.
+
+Known limitation: the updated app was installed on the paired iPhone, but automatic launch was blocked because the device was locked. A real recording still needs to be exercised manually on the device.
+
+## Next
+
+Result is ready for human review. Review gate: unlock the iPhone, open Her manually, run a real recording, stop it, and confirm the same Recording screen shows transcription loading, then transcript-ready state, without a detour through another results screen. Confirm the location label is street-level when precise location is available, and that Summary is generated only after pressing the button. Also open Settings and confirm People shows saved voices or the empty state, the Glasses block is gone, and storage reads as local backend active. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
+
+# IOS-14: Connect Sign In With Apple Entitlement
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-14
+
+## Goal
+
+Make the existing iOS Apple sign-in code usable by ensuring the app target is signed with the Sign in with Apple entitlement and the backend auth audience is documented.
+
+## Context
+
+The app already has `AppleSignInService`, an Apple provider button on the onboarding account screen, an entitlements plist containing `com.apple.developer.applesignin`, and a FastAPI `POST /v1/auth/apple` endpoint that validates Apple identity tokens. The missing project wiring was that the target build settings did not point at the entitlements file, so the app could build without the capability being included in the signed target.
+
+## Scope
+
+In scope:
+- Attach `ConversationSummarizer.entitlements` to the iOS app target for Debug and Release.
+- Mark Sign in with Apple as an enabled target capability in the Xcode project.
+- Document backend auth env values needed for Apple token validation.
+
+Out of scope:
+- Stage 2 credential-vault behavior or Apple Passwords integration.
+- Changing the Apple/Google auth API contract.
+- Verifying a live Apple account prompt on a physical device when the device is unavailable.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [x] Inspect the existing iOS Apple sign-in service, auth client, entitlement plist, and backend auth endpoint.
+- [x] Wire the entitlement plist into target build settings.
+- [x] Add backend auth env examples for `APPLE_CLIENT_ID` and session token signing.
+- [x] Run iOS/backend verification and record limitations.
+
+## Verification
+
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -showBuildSettings | rg -n "CODE_SIGN_ENTITLEMENTS|PRODUCT_BUNDLE_IDENTIFIER|DEVELOPMENT_TEAM"`
+- `python3 -m compileall her-ios/backend/app`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=00008140-00114D90227B001C' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build` attempted for iPhone install and failed because the provisioning profile does not include Sign in with Apple.
+- Reattempted after Apple Developer/Xcode account work. The old cached profile was backed up out of Xcode's active profile directory; `xcodebuild` still reports `No Accounts` and cannot download a new `com.ekenesbek.her` development profile.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build` later succeeded with Apple Development signing and `com.apple.developer.applesignin` in the built app entitlements.
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app` failed because the iPhone was offline/unavailable to CoreDevice.
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app` succeeded after the iPhone returned to `available (paired)`.
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` succeeded.
+- `git diff --check`
+
+## Result
+
+The Xcode target now uses `ConversationSummarizer/Resources/ConversationSummarizer.entitlements` for Debug and Release, and target attributes show Sign in with Apple enabled. The backend env example now documents `AUTH_JWT_SECRET`, `APPLE_CLIENT_ID=com.ekenesbek.her`, and `GOOGLE_CLIENT_IDS`.
+
+Known limitation: the app is installed and launched on the iPhone, but live Apple sign-in flow still needs human review on-device.
+
+## Next
+
+Result is ready for human review. Review gate: on the installed iPhone build, tap Continue with Apple and verify the session reaches onboarding/app, then check Settings for the People section and local backend storage status. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
+
 # IOS-12: Add Omi-Style Transcription Providers And GPU Service
 
 Status: review

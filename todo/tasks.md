@@ -25,6 +25,8 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | BUG-2 | review | P1 | ios | current worktree | Clean AI summaries and add audio scrubber | `todo/ios.md` |
 | BUG-3 | review | P1 | ios | current worktree | Recover Recording After Phone Interruptions | `todo/ios.md` |
 | IOS-13 | review | P1 | ios | current worktree | Persist speaker identities from meetings | `todo/ios.md` |
+| IOS-14 | review | P1 | ios | current worktree | Connect Sign in with Apple entitlement | `todo/ios.md` |
+| IOS-15 | review | P1 | ios | current worktree | Make recording jobs transcript-first and add People settings | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 
