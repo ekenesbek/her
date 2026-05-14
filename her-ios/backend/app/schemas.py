@@ -37,11 +37,25 @@ class VoiceProfileResponse(BaseModel):
     id: str
     name: str
     durationSeconds: float | None = None
+    sampleCount: int = 1
     createdAt: datetime
 
 
 class VoiceProfileListResponse(BaseModel):
     profiles: list[VoiceProfileResponse]
+
+
+class SpeakerAssignmentRequest(BaseModel):
+    speaker: str = Field(min_length=1)
+    profileId: str | None = None
+    name: str | None = None
+
+
+class SpeakerAssignmentResponse(BaseModel):
+    profile: VoiceProfileResponse
+    meeting: "MeetingResponse"
+    assignedSegments: int
+    sampleDurationSeconds: float | None = None
 
 
 SummaryStatus = Literal["generated", "unavailable"]

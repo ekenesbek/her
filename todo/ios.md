@@ -1085,3 +1085,77 @@ Build and backend compile checks pass. Physical-device recording with paired Ray
 ## Next
 
 Result is ready for human review. Review gate: install/run on the iPhone, keep `RB Meta 060S` connected, and try the voice profile recording once with Bluetooth and once after disconnecting Bluetooth. After approval: commit, push, open PR, then archive/update task state. Next task candidate from `todo/tasks.md`: continue the approved `WEB-1` PR flow or review the open `IOS-1` smoke-test result.
+
+# IOS-13: Persist Speaker Identities From Meetings
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-13
+
+## Goal
+
+Let the user assign a meeting speaker to an existing or new voice profile so future meetings can automatically identify that person inside this user's account.
+
+## Context
+
+The transcript UI currently stores speaker display names locally and shows a small hard-coded list of example names. The backend already has owner voice profile enrollment and automatic relabeling when a profile matches, but there is no durable flow for "Speaker 1 is Erulan" to create or extend a voice profile from the meeting audio.
+
+## Scope
+
+In scope:
+- Store multiple confirmed voice samples per user-scoped voice profile.
+- Add a backend endpoint that assigns a meeting speaker to an existing or new profile, extracts a speaker embedding from the meeting audio, updates the profile, and persists the meeting transcript labels.
+- Make future automatic relabeling compare against the expanded profile centroid.
+- Replace mocked speaker-name suggestions with real saved voice profiles from the backend.
+- Keep all profiles scoped to the authenticated `user_id`.
+
+Out of scope:
+- Cross-user/global speaker identity.
+- Automatic profile training from unconfirmed model guesses.
+- Full contact-management UI beyond choosing an existing profile or typing a new name from the transcript speaker sheet.
+- Commit, push, PR, archive, or mark done before human review.
+
+## Implementation Plan
+
+- [x] Inspect current speaker rename UI, meetings store, voice profile API, storage, and relabel path.
+- [x] Add backend profile sample storage and assignment endpoint.
+- [x] Update backend relabeling/enrollment to use expandable profiles and external embedding fallback where needed.
+- [x] Wire iOS speaker sheet to saved profiles and backend assignment.
+- [x] Run backend and iOS verification.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend python3 - <<'PY' ...` storage smoke verified profile sample count/duration updates and case-insensitive profile lookup.
+- `PYTHONPATH=her-ios/backend TRANSCRIPTION_PROVIDER=external EXTERNAL_TRANSCRIPTION_URL=http://127.0.0.1:8000 DATA_DIR=/tmp/her-ios-ios13-route-smoke python3 - <<'PY' ...` route smoke verified assigning `SPEAKER_00` creates a profile, relabels meeting segments, and a second assignment extends the same profile to `sampleCount=2`. The ambient pyenv still prints existing `hashlib` blake2 warnings, but assertions completed.
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Deployed backend files to `51.195.200.207`; previous files backed up at `/home/ubuntu/meta-ios-deploy-backups/backend-20260513-135018-ios13-speaker-profiles.tgz`.
+- Remote backend compile in `/opt/meta-ios/backend/.venv`, `systemctl restart meta-ios-backend.service`, public `GET /health`, OpenAPI route check for `/v1/meetings/{meeting_id}/speakers/assign`, and SQLite migration check for `voice_profiles.sample_count` plus `voice_profile_samples`.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+
+Not run:
+- Manual UI smoke for assigning a real speaker on production meeting audio.
+
+## Result
+
+Added durable user-scoped speaker identity assignment. Voice profiles now track `sampleCount` and every confirmed sample is stored in `voice_profile_samples` with optional meeting id and original speaker label. Owner enrollment still creates a profile, but now also stores the initial sample. Assigning another meeting speaker either creates a new profile from that speaker's meeting audio or extends an existing profile by adding a confirmed sample and updating the profile centroid.
+
+Added `POST /v1/meetings/{meeting_id}/speakers/assign`. It requires the authenticated user's meeting, persisted meeting audio, and a diarized speaker label. The endpoint extracts an embedding from all matching speaker segments, creates or updates the selected user-scoped profile, rewrites that meeting's matching transcript segments to the profile name, and returns the updated meeting plus profile metadata.
+
+Automatic relabeling now still compares future speakers against profile centroids, but voice embedding extraction can fall back to the external GPU STT service's `/v2/embedding` or `/v1/embedding` endpoint. This keeps the production `TRANSCRIPTION_PROVIDER=external` setup usable even when main backend does not run local pyannote embedding.
+
+iOS transcript speaker rename now loads saved profiles from `/v1/voice-profiles` and shows those real saved voices instead of hard-coded mock names. Selecting a saved profile and applying it to all segments from a speaker calls the backend assignment endpoint. Typing a new name creates a new profile from that speaker. The single-segment scope remains local-only and does not train a profile.
+
+Deployment note: the main backend server had a full root disk. Only Docker builder cache and the failed zero-byte partial backup from this deploy were removed; containers, user data, databases, recordings, and Docker images were not pruned. After freeing cache, backend deployment and restart succeeded.
+
+## Next
+
+Result is ready for human review. Review gate: open the installed Her build on `iPhone (Yerasyl)`, open an existing meeting with audio and diarized speakers, tap a speaker name, verify the popup shows real saved voice profiles, assign one speaker to a new or existing profile, then record/process another meeting and confirm the assigned person is auto-labeled when confidence passes threshold. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment/wake-word setup remains the next blocker.

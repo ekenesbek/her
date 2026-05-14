@@ -113,6 +113,29 @@ final class MeetingsStore: ObservableObject {
         }
         return updated
     }
+
+    func assignSpeaker(
+        for meeting: StoredMeeting,
+        speaker: String,
+        profileId: String?,
+        name: String
+    ) async throws -> SpeakerAssignmentResult {
+        guard let service else {
+            throw MeetingsServiceError.backendFailed
+        }
+        let result = try await service.assignSpeaker(
+            meetingId: meeting.id,
+            speaker: speaker,
+            profileId: profileId,
+            name: name
+        )
+        if let index = meetings.firstIndex(where: { $0.id == result.meeting.id }) {
+            meetings[index] = result.meeting
+        } else {
+            meetings.insert(result.meeting, at: 0)
+        }
+        return result
+    }
 }
 
 struct MeetingSavePayload {
@@ -126,11 +149,19 @@ struct MeetingSavePayload {
     let summary: MeetingSummary
 }
 
+struct SpeakerAssignmentResult {
+    let profile: VoiceProfile
+    let meeting: StoredMeeting
+    let assignedSegments: Int
+    let sampleDurationSeconds: Double?
+}
+
 protocol MeetingsService {
     func listMeetings() async throws -> [StoredMeeting]
     func saveMeeting(_ payload: MeetingSavePayload) async throws -> StoredMeeting
     func generateSummary(meetingId: String, mode: MeetingSummaryMode) async throws -> StoredMeeting
     func updateTranscript(meetingId: String, transcript: String, segments: [MeetingTranscriptSegment]) async throws -> StoredMeeting
+    func assignSpeaker(meetingId: String, speaker: String, profileId: String?, name: String) async throws -> SpeakerAssignmentResult
 }
 
 protocol MeetingAudioDownloadService {
@@ -233,6 +264,42 @@ struct BackendMeetingsService: MeetingsService {
         return try Self.decoder().decode(BackendMeetingRecord.self, from: data).storedMeeting
     }
 
+    func assignSpeaker(
+        meetingId: String,
+        speaker: String,
+        profileId: String?,
+        name: String
+    ) async throws -> SpeakerAssignmentResult {
+        var request = URLRequest(
+            url: endpoint
+                .appendingPathComponent(meetingId)
+                .appendingPathComponent("speakers")
+                .appendingPathComponent("assign")
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = 240
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONEncoder().encode(
+            BackendSpeakerAssignmentBody(speaker: speaker, profileId: profileId, name: name)
+        )
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw MeetingsServiceError.backendFailed
+        }
+
+        let decoded = try Self.decoder().decode(BackendSpeakerAssignmentResponse.self, from: data)
+        return SpeakerAssignmentResult(
+            profile: decoded.profile,
+            meeting: decoded.meeting.storedMeeting,
+            assignedSegments: decoded.assignedSegments,
+            sampleDurationSeconds: decoded.sampleDurationSeconds
+        )
+    }
+
     private static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
@@ -330,6 +397,19 @@ private struct BackendSummaryModeBody: Encodable {
 private struct BackendMeetingTranscriptUpdateBody: Encodable {
     let transcript: String
     let segments: [MeetingTranscriptSegment]
+}
+
+private struct BackendSpeakerAssignmentBody: Encodable {
+    let speaker: String
+    let profileId: String?
+    let name: String
+}
+
+private struct BackendSpeakerAssignmentResponse: Decodable {
+    let profile: VoiceProfile
+    let meeting: BackendMeetingRecord
+    let assignedSegments: Int
+    let sampleDurationSeconds: Double?
 }
 
 private struct BackendMeetingListResponse: Decodable {

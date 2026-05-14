@@ -24,6 +24,8 @@ from app.schemas import (
     MeetingResponse,
     MeetingSaveRequest,
     MeetingTranscriptUpdateRequest,
+    SpeakerAssignmentRequest,
+    SpeakerAssignmentResponse,
     SummaryMode,
     SummaryModeRequest,
     SummaryRequest,
@@ -289,6 +291,119 @@ def delete_voice_profile(
     if not store.delete_voice_profile(user.id, profile_id):
         raise HTTPException(status_code=404, detail="Voice profile not found.")
     return {"deleted": profile_id}
+
+
+@app.post(
+    "/v1/meetings/{meeting_id}/speakers/assign",
+    response_model=SpeakerAssignmentResponse,
+)
+def assign_meeting_speaker(
+    meeting_id: str,
+    payload: SpeakerAssignmentRequest,
+    user: UserResponse = Depends(current_user),
+) -> SpeakerAssignmentResponse:
+    speaker_label = payload.speaker.strip()
+    if not speaker_label:
+        raise HTTPException(status_code=422, detail="Speaker label is required.")
+
+    requested_name = (payload.name or "").strip()
+    profile_with_embedding = None
+    if payload.profileId:
+        profile_with_embedding = store.get_voice_profile_embedding(user.id, payload.profileId)
+        if profile_with_embedding is None:
+            raise HTTPException(status_code=404, detail="Voice profile not found.")
+    elif requested_name:
+        profile_with_embedding = store.find_voice_profile_by_name(user.id, requested_name)
+    else:
+        raise HTTPException(status_code=422, detail="Voice profile name is required.")
+
+    meeting = store.get(meeting_id, user_id=user.id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    if not meeting.segments:
+        raise HTTPException(status_code=422, detail="Meeting has no speaker segments.")
+
+    matching_segments = [
+        segment for segment in meeting.segments if _same_speaker(segment.speaker, speaker_label)
+    ]
+    if not matching_segments:
+        raise HTTPException(status_code=404, detail="Speaker was not found in this meeting.")
+
+    audio_info = store.get_meeting_audio(meeting_id, user.id)
+    if audio_info is None:
+        raise HTTPException(status_code=409, detail="Meeting audio is not available.")
+    audio_path, _ = audio_info
+    if not audio_path.exists():
+        raise HTTPException(status_code=409, detail="Meeting audio file is missing.")
+
+    embeddings = voice_embedder.extract_for_labeled_segments(audio_path, matching_segments)
+    embedding = embeddings.get(speaker_label) if embeddings else None
+    if embedding is None and embeddings:
+        embedding = next(iter(embeddings.values()))
+    if embedding is None:
+        raise HTTPException(status_code=503, detail="Voice embedding is unavailable.")
+
+    sample_duration = _segments_duration_seconds(matching_segments)
+    serialized_embedding = voice_embedder.serialize(embedding)
+    if profile_with_embedding is None:
+        profile = store.save_voice_profile(
+            user_id=user.id,
+            name=requested_name,
+            duration_seconds=sample_duration,
+            embedding=serialized_embedding,
+            meeting_id=meeting_id,
+            speaker_label=speaker_label,
+        )
+    else:
+        existing_profile, existing_embedding = profile_with_embedding
+        updated_embedding = voice_embedder.average_embeddings(
+            voice_embedder.deserialize(existing_embedding),
+            existing_profile.sampleCount,
+            embedding,
+        )
+        profile = store.add_voice_profile_sample(
+            user_id=user.id,
+            profile_id=existing_profile.id,
+            duration_seconds=sample_duration,
+            embedding=serialized_embedding,
+            updated_embedding=voice_embedder.serialize(updated_embedding),
+            meeting_id=meeting_id,
+            speaker_label=speaker_label,
+        )
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Voice profile not found.")
+
+    updated_segments = [
+        segment.model_copy(update={"speaker": profile.name})
+        if _same_speaker(segment.speaker, speaker_label)
+        else segment
+        for segment in meeting.segments
+    ]
+    updated_transcript = _format_transcript(updated_segments)
+    updated_meeting = store.update_meeting_transcript(
+        meeting_id,
+        user.id,
+        updated_transcript,
+        updated_segments,
+    )
+    if updated_meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+
+    return SpeakerAssignmentResponse(
+        profile=profile,
+        meeting=updated_meeting,
+        assignedSegments=len(matching_segments),
+        sampleDurationSeconds=sample_duration,
+    )
+
+
+def _same_speaker(left: str | None, right: str | None) -> bool:
+    return (left or "").strip() == (right or "").strip()
+
+
+def _segments_duration_seconds(segments: list) -> float | None:
+    total = sum(max(0.0, float(segment.end) - float(segment.start)) for segment in segments)
+    return total if total > 0 else None
 
 
 def _audio_duration_seconds(path: Path) -> float | None:

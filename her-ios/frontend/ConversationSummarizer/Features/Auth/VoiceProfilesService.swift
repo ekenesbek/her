@@ -4,6 +4,7 @@ struct VoiceProfile: Codable, Identifiable, Equatable {
     let id: String
     let name: String
     let durationSeconds: Double?
+    let sampleCount: Int?
     let createdAt: Date
 }
 

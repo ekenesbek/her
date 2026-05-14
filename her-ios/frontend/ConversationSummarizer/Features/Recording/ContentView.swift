@@ -385,6 +385,16 @@ struct ContentView: View {
                             )
                             selectedMeeting = updated
                             return updated
+                        },
+                        onAssignSpeaker: { meeting, speaker, profileId, name in
+                            let result = try await meetingsStore.assignSpeaker(
+                                for: meeting,
+                                speaker: speaker,
+                                profileId: profileId,
+                                name: name
+                            )
+                            selectedMeeting = result.meeting
+                            return result
                         }
                     )
                 case .memory:
@@ -1339,6 +1349,7 @@ private struct ExactConversationDetailScreen: View {
     let onBack: () -> Void
     let onGenerateSummary: (StoredMeeting) async -> Void
     let onUpdateTranscript: (StoredMeeting, String, [MeetingTranscriptSegment]) async throws -> StoredMeeting
+    let onAssignSpeaker: (StoredMeeting, String, String?, String) async throws -> SpeakerAssignmentResult
     private let tabs = ["contents", "summary", "chat"]
     @State private var selectedTab = 0
     @State private var isGeneratingSummary = false
@@ -1364,6 +1375,9 @@ private struct ExactConversationDetailScreen: View {
                                     currentUserName: currentUserName,
                                     onUpdateTranscript: { transcript, segments in
                                         try await onUpdateTranscript(meeting, transcript, segments)
+                                    },
+                                    onAssignSpeaker: { speaker, profileId, name in
+                                        try await onAssignSpeaker(meeting, speaker, profileId, name)
                                     }
                                 )
                             }
@@ -4425,8 +4439,11 @@ private struct ConversationContentsPanel: View {
     let scrollProxy: ScrollViewProxy
     let currentUserName: String
     let onUpdateTranscript: (String, [MeetingTranscriptSegment]) async throws -> StoredMeeting
+    let onAssignSpeaker: (String, String?, String) async throws -> SpeakerAssignmentResult
     @Environment(\.scenePhase) private var scenePhase
     @State private var speakerNames: [String: String] = [:]
+    @State private var voiceProfiles: [VoiceProfile] = []
+    @State private var voiceProfilesLoading = false
     @State private var lastScrolledChunkID: String?
     @StateObject private var playback = MeetingAudioPlaybackController()
 
@@ -4454,7 +4471,7 @@ private struct ConversationContentsPanel: View {
                             isActive: activeChunkID == chunk.id,
                             isPlaying: playback.isPlaying && activeChunkID == chunk.id,
                             playbackTime: playback.currentTime,
-                            recentSpeakerNames: SpeakerNamePreferences.recentNames(),
+                            voiceProfiles: voiceProfiles,
                             currentUserName: currentUserName,
                             onTogglePlay: {
                                 toggleChunkPlayback(chunk)
@@ -4465,8 +4482,8 @@ private struct ConversationContentsPanel: View {
                             onStopPlaybackForEditing: {
                                 playback.pausePlayback()
                             },
-                            onSaveSpeakerName: { name, scope in
-                                saveSpeakerName(name, for: chunk, scope: scope)
+                            onSaveSpeakerName: { selection, scope in
+                                try await saveSpeakerName(selection, for: chunk, scope: scope)
                             },
                             onSaveText: { text in
                                 try await saveTranscriptEdit(chunk, text: text)
@@ -4480,6 +4497,7 @@ private struct ConversationContentsPanel: View {
         .padding(.top, 4)
         .onAppear {
             speakerNames = SpeakerNamePreferences.load(meetingId: meeting.id)
+            Task { await loadVoiceProfiles() }
         }
         .onChange(of: playback.currentTime) { _ in
             scrollToActiveChunkIfNeeded()
@@ -4585,11 +4603,11 @@ private struct ConversationContentsPanel: View {
     }
 
     private func saveSpeakerName(
-        _ name: String,
+        _ selection: SpeakerRenameSelection,
         for chunk: TranscriptDisplayChunk,
         scope: SpeakerRenameScope
-    ) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    ) async throws {
+        let trimmed = selection.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = scope == .speaker ? chunk.speakerKey : SpeakerNamePreferences.segmentKey(chunk.id)
         if trimmed.isEmpty {
             speakerNames.removeValue(forKey: key)
@@ -4598,6 +4616,13 @@ private struct ConversationContentsPanel: View {
             SpeakerNamePreferences.rememberRecentName(trimmed)
         }
         SpeakerNamePreferences.save(speakerNames, meetingId: meeting.id)
+
+        guard scope == .speaker, !trimmed.isEmpty else {
+            return
+        }
+
+        let result = try await onAssignSpeaker(chunk.speakerKey, selection.profileId, trimmed)
+        upsertVoiceProfile(result.profile)
     }
 
     private func saveTranscriptEdit(_ chunk: TranscriptDisplayChunk, text: String) async throws {
@@ -4680,6 +4705,27 @@ private struct ConversationContentsPanel: View {
         lastScrolledChunkID = chunkID
         withAnimation(.easeInOut(duration: 0.25)) {
             scrollProxy.scrollTo(chunkID, anchor: .center)
+        }
+    }
+
+    private func loadVoiceProfiles() async {
+        guard !voiceProfilesLoading, let service = VoiceProfilesService() else {
+            return
+        }
+        voiceProfilesLoading = true
+        defer { voiceProfilesLoading = false }
+        do {
+            voiceProfiles = try await service.list()
+        } catch {
+            voiceProfiles = []
+        }
+    }
+
+    private func upsertVoiceProfile(_ profile: VoiceProfile) {
+        if let index = voiceProfiles.firstIndex(where: { $0.id == profile.id }) {
+            voiceProfiles[index] = profile
+        } else {
+            voiceProfiles.insert(profile, at: 0)
         }
     }
 }
@@ -5628,19 +5674,21 @@ private struct ConversationTranscriptSegmentRow: View {
     let isActive: Bool
     let isPlaying: Bool
     let playbackTime: Double
-    let recentSpeakerNames: [String]
+    let voiceProfiles: [VoiceProfile]
     let currentUserName: String
     let onTogglePlay: () -> Void
     let onPlayFromText: () -> Void
     let onStopPlaybackForEditing: () -> Void
-    let onSaveSpeakerName: (String, SpeakerRenameScope) -> Void
+    let onSaveSpeakerName: (SpeakerRenameSelection, SpeakerRenameScope) async throws -> Void
     let onSaveText: (String) async throws -> Void
 
     @State private var textDraft: String
     @State private var speakerDraft: String
     @State private var isEditingText = false
     @State private var isRenamingSpeaker = false
+    @State private var isSavingSpeaker = false
     @State private var isSavingText = false
+    @State private var speakerErrorMessage: String?
     @State private var textErrorMessage: String?
     @FocusState private var focusedField: FocusedField?
 
@@ -5650,12 +5698,12 @@ private struct ConversationTranscriptSegmentRow: View {
         isActive: Bool,
         isPlaying: Bool,
         playbackTime: Double,
-        recentSpeakerNames: [String],
+        voiceProfiles: [VoiceProfile],
         currentUserName: String,
         onTogglePlay: @escaping () -> Void,
         onPlayFromText: @escaping () -> Void,
         onStopPlaybackForEditing: @escaping () -> Void,
-        onSaveSpeakerName: @escaping (String, SpeakerRenameScope) -> Void,
+        onSaveSpeakerName: @escaping (SpeakerRenameSelection, SpeakerRenameScope) async throws -> Void,
         onSaveText: @escaping (String) async throws -> Void
     ) {
         self.chunk = chunk
@@ -5663,7 +5711,7 @@ private struct ConversationTranscriptSegmentRow: View {
         self.isActive = isActive
         self.isPlaying = isPlaying
         self.playbackTime = playbackTime
-        self.recentSpeakerNames = recentSpeakerNames
+        self.voiceProfiles = voiceProfiles
         self.currentUserName = currentUserName
         self.onTogglePlay = onTogglePlay
         self.onPlayFromText = onPlayFromText
@@ -5768,8 +5816,10 @@ private struct ConversationTranscriptSegmentRow: View {
         .sheet(isPresented: $isRenamingSpeaker) {
             SpeakerRenamePopup(
                 initialName: speakerName,
-                recentNames: recentSpeakerNames,
+                voiceProfiles: voiceProfiles,
                 currentUserName: currentUserName,
+                isSaving: isSavingSpeaker,
+                errorMessage: speakerErrorMessage,
                 onCancel: cancelSpeakerRename,
                 onSave: commitSpeakerRename
             )
@@ -5842,17 +5892,34 @@ private struct ConversationTranscriptSegmentRow: View {
 
     private func beginSpeakerRenaming() {
         speakerDraft = speakerName
+        speakerErrorMessage = nil
         isRenamingSpeaker = true
     }
 
-    private func commitSpeakerRename(_ name: String, scope: SpeakerRenameScope) {
-        speakerDraft = name
-        onSaveSpeakerName(name, scope)
-        isRenamingSpeaker = false
+    private func commitSpeakerRename(_ selection: SpeakerRenameSelection, scope: SpeakerRenameScope) {
+        guard !isSavingSpeaker else {
+            return
+        }
+        speakerDraft = selection.name
+        speakerErrorMessage = nil
+        isSavingSpeaker = true
+        Task { @MainActor in
+            do {
+                try await onSaveSpeakerName(selection, scope)
+                isRenamingSpeaker = false
+            } catch {
+                speakerErrorMessage = error.localizedDescription
+            }
+            isSavingSpeaker = false
+        }
     }
 
     private func cancelSpeakerRename() {
+        guard !isSavingSpeaker else {
+            return
+        }
         speakerDraft = speakerName
+        speakerErrorMessage = nil
         isRenamingSpeaker = false
     }
 
@@ -5970,27 +6037,39 @@ private enum SpeakerRenameScope {
     case speaker
 }
 
+private struct SpeakerRenameSelection {
+    let name: String
+    let profileId: String?
+}
+
 private struct SpeakerRenamePopup: View {
     let initialName: String
-    let recentNames: [String]
+    let voiceProfiles: [VoiceProfile]
     let currentUserName: String
+    let isSaving: Bool
+    let errorMessage: String?
     let onCancel: () -> Void
-    let onSave: (String, SpeakerRenameScope) -> Void
+    let onSave: (SpeakerRenameSelection, SpeakerRenameScope) -> Void
 
     @State private var draft: String
+    @State private var selectedProfileId: String?
     @State private var scope: SpeakerRenameScope = .speaker
     @FocusState private var isNameFocused: Bool
 
     init(
         initialName: String,
-        recentNames: [String],
+        voiceProfiles: [VoiceProfile],
         currentUserName: String,
+        isSaving: Bool,
+        errorMessage: String?,
         onCancel: @escaping () -> Void,
-        onSave: @escaping (String, SpeakerRenameScope) -> Void
+        onSave: @escaping (SpeakerRenameSelection, SpeakerRenameScope) -> Void
     ) {
         self.initialName = initialName
-        self.recentNames = recentNames
+        self.voiceProfiles = voiceProfiles
         self.currentUserName = currentUserName
+        self.isSaving = isSaving
+        self.errorMessage = errorMessage
         self.onCancel = onCancel
         self.onSave = onSave
         _draft = State(initialValue: initialName)
@@ -6031,9 +6110,17 @@ private struct SpeakerRenamePopup: View {
                 .frame(height: 48)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(AppTheme.bg))
                 .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+                .onChange(of: draft) { newValue in
+                    if selectedProfile?.name != newValue {
+                        selectedProfileId = nil
+                    }
+                }
 
             if let userName = selfName {
-                Button(action: { draft = userName }) {
+                Button(action: {
+                    draft = userName
+                    selectedProfileId = matchingProfile(named: userName)?.id
+                }) {
                     Text("\(userName)(you)")
                         .font(.system(size: 15, weight: .regular))
                         .foregroundColor(AppTheme.muted)
@@ -6049,21 +6136,41 @@ private struct SpeakerRenamePopup: View {
             }
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Recently used names")
+                Text("Saved voice profiles")
                     .font(.system(size: 13, weight: .regular))
                     .foregroundColor(AppTheme.muted)
                     .padding(.bottom, 8)
 
-                ForEach(recentDisplayNames, id: \.self) { name in
-                    Button(action: { draft = name }) {
-                        Text(name)
-                            .font(.system(size: 17, weight: .regular))
-                            .foregroundColor(AppTheme.fg)
+                if voiceProfiles.isEmpty {
+                    Text("No saved voices yet")
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundColor(AppTheme.dim)
+                        .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+                } else {
+                    ForEach(voiceProfiles.prefix(6)) { profile in
+                        Button(action: { select(profile) }) {
+                            HStack(spacing: 8) {
+                                Text(profile.name)
+                                    .font(.system(size: 17, weight: .regular))
+                                    .foregroundColor(AppTheme.fg)
+                                if let sampleCount = profile.sampleCount, sampleCount > 1 {
+                                    Text("\(sampleCount) samples")
+                                        .font(.system(size: 12, weight: .regular))
+                                        .foregroundColor(AppTheme.dim)
+                                }
+                                Spacer(minLength: 0)
+                                if selectedProfileId == profile.id {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(AppTheme.fg)
+                                }
+                            }
                             .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .overlay(alignment: .bottom) {
-                        DividerLine()
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .overlay(alignment: .bottom) {
+                            DividerLine()
+                        }
                     }
                 }
             }
@@ -6078,23 +6185,30 @@ private struct SpeakerRenamePopup: View {
 
                 SpeakerRenameScopeRow(
                     title: "Apply to all segments from this speaker",
-                    subtitle: "The notes will be automatically updated according to the template.",
+                    subtitle: "This saves or extends the voice profile for future meetings.",
                     isSelected: scope == .speaker,
                     action: { scope = .speaker }
                 )
             }
 
             Button(action: save) {
-                Text("Save")
+                Text(isSaving ? "Saving..." : "Save")
                     .font(.system(size: 17, weight: .medium, design: .serif))
                     .foregroundColor(AppTheme.bg)
                     .frame(maxWidth: .infinity, minHeight: 46)
                     .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(AppTheme.fg))
             }
             .buttonStyle(PlainButtonStyle())
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+            .disabled(isSaving || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .opacity(isSaving || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
             .padding(.top, 4)
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundColor(AppTheme.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.horizontal, 20)
         .padding(.top, 20)
@@ -6108,16 +6222,6 @@ private struct SpeakerRenamePopup: View {
         }
     }
 
-    private var recentDisplayNames: [String] {
-        let userName = selfName
-        let filtered = recentNames.filter { name in
-            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !trimmed.isEmpty && trimmed != draft && trimmed != userName
-        }
-        let defaults = ["Арман", "Азамат", "Асгард", "Ерасыл"].filter { !filtered.contains($0) && $0 != userName }
-        return Array((filtered + defaults).prefix(4))
-    }
-
     private var selfName: String? {
         let trimmed = currentUserName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty && trimmed != "Owner" else {
@@ -6126,12 +6230,32 @@ private struct SpeakerRenamePopup: View {
         return trimmed
     }
 
+    private var selectedProfile: VoiceProfile? {
+        guard let selectedProfileId else {
+            return nil
+        }
+        return voiceProfiles.first { $0.id == selectedProfileId }
+    }
+
+    private func select(_ profile: VoiceProfile) {
+        draft = profile.name
+        selectedProfileId = profile.id
+    }
+
+    private func matchingProfile(named name: String) -> VoiceProfile? {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return voiceProfiles.first { profile in
+            profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
+        }
+    }
+
     private func save() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return
         }
-        onSave(trimmed, scope)
+        let profileId = selectedProfileId ?? matchingProfile(named: trimmed)?.id
+        onSave(SpeakerRenameSelection(name: trimmed, profileId: profileId), scope)
     }
 }
 

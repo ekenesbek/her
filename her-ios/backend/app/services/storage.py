@@ -400,6 +400,7 @@ class MeetingStore:
             self._ensure_meeting_summary_mode_column(connection)
             self._ensure_meeting_audio_columns(connection)
             self._ensure_voice_profiles_table(connection)
+            self._ensure_voice_profile_samples_table(connection)
             self._ensure_meeting_jobs_table(connection)
             self._ensure_meeting_chat_messages_table(connection)
 
@@ -466,14 +467,45 @@ class MeetingStore:
                 user_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 duration_seconds REAL,
+                sample_count INTEGER NOT NULL DEFAULT 1,
                 embedding BLOB NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             """
         )
+        columns = self._table_columns(connection, "voice_profiles")
+        if "sample_count" not in columns:
+            connection.execute(
+                "ALTER TABLE voice_profiles ADD COLUMN sample_count INTEGER NOT NULL DEFAULT 1"
+            )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_voice_profiles_user_id ON voice_profiles (user_id)"
+        )
+
+    def _ensure_voice_profile_samples_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS voice_profile_samples (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                meeting_id TEXT,
+                speaker_label TEXT,
+                duration_seconds REAL,
+                embedding BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (profile_id) REFERENCES voice_profiles(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_voice_profile_samples_profile_created
+            ON voice_profile_samples (profile_id, created_at DESC)
+            """
         )
 
     def _ensure_meeting_jobs_table(self, connection: sqlite3.Connection) -> None:
@@ -538,23 +570,48 @@ class MeetingStore:
         name: str,
         duration_seconds: float | None,
         embedding: bytes,
+        meeting_id: str | None = None,
+        speaker_label: str | None = None,
     ) -> VoiceProfileResponse:
         from datetime import UTC as _UTC
 
         profile_id = str(uuid4())
+        sample_id = str(uuid4())
         created_at = datetime.now(_UTC).isoformat()
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO voice_profiles (id, user_id, name, duration_seconds, embedding, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO voice_profiles (
+                    id, user_id, name, duration_seconds, sample_count, embedding, created_at
+                )
+                VALUES (?, ?, ?, ?, 1, ?, ?)
                 """,
                 (profile_id, user_id, name, duration_seconds, embedding, created_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO voice_profile_samples (
+                    id, profile_id, user_id, meeting_id, speaker_label,
+                    duration_seconds, embedding, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sample_id,
+                    profile_id,
+                    user_id,
+                    meeting_id,
+                    speaker_label,
+                    duration_seconds,
+                    embedding,
+                    created_at,
+                ),
             )
         return VoiceProfileResponse(
             id=profile_id,
             name=name,
             durationSeconds=duration_seconds,
+            sampleCount=1,
             createdAt=created_at,
         )
 
@@ -562,7 +619,7 @@ class MeetingStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, name, duration_seconds, created_at FROM voice_profiles
+                SELECT id, name, duration_seconds, sample_count, created_at FROM voice_profiles
                 WHERE user_id = ? ORDER BY created_at DESC
                 """,
                 (user_id,),
@@ -572,6 +629,7 @@ class MeetingStore:
                     id=row["id"],
                     name=row["name"],
                     durationSeconds=row["duration_seconds"],
+                    sampleCount=row["sample_count"],
                     createdAt=row["created_at"],
                 )
                 for row in rows
@@ -583,7 +641,7 @@ class MeetingStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, name, duration_seconds, created_at, embedding
+                SELECT id, name, duration_seconds, sample_count, created_at, embedding
                 FROM voice_profiles WHERE user_id = ?
                 """,
                 (user_id,),
@@ -594,12 +652,118 @@ class MeetingStore:
                         id=row["id"],
                         name=row["name"],
                         durationSeconds=row["duration_seconds"],
+                        sampleCount=row["sample_count"],
                         createdAt=row["created_at"],
                     ),
                     row["embedding"],
                 )
                 for row in rows
             ]
+
+    def get_voice_profile_embedding(
+        self,
+        user_id: str,
+        profile_id: str,
+    ) -> tuple[VoiceProfileResponse, bytes] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, name, duration_seconds, sample_count, created_at, embedding
+                FROM voice_profiles WHERE id = ? AND user_id = ?
+                """,
+                (profile_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return (
+                VoiceProfileResponse(
+                    id=row["id"],
+                    name=row["name"],
+                    durationSeconds=row["duration_seconds"],
+                    sampleCount=row["sample_count"],
+                    createdAt=row["created_at"],
+                ),
+                row["embedding"],
+            )
+
+    def find_voice_profile_by_name(
+        self,
+        user_id: str,
+        name: str,
+    ) -> tuple[VoiceProfileResponse, bytes] | None:
+        normalized = name.strip().casefold()
+        if not normalized:
+            return None
+        for profile, embedding in self.list_voice_profile_embeddings(user_id):
+            if profile.name.strip().casefold() == normalized:
+                return profile, embedding
+        return None
+
+    def add_voice_profile_sample(
+        self,
+        user_id: str,
+        profile_id: str,
+        duration_seconds: float | None,
+        embedding: bytes,
+        updated_embedding: bytes,
+        meeting_id: str | None = None,
+        speaker_label: str | None = None,
+    ) -> VoiceProfileResponse | None:
+        sample_id = str(uuid4())
+        created_at = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, name, duration_seconds, sample_count, created_at
+                FROM voice_profiles WHERE id = ? AND user_id = ?
+                """,
+                (profile_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+
+            current_duration = row["duration_seconds"]
+            total_duration = (
+                (current_duration or 0.0) + duration_seconds
+                if duration_seconds is not None
+                else current_duration
+            )
+            sample_count = int(row["sample_count"] or 1) + 1
+            connection.execute(
+                """
+                INSERT INTO voice_profile_samples (
+                    id, profile_id, user_id, meeting_id, speaker_label,
+                    duration_seconds, embedding, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sample_id,
+                    profile_id,
+                    user_id,
+                    meeting_id,
+                    speaker_label,
+                    duration_seconds,
+                    embedding,
+                    created_at,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE voice_profiles
+                SET duration_seconds = ?, sample_count = ?, embedding = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (total_duration, sample_count, updated_embedding, profile_id, user_id),
+            )
+
+            return VoiceProfileResponse(
+                id=row["id"],
+                name=row["name"],
+                durationSeconds=total_duration,
+                sampleCount=sample_count,
+                createdAt=row["created_at"],
+            )
 
     def delete_voice_profile(self, user_id: str, profile_id: str) -> bool:
         with self._connect() as connection:
