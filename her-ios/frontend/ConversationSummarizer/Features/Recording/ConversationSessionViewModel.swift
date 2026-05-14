@@ -15,6 +15,7 @@ final class ConversationSessionViewModel: ObservableObject {
     @Published private(set) var transcriptLanguage: String?
     @Published private(set) var transcriptDurationSeconds: Double?
     @Published private(set) var audioLevel: Double = 0
+    @Published private(set) var currentMeetingId: String?
 
     private let recorder: MeetingRecorder
     private let summaryService: SummaryService
@@ -24,8 +25,6 @@ final class ConversationSessionViewModel: ObservableObject {
     private var meterTimer: Timer?
     private var lastProcessedRecordingURL: URL?
     private var lastProcessedLocationName: String?
-    private var currentMeetingId: String?
-
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var intentObservers: [NSObjectProtocol] = []
     private var audioSessionObservers: [NSObjectProtocol] = []

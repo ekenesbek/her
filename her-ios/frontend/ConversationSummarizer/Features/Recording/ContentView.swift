@@ -501,7 +501,7 @@ struct ContentView: View {
             }
             if newPhase == .completed || newPhase == .transcriptReady {
                 Task { @MainActor in
-                    await meetingsStore.refresh()
+                    await openCurrentProcessedMeeting()
                 }
             }
         }
@@ -524,11 +524,21 @@ struct ContentView: View {
 
     private func shouldKeepCurrentRecordingOpen(for phase: RecordingPhase) -> Bool {
         switch phase {
-        case .recording, .interrupted, .transcribing, .transcriptReady, .summarizing, .completed, .failed:
+        case .recording, .interrupted, .transcribing, .summarizing, .failed:
             return true
-        case .idle:
+        case .idle, .transcriptReady, .completed:
             return false
         }
+    }
+
+    private func openCurrentProcessedMeeting() async {
+        await meetingsStore.refresh()
+        guard let meetingId = viewModel.currentMeetingId,
+              let meeting = meetingsStore.meetings.first(where: { $0.id == meetingId }) else {
+            return
+        }
+        selectedMeeting = meeting
+        route = .detail
     }
 
     private func showRecording() {

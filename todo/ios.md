@@ -25,7 +25,7 @@ In scope:
 - Let meeting jobs accept `generate_summary=false`.
 - Have the iOS recording job submit transcript-first jobs.
 - Keep/open the recording screen while current recording processing is transcribing or summarizing.
-- Keep the recording screen open through transcript-ready/completed/error states after Stop Recording.
+- Keep the recording screen open while transcription/summary work is loading, then open the saved recording detail when the processed meeting is available.
 - Show a street-level recording location when Core Location returns address details.
 - Rename the voice-profile settings section to People and keep voice profiles there.
 - Remove the separate Glasses settings block.
@@ -44,7 +44,7 @@ Out of scope:
 - [x] Add a backend `generate_summary` job flag with a storage migration/default.
 - [x] Send `generate_summary=false` from iOS recording jobs.
 - [x] Route current recording processing back to the recording screen for loading.
-- [x] Keep the same recording screen through transcript-ready/completed states after Stop Recording.
+- [x] Open the saved recording detail after transcript-ready/completed processing instead of leaving users on the processing screen.
 - [x] Increase location precision and format recording locations as street address plus city.
 - [x] Update settings copy/layout so voice profiles live under People.
 - [x] Run backend and iOS verification.
@@ -58,20 +58,24 @@ Out of scope:
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=00008140-00114D90227B001C' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
 - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` failed because the iPhone was locked; install succeeded.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
 
 ## Result
 
 Backend meeting jobs now accept `generate_summary=false`; old clients keep the previous default `true`. When false, the job saves the transcript, outline, audio link, and an unavailable summary placeholder, so the existing `POST /v1/meetings/{id}/summary` endpoint can generate the real summary later.
 
-iOS recording jobs now submit `generate_summary=false`, so stopping a recording should finish once transcription is saved instead of waiting for summary generation. Stop Recording now immediately keeps the user on the recording screen, and the same screen stays open through transcribing, transcript-ready, summarizing, completed, and failed states. Settings now has a People section backed by saved voice profiles, with an empty state and the existing voice enrollment action. The separate Glasses settings block was removed, and the profile-card storage status now reads `local backend` / `active` instead of `storage unavailable`.
+iOS recording jobs now submit `generate_summary=false`, so stopping a recording should finish once transcription is saved instead of waiting for summary generation. Stop Recording now immediately keeps the user on the recording screen while transcribing/summarizing work is loading. Once the backend returns the saved meeting id and the session reaches transcript-ready or completed, the app refreshes saved meetings, selects that meeting, and opens the normal recording detail page instead of leaving users on the processing screen with `Summary ready`. Settings now has a People section backed by saved voice profiles, with an empty state and the existing voice enrollment action. The separate Glasses settings block was removed, and the profile-card storage status now reads `local backend` / `active` instead of `storage unavailable`.
 
 Recording location lookup now asks for nearer-ten-meter accuracy and formats available address components as street/house plus city, for example `Koshek Batyr 14, Almaty`, falling back to named place or city when iOS does not return street details.
 
-Known limitation: the updated app was installed on the paired iPhone, but automatic launch was blocked because the device was locked. A real recording still needs to be exercised manually on the device.
+Known limitation: the updated app was installed and launched on the paired iPhone, but a real end-to-end recording was not exercised from this environment.
 
 ## Next
 
-Result is ready for human review. Review gate: unlock the iPhone, open Her manually, run a real recording, stop it, and confirm the same Recording screen shows transcription loading, then transcript-ready state, without a detour through another results screen. Confirm the location label is street-level when precise location is available, and that Summary is generated only after pressing the button. Also open Settings and confirm People shows saved voices or the empty state, the Glasses block is gone, and storage reads as local backend active. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
+Result is ready for human review. Review gate: run a real recording, stop it, confirm the Recording screen shows transcription loading, and confirm that when processing finishes it opens the saved recording detail page rather than staying on the `Summary ready` processing screen. Confirm the location label is street-level when precise location is available, and that Summary is generated only after pressing the button. Also open Settings and confirm People shows saved voices or the empty state, the Glasses block is gone, and storage reads as local backend active. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
 
 # IOS-14: Connect Sign In With Apple Entitlement
 
