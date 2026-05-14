@@ -69,6 +69,8 @@
     <string>Camera access is needed for future Meta glasses camera features.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Microphone access is needed to record meetings for transcription and summaries.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Speech recognition is needed to detect the assistant name and start or stop recordings by voice.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Location is used to tag recordings, save meeting audio by place, and add optional city-level context to summaries.</string>
     <key>NSLocalNetworkUsageDescription</key>

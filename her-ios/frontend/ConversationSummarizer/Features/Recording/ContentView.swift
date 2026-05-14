@@ -317,10 +317,12 @@ private enum MainRoute {
 }
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var wearablesBridge: WearablesBridge
     @ObservedObject var settings: AppSettingsStore
     @ObservedObject var authStore: AuthStore
     @StateObject private var viewModel: ConversationSessionViewModel
+    @StateObject private var wakeCommands = WakeCommandController()
     @StateObject private var liveContext = LiveContextStore()
     @StateObject private var meetingsStore = MeetingsStore()
     @State private var route: MainRoute = .home
@@ -447,6 +449,7 @@ struct ContentView: View {
                         viewModel: viewModel,
                         liveContext: liveContext,
                         muted: $recordingMuted,
+                        currentUserName: currentUserDisplayName,
                         onStop: stopRecordingAndStay,
                         onContinue: continueInterruptedRecording,
                         onFinishInterrupted: finishInterruptedRecording,
@@ -462,6 +465,7 @@ struct ContentView: View {
                         settings: settings,
                         bridge: wearablesBridge,
                         viewModel: viewModel,
+                        wakeCommands: wakeCommands,
                         authStore: authStore,
                         onHome: { route = .home },
                         onConversations: { route = .conversations },
@@ -477,6 +481,8 @@ struct ContentView: View {
         .navigationViewStyle(.stack)
         .onAppear {
             liveContext.refreshIfAuthorized()
+            wakeCommands.configure(assistantName: settings.aiDisplayName)
+            wakeCommands.setAppActive(scenePhase == .active)
             Task { @MainActor in
                 await meetingsStore.refresh()
                 await viewModel.recoverIfNeeded()
@@ -486,19 +492,41 @@ struct ContentView: View {
             if shouldKeepCurrentRecordingOpen(for: newPhase) {
                 route = .recording
             }
+            if newPhase == .recording {
+                wakeCommands.listenForStopWhileRecording()
+            } else if newPhase == .interrupted {
+                wakeCommands.pauseForRecording()
+            } else {
+                wakeCommands.resumeAfterRecordingIfNeeded()
+            }
             if newPhase == .completed || newPhase == .transcriptReady {
                 Task { @MainActor in
                     await meetingsStore.refresh()
                 }
             }
         }
+        .onChange(of: settings.aiDisplayName) { newName in
+            wakeCommands.configure(assistantName: newName)
+        }
+        .onChange(of: scenePhase) { newPhase in
+            wakeCommands.setAppActive(newPhase == .active)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .herWakeWordDetected)) { _ in
+            handleWakeWordDetected()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .herWakeStartRecordingRequested)) { _ in
+            handleWakeStartRecording()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .herWakeStopRecordingRequested)) { _ in
+            handleWakeStopRecording()
+        }
     }
 
     private func shouldKeepCurrentRecordingOpen(for phase: RecordingPhase) -> Bool {
         switch phase {
-        case .transcribing, .transcriptReady, .summarizing, .completed, .failed:
+        case .recording, .interrupted, .transcribing, .transcriptReady, .summarizing, .completed, .failed:
             return true
-        case .idle, .recording, .interrupted:
+        case .idle:
             return false
         }
     }
@@ -515,10 +543,12 @@ struct ContentView: View {
         }
 
         Task { @MainActor in
+            wakeCommands.pauseForRecording()
             wearablesBridge.refreshAudioRoute()
             liveContext.prepareForRecording()
             let didStart = await viewModel.startRecording()
             guard didStart else {
+                wakeCommands.resumeAfterRecordingIfNeeded()
                 return
             }
 
@@ -543,6 +573,7 @@ struct ContentView: View {
 
         Task { @MainActor in
             route = .recording
+            wakeCommands.pauseForRecording()
             await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName)
         }
     }
@@ -566,7 +597,33 @@ struct ContentView: View {
 
         Task { @MainActor in
             route = .recording
+            wakeCommands.pauseForRecording()
             await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName)
+        }
+    }
+
+    private func handleWakeWordDetected() {
+        recordingMuted = false
+        route = .recording
+    }
+
+    private func handleWakeStartRecording() {
+        if viewModel.phase == .interrupted {
+            continueInterruptedRecording()
+        } else if viewModel.phase == .recording {
+            route = .recording
+        } else {
+            showRecording()
+        }
+    }
+
+    private func handleWakeStopRecording() {
+        if viewModel.phase == .recording {
+            stopRecordingAndStay()
+        } else if viewModel.phase == .interrupted {
+            finishInterruptedRecording()
+        } else {
+            route = .recording
         }
     }
 
@@ -2235,6 +2292,7 @@ private struct ExactRecordingScreen: View {
     @ObservedObject var viewModel: ConversationSessionViewModel
     @ObservedObject var liveContext: LiveContextStore
     @Binding var muted: Bool
+    let currentUserName: String
     let onStop: () -> Void
     let onContinue: () -> Void
     let onFinishInterrupted: () -> Void
@@ -2347,7 +2405,11 @@ private struct ExactRecordingScreen: View {
     }
 
     private var transcriptEntries: [RecordingTranscriptEntry] {
-        RecordingTranscriptEntry.fromTranscript(viewModel.transcript)
+        RecordingTranscriptEntry.fromSegments(
+            viewModel.transcriptSegments,
+            transcript: viewModel.transcript,
+            currentUserName: currentUserName
+        )
     }
 
     private var recordingStatusText: String {
@@ -2595,7 +2657,30 @@ private struct RecordingTranscriptEntry: Identifiable {
     let active: Bool
     let unknown: Bool
 
-    static func fromTranscript(_ transcript: String) -> [RecordingTranscriptEntry] {
+    static func fromSegments(
+        _ segments: [MeetingTranscriptSegment],
+        transcript: String,
+        currentUserName: String
+    ) -> [RecordingTranscriptEntry] {
+        let usableSegments = segments.filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if !usableSegments.isEmpty {
+            return usableSegments.map { segment in
+                let rawSpeaker = segment.speaker?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let fallbackSpeaker = rawSpeaker.isEmpty ? "Speaker" : rawSpeaker
+                let speaker = SpeakerDisplayNames.decorated(fallbackSpeaker, currentUserName: currentUserName)
+                return RecordingTranscriptEntry(
+                    time: MeetingTimeFormatter.timestamp(segment.start),
+                    speaker: speaker,
+                    initial: String(speaker.prefix(1)).uppercased(),
+                    text: segment.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                    active: false,
+                    unknown: fallbackSpeaker.localizedCaseInsensitiveContains("speaker")
+                )
+            }
+        }
+
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return []
@@ -2606,7 +2691,7 @@ private struct RecordingTranscriptEntry: Identifiable {
                 time: "saved",
                 speaker: "Transcript",
                 initial: "T",
-                text: trimmed,
+                text: SpeakerDisplayNames.decoratedSpeakerLabels(in: trimmed, currentUserName: currentUserName),
                 active: false,
                 unknown: false
             )
@@ -2815,6 +2900,7 @@ private struct ExactSettingsHerScreen: View {
     @ObservedObject var settings: AppSettingsStore
     @ObservedObject var bridge: WearablesBridge
     @ObservedObject var viewModel: ConversationSessionViewModel
+    @ObservedObject var wakeCommands: WakeCommandController
     @ObservedObject var authStore: AuthStore
 
     let onHome: () -> Void
@@ -2843,6 +2929,7 @@ private struct ExactSettingsHerScreen: View {
         settings: AppSettingsStore,
         bridge: WearablesBridge,
         viewModel: ConversationSessionViewModel,
+        wakeCommands: WakeCommandController,
         authStore: AuthStore,
         onHome: @escaping () -> Void,
         onConversations: @escaping () -> Void,
@@ -2853,6 +2940,7 @@ private struct ExactSettingsHerScreen: View {
         self.settings = settings
         self.bridge = bridge
         self.viewModel = viewModel
+        self.wakeCommands = wakeCommands
         self.authStore = authStore
         self.onHome = onHome
         self.onConversations = onConversations
@@ -2969,9 +3057,11 @@ private struct ExactSettingsHerScreen: View {
                         VStack(spacing: 0) {
                             SettingsValueRow(icon: "globe", label: "Language", value: "auto")
                             DividerLine()
-                            SettingsValueRow(icon: "mic", label: "Wake word", subtitle: "\"hey \(settings.aiDisplayName.lowercased())\"", value: "custom")
+                            SettingsValueRow(icon: "mic", label: "Wake word", subtitle: "assistant name, Hey optional", value: settings.aiDisplayName.lowercased())
                             DividerLine()
-                            SettingsValueRow(icon: "sparkles", label: "Sensitivity", subtitle: "how easily I start listening", value: "default")
+                            SettingsToggleRow(icon: "waveform", label: "Listen for \(settings.aiDisplayName)", subtitle: wakeCommandSubtitle, isOn: wakeCommandBinding)
+                            DividerLine()
+                            SettingsValueRow(icon: "sparkles", label: "Command status", subtitle: wakeCommands.statusText, value: wakeCommands.shortStatus)
                             DividerLine()
                             SettingsToggleRow(icon: "waveform", label: "Silence trim", isOn: $silenceTrim)
                         }
@@ -3046,6 +3136,17 @@ private struct ExactSettingsHerScreen: View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
         return "\(version) (\(build))"
+    }
+
+    private var wakeCommandBinding: Binding<Bool> {
+        Binding(
+            get: { wakeCommands.isEnabled },
+            set: { wakeCommands.setEnabled($0) }
+        )
+    }
+
+    private var wakeCommandSubtitle: String {
+        "Say \"Hey \(settings.aiDisplayName)\" or \"\(settings.aiDisplayName)\", then \"start recording\" or \"stop recording\"."
     }
 
     @MainActor
@@ -4515,7 +4616,7 @@ private struct ConversationContentsPanel: View {
                 ContentsSectionTitle(title: "Transcript")
 
                 if displaySegments.isEmpty {
-                    Text(meeting.transcript)
+                    Text(SpeakerDisplayNames.decoratedSpeakerLabels(in: meeting.transcript, currentUserName: currentUserName))
                         .font(.system(size: 16, weight: .regular))
                         .foregroundColor(AppTheme.fg)
                         .lineSpacing(5)
@@ -4628,18 +4729,18 @@ private struct ConversationContentsPanel: View {
     private func displayName(for chunk: TranscriptDisplayChunk) -> String {
         let segmentKey = SpeakerNamePreferences.segmentKey(chunk.id)
         if let renamed = speakerNames[segmentKey], !renamed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return renamed
+            return SpeakerDisplayNames.decorated(renamed, currentUserName: currentUserName)
         }
         return displayName(for: chunk.speakerKey)
     }
 
     private func displayName(for speakerKey: String) -> String {
         if let renamed = speakerNames[speakerKey], !renamed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return renamed
+            return SpeakerDisplayNames.decorated(renamed, currentUserName: currentUserName)
         }
 
         if !speakerKey.localizedCaseInsensitiveContains("speaker") {
-            return speakerKey
+            return SpeakerDisplayNames.decorated(speakerKey, currentUserName: currentUserName)
         }
 
         let orderedKeys = speakerOrder
@@ -6400,6 +6501,51 @@ private enum TranscriptInlineEditError: LocalizedError {
     }
 }
 
+private enum SpeakerDisplayNames {
+    static func decorated(_ name: String, currentUserName: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return name
+        }
+        guard !trimmed.localizedCaseInsensitiveContains("(you)") else {
+            return trimmed
+        }
+        return isCurrentUserName(trimmed, currentUserName: currentUserName) ? "\(trimmed) (you)" : trimmed
+    }
+
+    static func decoratedSpeakerLabels(in transcript: String, currentUserName: String) -> String {
+        transcript
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                guard let colonIndex = line.firstIndex(of: ":") else {
+                    return String(line)
+                }
+                let speaker = String(line[..<colonIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard isCurrentUserName(speaker, currentUserName: currentUserName) else {
+                    return String(line)
+                }
+                return "\(decorated(speaker, currentUserName: currentUserName))\(line[colonIndex...])"
+            }
+            .joined(separator: "\n")
+    }
+
+    private static func isCurrentUserName(_ name: String, currentUserName: String) -> Bool {
+        let normalizedName = normalized(name)
+        guard !normalizedName.isEmpty else {
+            return false
+        }
+        let normalizedCurrentUser = normalized(currentUserName)
+        return normalizedName == normalizedCurrentUser || normalizedName == "yerasyl"
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+    }
+}
+
 private enum MeetingTranscriptTextBuilder {
     static func text(from segments: [MeetingTranscriptSegment]) -> String {
         let nonEmptySegments = segments.filter {
@@ -7502,13 +7648,13 @@ private struct SetupAgentNamePage: View {
     let onBack: () -> Void
     let onContinue: () -> Void
 
-    private let suggestions = ["Her", "iris", "echo", "mira", "atlas", "wren", "lior"]
+    private let suggestions = ["Alfred", "Friday", "Jarvis", "Samantha", "iris", "atlas", "mira"]
 
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
             WwSteps(step: 2, total: 5, label: "agent")
-            WwHeader(pre: "your agent", title: "And what shall I call myself?", italic: true)
+            WwHeader(pre: "wake word", title: "What should wake me?", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
                 WwCard(padding: 28) {
@@ -7530,6 +7676,20 @@ private struct SetupAgentNamePage: View {
                     .frame(maxWidth: .infinity)
                 }
 
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(AppTheme.muted)
+                        .padding(.top, 2)
+                    Text("This name is the wake word. Say \"Hey \(displayName)\" or \"\(displayName)\", then \"start recording\" or \"stop recording\". Use at least four letters so it does not wake accidentally.")
+                        .font(.system(size: 12.5, weight: .regular, design: .serif))
+                        .foregroundColor(AppTheme.muted)
+                        .lineSpacing(4)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bgSoft))
+
                 VStack(alignment: .leading, spacing: 10) {
                     MonoLabel("or pick one")
                     FlowWrap(items: suggestions) { suggestion in
@@ -7544,13 +7704,13 @@ private struct SetupAgentNamePage: View {
 
                 Spacer()
 
-                Text("\"Hi, Ersultan — I'm \(displayName).\"")
+                Text("\"Hey \(displayName), start recording.\"")
                     .font(.system(size: 14, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.muted)
                     .frame(maxWidth: .infinity, alignment: .center)
 
-                WwPrimaryButton("nice to meet you →", disabled: aiName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, action: onContinue)
+                WwPrimaryButton("nice to meet you →", disabled: !wakeWordIsUsable, action: onContinue)
             }
             .padding(.horizontal, 22)
             .padding(.top, 18)
@@ -7560,6 +7720,13 @@ private struct SetupAgentNamePage: View {
 
     private var displayName: String {
         aiName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Her" : aiName
+    }
+
+    private var wakeWordIsUsable: Bool {
+        displayName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .filter { $0.isLetter || $0.isNumber }
+            .count >= 4
     }
 }
 

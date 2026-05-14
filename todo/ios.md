@@ -1064,62 +1064,72 @@ Planned follow-up. Pick this after `IOS-2` is reviewed if setup state should be 
 
 # IOS-4: Improve Voice Enrollment And Wake-Word Setup
 
-Status: planned
+Status: review
 Priority: P1
 Owner: agent
 Stream: ios
-Branch: ios/IOS-4/voice-enrollment-wake-word
+Branch: current worktree
 Created: 2026-05-07
 
 ## Goal
 
-Replace the vague `Your Voice` onboarding instruction to "speak for about a minute" with a guided voice collection flow, and add a wake-word creation/training path that captures how the chosen assistant name or wake phrase actually sounds from this user.
+Make the assistant name double as the wake word, accept `Hey {name}` as a natural alias, and wire the simplest Stage 1 voice commands for starting and stopping recordings.
 
 ## Context
 
-The current `Your Voice` page asks the user to record roughly 60 seconds of natural speech so Her can create a voice profile. The next version should make that minute useful: either ask the user to read prepared text or run a short voice Q&A that also collects useful personalization facts with clear consent.
+The user chose the simpler model: `Assistant Name = Wake Word`. For example, `Alfred` or `Hey Alfred` should wake the app, then `start recording` starts capture, and `stop recording` / `I'm finished` stops and transcribes. This should remain a Stage 1 recorder control, not a VisionClaw-style vision/realtime agent.
 
-Wake-word setup should not assume a typed assistant name is enough. The user should pronounce the chosen assistant name / wake phrase several times so the app can validate pronunciation, tune thresholds, and, if the selected wake-word backend needs user-specific examples, use those recordings for training.
+The first implementation can use iOS foreground speech recognition as a prototype. A production custom wake-word engine such as Picovoice or OpenWakeWord remains a follow-up after real-device validation.
 
 ## Scope
 
 In scope:
-- Update the `Your Voice` onboarding step from generic recording copy to a guided reading mode and/or voice Q&A mode.
-- Design prompts that collect enough speech for voice identification while also gathering useful user context.
-- Add consent, skip, retry, and re-record states for any personalization facts gathered during the voice Q&A.
-- Add a wake-word setup step for choosing the assistant name / wake phrase.
-- Require the user to pronounce the chosen name or wake phrase multiple times, including the natural phrasing they expect to use.
-- Capture enough metadata to distinguish voice profile enrollment from wake-word calibration/training samples.
+- Update assistant-name onboarding so the name is presented as the wake word and `Hey {name}` is accepted as a natural alias.
+- Add a foreground wake-command listener that detects the assistant name and maps `start recording` / `stop recording`-style commands to the existing recording flow.
+- Add Settings controls and status for wake commands.
+- Add the iOS speech-recognition privacy string needed by the listener.
 
 Out of scope:
 - Scheduled/background autonomous runs.
 - Cross-session memory promotion beyond explicit local onboarding/profile data.
+- Vision, realtime conversation, tool-calling, or VisionClaw-style agent behavior.
 - Cloud-only wake-word processing or cloud credential storage.
 - Shipping a paid wake-word provider decision without human review.
 
 ## Implementation Plan
 
-- [ ] Inspect the current onboarding voice profile UI, recorder, backend enrollment endpoint, and voice profile storage.
-- [ ] Replace "speak for about a minute" UX with guided reading and/or voice Q&A content.
-- [ ] Add explicit consent and review/edit affordances for any Q&A-derived profile facts.
-- [ ] Add wake-word setup UX for assistant name / phrase selection.
-- [ ] Record multiple pronunciation samples of the chosen name / wake phrase for validation and future model training.
-- [ ] Persist voice enrollment and wake-word sample data with separate labels and deletion paths.
-- [ ] Add focused iOS/backend tests or smoke checks for the changed enrollment path.
+- [x] Inspect current onboarding, settings, AppIntents, and recording start/stop flow.
+- [x] Add a foreground wake-command controller using iOS Speech + AVAudioEngine.
+- [x] Treat the assistant name as the wake word and accept `Hey {name}` as a natural alias.
+- [x] Route wake start/stop notifications through the existing recording screen actions.
+- [x] Release the wake-command microphone listener before starting the recorder.
+- [x] Add focused build and plist/backend smoke checks.
 
 ## Verification
 
+- `plutil -lint her-ios/frontend/ConversationSummarizer/Resources/Info.plist`
 - `python3 -m compileall her-ios/backend/app`
-- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
-- Manual simulator/device smoke: complete `Your Voice` enrollment, retry/delete samples, and verify wake-word pronunciation samples are stored separately from the normal voice profile.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
 
 ## Result
 
-Not started.
+Added `WakeCommandController`, a foreground iOS Speech listener that watches for the configured assistant name or `Hey {name}` and dispatches wake start/stop recording notifications when it hears commands such as `start recording`, `stop recording`, `I'm finished`, `начни запись`, or `останови запись`. `ContentView` owns the controller, keeps it tied to the active scene, routes wake start/stop through the existing recording actions, opens the Recording screen as visible feedback when only the wake phrase is heard, and keeps the recording screen open once a voice command starts recording. The wake listener now fully releases its `AVAudioEngine` microphone tap before starting the meeting recorder, so `Hey Friday start recording` and the normal Start Recording button do not compete with the wake listener for the same microphone input.
+
+Updated onboarding so the assistant-name page presents the name as the wake word, suggests stronger names such as `Alfred`, and blocks names shorter than four letters. Settings now shows the wake word as the assistant name with `Hey` optional, adds a `Listen for {name}` toggle, and displays listener status. Added `NSSpeechRecognitionUsageDescription` to the iOS plist and registered the new Swift source in the Xcode project. For Latin wake names such as `Friday`, the listener now prefers the `en_US` recognizer before falling back to the device language.
+
+The recording phase now switches the wake listener into a constrained stop-only mode instead of fully pausing it. During an active recording it accepts `stop recording`, `Hey Friday stop recording`, `I'm finished`, `стоп`, and the existing stop aliases, then routes through the same `stopAndTranscribe` flow as the on-screen Stop button. The on-screen Stop path also shuts down the stop listener before transcribing so the listener does not keep the audio input open during completion.
+
+Known limitations: this is a foreground iOS Speech prototype, not a trained always-on wake-word model. It needs physical-device validation with Ray-Ban selected as the active Bluetooth input. If iOS still refuses to run `AVAudioRecorder` and the stop listener at the same time on device, the next fix is a shared audio pipeline or real wake-word engine rather than another independent microphone consumer.
+
+The updated Debug iOS build was signed, installed, and launched on `iPhone (Yerasyl)`. The first CoreDevice install attempt failed with `Connection interrupted`, then the retry succeeded. Later builds that release the wake listener before starting recording, display `Yerasyl (you)` labels, and add the recording stop-only listener were also signed, installed, and launched on the same iPhone.
 
 ## Next
 
-Needs human review of the task scope. After approval: create/switch to `ios/IOS-4/voice-enrollment-wake-word`, implement the smallest coherent onboarding change, then stop again for result review before commit/push/PR/archive.
+Result is ready for human review. Review gate: open the installed app on `iPhone (Yerasyl)`, set assistant name to `Friday`, enable `Listen for Friday` in Settings, accept Speech/Microphone permissions, then test `Hey Friday` as visible wake feedback, `Hey Friday start recording`, and while recording `Hey Friday stop recording` / `stop recording` through the active Ray-Ban/iPhone audio route. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or harden `IOS-4` with a real custom wake-word provider after device validation.
 
 # IOS-5: Put Agent Name Before Voice Enrollment
 
@@ -1241,6 +1251,7 @@ In scope:
 - Add a backend endpoint that assigns a meeting speaker to an existing or new profile, extracts a speaker embedding from the meeting audio, updates the profile, and persists the meeting transcript labels.
 - Make future automatic relabeling compare against the expanded profile centroid.
 - Replace mocked speaker-name suggestions with real saved voice profiles from the backend.
+- Mark the current user's speaker label as `(you)` when it displays as `Yerasyl` or the signed-in user name.
 - Keep all profiles scoped to the authenticated `user_id`.
 
 Out of scope:
@@ -1255,6 +1266,7 @@ Out of scope:
 - [x] Add backend profile sample storage and assignment endpoint.
 - [x] Update backend relabeling/enrollment to use expandable profiles and external embedding fallback where needed.
 - [x] Wire iOS speaker sheet to saved profiles and backend assignment.
+- [x] Decorate current-user speaker labels as `(you)` in live and saved transcript displays.
 - [x] Run backend and iOS verification.
 
 ## Verification
@@ -1285,8 +1297,10 @@ Automatic relabeling now still compares future speakers against profile centroid
 
 iOS transcript speaker rename now loads saved profiles from `/v1/voice-profiles` and shows those real saved voices instead of hard-coded mock names. Selecting a saved profile and applying it to all segments from a speaker calls the backend assignment endpoint. Typing a new name creates a new profile from that speaker. The single-segment scope remains local-only and does not train a profile.
 
+iOS transcript displays now decorate the current user's speaker name as `(you)`. If a live or saved transcript segment is labeled `Yerasyl` or matches the signed-in/current user display name, the recording screen and saved meeting contents show `Yerasyl (you)` without changing the backend speaker label stored for profile matching.
+
 Deployment note: the main backend server had a full root disk. Only Docker builder cache and the failed zero-byte partial backup from this deploy were removed; containers, user data, databases, recordings, and Docker images were not pruned. After freeing cache, backend deployment and restart succeeded.
 
 ## Next
 
-Result is ready for human review. Review gate: open the installed Her build on `iPhone (Yerasyl)`, open an existing meeting with audio and diarized speakers, tap a speaker name, verify the popup shows real saved voice profiles, assign one speaker to a new or existing profile, then record/process another meeting and confirm the assigned person is auto-labeled when confidence passes threshold. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment/wake-word setup remains the next blocker.
+Result is ready for human review. Review gate: open the installed Her build on `iPhone (Yerasyl)`, open an existing meeting with audio and diarized speakers, tap a speaker name, verify the popup shows real saved voice profiles, assign one speaker to a new or existing profile, then record/process another meeting and confirm the assigned person is auto-labeled when confidence passes threshold. Also confirm segments labeled `Yerasyl` display as `Yerasyl (you)` in live recording transcript and saved meeting contents. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment/wake-word setup remains the next blocker.
