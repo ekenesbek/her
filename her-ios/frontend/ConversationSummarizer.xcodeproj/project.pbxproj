@@ -19,7 +19,6 @@
 		00000000000000000000B301 /* WearablesBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F301 /* WearablesBridge.swift */; };
 		00000000000000000000B401 /* MeetingSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F401 /* MeetingSummary.swift */; };
 		00000000000000000000B502 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F502 /* Assets.xcassets */; };
-		00000000000000000000B601 /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = 00000000000000000000P601 /* MWDATCore */; };
 		00000000000000000000B701 /* AuthStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F701 /* AuthStore.swift */; };
 		00000000000000000000B702 /* AuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F702 /* AuthClient.swift */; };
 		00000000000000000000B703 /* AppleSignInService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F703 /* AppleSignInService.swift */; };
@@ -59,7 +58,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				00000000000000000000B601 /* MWDATCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -183,7 +181,6 @@
 			);
 			name = ConversationSummarizer;
 			packageProductDependencies = (
-				00000000000000000000P601 /* MWDATCore */,
 			);
 			productName = ConversationSummarizer;
 			productReference = 000000000000000000000005 /* Her.app */;
@@ -219,7 +216,6 @@
 			);
 			mainGroup = 000000000000000000000002;
 			packageReferences = (
-				00000000000000000000P600 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
 			);
 			productRefGroup = 000000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -389,7 +385,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CLIENT_TOKEN = "AR|1447912729894042|66513ea3c4b689008256182da7ac35a4";
 				CODE_SIGN_ENTITLEMENTS = ConversationSummarizer/Resources/ConversationSummarizer.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -404,7 +399,6 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				META_APP_ID = 1447912729894042;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.her;
 				PRODUCT_NAME = Her;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -420,7 +414,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CLIENT_TOKEN = "AR|1447912729894042|66513ea3c4b689008256182da7ac35a4";
 				CODE_SIGN_ENTITLEMENTS = ConversationSummarizer/Resources/ConversationSummarizer.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -435,7 +428,6 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				META_APP_ID = 1447912729894042;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.her;
 				PRODUCT_NAME = Her;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -469,24 +461,7 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		00000000000000000000P600 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
-			requirement = {
-				kind = exactVersion;
-				version = 0.6.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
 
-/* Begin XCSwiftPackageProductDependency section */
-		00000000000000000000P601 /* MWDATCore */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 00000000000000000000P600 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
-			productName = MWDATCore;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 000000000000000000000001 /* Project object */;
 }

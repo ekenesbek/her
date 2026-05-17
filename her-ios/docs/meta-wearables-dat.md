@@ -9,6 +9,7 @@ Source links:
 ## Current state
 
 - The toolkit is in developer preview.
+- Her no longer links the DAT SDK in the stage-1 iOS recorder. The active app records through standard iOS audio routing only.
 - iOS support is through Swift Package Manager.
 - Latest public tag checked during setup: `0.6.0`.
 - Public package products:
@@ -20,14 +21,14 @@ Source links:
 
 ## Audio implication for meeting summaries
 
-The DAT session model integrates the mobile app with supported glasses, but device microphone and speaker access is through platform Bluetooth audio routing rather than a DAT microphone API. On iOS this means:
+The DAT session model can integrate a mobile app with supported glasses, but device microphone and speaker access is through platform Bluetooth audio routing rather than a DAT microphone API. On iOS this means:
 
 - Configure `AVAudioSession` with `.playAndRecord` and `.allowBluetooth`.
 - Pair the glasses normally and select them as an audio input route.
 - HFP audio is 8 kHz mono.
 - Beamforming prioritizes the wearer, so it may miss other meeting participants in a room.
 
-For a meeting summarizer, this is good enough for a wearer-centric assistant. For full-room meeting capture, the app should support an iPhone microphone or external meeting microphone as the primary input.
+For the stage-1 meeting summarizer, DAT registration/session UI is unnecessary. Bluetooth HFP is enough for a wearer-centric assistant, and the app should stay honest about whether it is using a Bluetooth mic or the iPhone mic. For full-room meeting capture, the app should support an iPhone microphone or external meeting microphone as the primary input.
 
 ## Integration stages
 
@@ -35,17 +36,10 @@ For a meeting summarizer, this is good enough for a wearer-centric assistant. Fo
    - Record through iOS audio session.
    - Transcribe after stop with Apple Speech.
    - Summarize locally or through backend.
-2. Meta registration:
-   - Add real `MetaAppID`, `ClientToken`, `TeamID`, and callback URL scheme.
-   - Call `Wearables.configure()` once at launch.
-   - Start registration with `Wearables.shared.startRegistration()`.
-   - Forward app callbacks with `Wearables.shared.handleUrl(url)`.
-3. Glasses session:
-   - Create a session with `AutoDeviceSelector`.
-   - Start the session before recording when glasses controls are needed.
-   - Observe session state so hinge/tap/wear events pause or stop recording cleanly.
-4. Production:
+2. Future camera/controls experiment:
+   - Reintroduce DAT only when Her needs camera POV streaming, photo capture, or real glasses controls.
+   - Keep that work separate from the audio recorder; do not add DAT registration to the main onboarding for audio-only recording.
+3. Production:
    - Add consent UX before recording.
    - Move LLM summarization to a backend service.
    - Add persistent meeting history and secure deletion.
-

@@ -2,6 +2,74 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# IOS-19: Remove DAT Pairing From iOS Audio Route UX
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-17
+
+## Goal
+
+Remove the misleading Meta DAT pairing/session surface from the stage-1 iOS recorder and keep only the useful Bluetooth/iOS audio-route behavior.
+
+## Context
+
+Ray-Ban Meta audio works for the recorder the same way it works for Telegram calls: iOS exposes the glasses as a Bluetooth HFP audio route. The current DAT registration/session UI suggests a deeper glasses integration, but the stage-1 meeting recorder does not use a DAT microphone API and does not use camera POV streaming.
+
+## Scope
+
+In scope:
+- Replace visible DAT/pairing copy with audio-route status and refresh/scan actions.
+- Remove the onboarding Ray-Ban pairing step.
+- Remove the unused DAT SDK wiring from the iOS target and Info.plist.
+- Keep Bluetooth HFP route detection and recording fallback behavior.
+- Update docs to clarify DAT is future camera/control work, not required for audio recording.
+
+Out of scope:
+- Adding camera POV streaming or a VisionClaw-style live agent.
+- Changing the recording engine or Bluetooth HFP selection logic.
+- Physical-device validation on paired glasses from this environment.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [x] Inspect current iOS wearables bridge, onboarding, settings, and route status UI.
+- [x] Simplify `WearablesBridge` to iOS audio-route detection only.
+- [x] Remove DAT registration/session controls and Ray-Ban pairing from visible onboarding/settings copy.
+- [x] Remove the DAT package/product, Info.plist DAT keys, external accessory background mode, and unused glasses image asset.
+- [x] Update docs and run verification.
+
+## Verification
+
+- `plutil -lint her-ios/frontend/ConversationSummarizer/Resources/Info.plist`
+- `plutil -lint her-ios/frontend/ConversationSummarizer.xcodeproj/project.pbxproj`
+- `find her-ios/frontend -path '*/Build/*' -prune -o -path '*/DerivedData/*' -prune -o -type f \( -name '*.swift' -o -name '*.pbxproj' -o -name 'Info.plist' -o -name 'Package.resolved' -o -name 'Contents.json' \) -print | xargs rg -n "meta-wearables|MWDAT|MetaAppID|CLIENT_TOKEN|META_APP_ID|Ray-Ban|RayBanMeta|NSBluetoothAlways|external-accessory|UISupportedExternalAccessory|Start DAT"`
+- `git diff --check`
+- `python3 -m compileall her-ios/backend/app`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+
+## Result
+
+The iOS app no longer links `MWDATCore`, carries DAT credentials, declares DAT/ExternalAccessory plist keys, or shows DAT registration/session controls. Onboarding now finishes after permissions instead of asking the user to pair Ray-Ban glasses. The remaining route UI is framed as the active iOS audio route: iPhone microphone, Bluetooth mic ready/active, or output-only.
+
+Docs now state that DAT is future camera/control work and is not required for the stage-1 audio recorder.
+
+Latest signed Debug build was installed and launched on `iPhone (Yerasyl)`.
+
+Known limitation: physical validation with paired glasses was not run from this environment.
+
+## Next
+
+Result is ready for human review on the installed iPhone app. Human review: confirm onboarding no longer includes a Ray-Ban pairing step, open the audio route control from Home, and verify it reports iPhone mic / Bluetooth mic / output-only honestly. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or review the existing `IOS-18` settings cleanup result.
+
+
 # IOS-15: Make Recording Jobs Transcript-First And Add People Settings
 
 Status: review

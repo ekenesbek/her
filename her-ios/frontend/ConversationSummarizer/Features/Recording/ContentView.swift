@@ -391,9 +391,6 @@ struct ContentView: View {
                     ExactDeviceConnectedScreen(
                         bridge: wearablesBridge,
                         onBack: { route = .home },
-                        onConnect: {
-                            wearablesBridge.startGlassesSession()
-                        },
                         onRecord: showRecording
                     )
                 case .conversations:
@@ -569,11 +566,7 @@ struct ContentView: View {
 
     private func showDeviceFlow() {
         wearablesBridge.refreshAudioRoute()
-        if wearablesBridge.audioRoute.primaryDetectedDevice == nil {
-            route = .pair
-        } else {
-            route = .deviceConnected
-        }
+        route = .deviceConnected
     }
 
     private func stopRecordingAndStay() {
@@ -777,10 +770,12 @@ private struct ExactHomeTopBar: View {
         HStack(spacing: 10) {
             Button(action: onDevice) {
                 HStack(spacing: 8) {
-                    RayBanPhoto()
-                        .frame(width: 46, height: 22)
+                    Image(systemName: "mic")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(AppTheme.fg)
+                        .frame(width: 24, height: 22)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Ray-Ban")
+                        Text("Audio")
                             .font(.system(size: 12, weight: .medium, design: .serif))
                             .foregroundColor(AppTheme.fg)
                         MonoLabel(deviceStatus, color: deviceStatusColor)
@@ -832,7 +827,7 @@ private struct ExactGlassesStatusCard: View {
             HStack(alignment: .center, spacing: 14) {
                 SmallGlassesIcon()
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ray-Ban Meta")
+                    Text("Audio route")
                         .font(.system(size: 13.5, weight: .medium, design: .serif))
                         .foregroundColor(AppTheme.fg)
                     Text(detailText)
@@ -848,7 +843,7 @@ private struct ExactGlassesStatusCard: View {
                         Circle()
                             .fill(linked ? AppTheme.fg : AppTheme.dim)
                             .frame(width: 5, height: 5)
-                        Text(linked ? "linked" : "pair")
+                        Text(linked ? "ready" : "check")
                             .font(.system(size: 9, weight: .medium, design: .monospaced))
                             .tracking(1.5)
                     }
@@ -870,7 +865,7 @@ private struct ExactGlassesStatusCard: View {
         if let device = bridge.audioRoute.primaryDetectedDevice {
             return "\(device.name.uppercased()) · \(device.supportsInput ? "MIC READY" : "OUTPUT")"
         }
-        return "NOT FOUND · TAP PAIR"
+        return "IPHONE MIC · TAP CHECK"
     }
 }
 
@@ -1069,10 +1064,10 @@ private struct ExactPairRayBanScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            WwHeader(pre: "connect", title: "Searching for Ray-Ban.", italic: true, onBack: onBack)
+            WwHeader(pre: "audio", title: "Check audio route.", italic: true, onBack: onBack)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Open the case near your phone. If they already appear in iOS Bluetooth, Her will show them here.")
+                Text("Her records through the active iOS microphone route. If glasses are paired as a Bluetooth HFP mic, they will appear here; otherwise recording uses the iPhone mic.")
                     .font(.system(size: 14, weight: .regular, design: .serif))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(5)
@@ -1111,21 +1106,19 @@ private struct ExactPairRayBanScreen: View {
                         SmallGlassesIcon()
                             .frame(width: 24)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(bridge.audioRoute.primaryDetectedDevice?.name ?? "Ray-Ban Wayfarer")
+                            Text(bridge.audioRoute.primaryDetectedDevice?.name ?? "iPhone microphone")
                                 .font(.system(size: 13.5, weight: .medium, design: .serif))
                                 .foregroundColor(AppTheme.fg)
-                            Text("MATTE BLACK · LAST 4: 7C2A")
+                            Text(bridge.audioRoute.routeSummary.uppercased())
                                 .font(.system(size: 10, weight: .regular, design: .monospaced))
                                 .tracking(1)
                                 .foregroundColor(AppTheme.dim)
                         }
                         Spacer()
                         Button(action: {
-                            if bridge.performSetupPairAction() {
-                                onFinish()
-                            }
+                            bridge.connectDetectedAudioRoute()
                         }) {
-                            Text(bridge.setupPairActionTitle)
+                            Text("refresh")
                                 .font(.system(size: 13, weight: .medium, design: .serif))
                                 .foregroundColor(AppTheme.bg)
                                 .padding(.horizontal, 16)
@@ -1149,22 +1142,21 @@ private struct ExactPairRayBanScreen: View {
     }
 
     private var deviceStatusText: String {
-        bridge.audioRoute.primaryDetectedDevice == nil ? "searching..." : "device found"
+        bridge.audioRoute.primaryDetectedDevice == nil ? "iPhone mic" : "Bluetooth route found"
     }
 }
 
 private struct ExactDeviceConnectedScreen: View {
     @ObservedObject var bridge: WearablesBridge
     let onBack: () -> Void
-    let onConnect: () -> Void
     let onRecord: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            WwHeader(pre: "device", title: "Ray-Ban connected.", italic: true, onBack: onBack)
+            WwHeader(pre: "audio", title: "Audio route.", italic: true, onBack: onBack)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Her can now use the active iOS audio route for recording. Keep the glasses selected as the microphone route when the meeting starts.")
+                Text("Recording will use a Bluetooth HFP microphone when iOS exposes one. If the glasses are output-only, Her falls back to the iPhone microphone.")
                     .font(.system(size: 14, weight: .regular, design: .serif))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(5)
@@ -1174,8 +1166,10 @@ private struct ExactDeviceConnectedScreen: View {
                     RoundedRectangle(cornerRadius: 22, style: .continuous)
                         .fill(AppTheme.bgSoft)
                     VStack(spacing: 20) {
-                        RayBanPhoto()
-                            .frame(width: 290, height: 130)
+                        Image(systemName: bridge.audioRoute.primaryDetectedDevice == nil ? "mic" : "eyeglasses")
+                            .font(.system(size: 58, weight: .light))
+                            .foregroundColor(AppTheme.fg)
+                            .frame(width: 140, height: 110)
                         VStack(spacing: 6) {
                             Text(deviceName)
                                 .font(.system(size: 22, weight: .medium, design: .serif))
@@ -1213,8 +1207,10 @@ private struct ExactDeviceConnectedScreen: View {
                     WwGhostButton(title: "Refresh route") {
                         bridge.refreshAudioRoute()
                     }
-                    Button(action: onConnect) {
-                        Text("use glasses")
+                    Button(action: {
+                        bridge.connectDetectedAudioRoute()
+                    }) {
+                        Text("scan route")
                             .font(.system(size: 14, weight: .medium, design: .serif))
                             .foregroundColor(AppTheme.bg)
                             .frame(maxWidth: .infinity, minHeight: 54)
@@ -1237,31 +1233,31 @@ private struct ExactDeviceConnectedScreen: View {
     }
 
     private var deviceName: String {
-        bridge.audioRoute.primaryDetectedDevice?.name ?? "Ray-Ban Wayfarer"
+        bridge.audioRoute.primaryDetectedDevice?.name ?? "iPhone microphone"
     }
 
     private var deviceDetail: String {
         guard let device = bridge.audioRoute.primaryDetectedDevice else {
-            return "waiting for bluetooth"
+            return "using iPhone mic"
         }
         if device.supportsInput && device.isActive {
-            return "connected · microphone active"
+            return "bluetooth · microphone active"
         }
         if device.supportsInput {
-            return "connected · microphone ready"
+            return "bluetooth · microphone ready"
         }
         return "connected · audio output"
     }
 
     private var micLabel: String {
         guard let device = bridge.audioRoute.primaryDetectedDevice else {
-            return "not detected"
+            return "iPhone microphone"
         }
         return device.supportsInput ? "available" : "output only"
     }
 
     private var statusLabel: String {
-        bridge.audioRoute.primaryDetectedDevice == nil ? "searching" : "connected"
+        bridge.audioRoute.primaryDetectedDevice == nil ? "iPhone mic" : "Bluetooth"
     }
 
     private var statusColor: Color {
@@ -2928,7 +2924,6 @@ private struct ExactSettingsHerScreen: View {
     @State private var presentingLegal: LegalDocument?
     @State private var processOnDevice = true
     @State private var redactPII = true
-    @State private var glassesIndicator = true
     @State private var requireFaceID = false
     @State private var silenceTrim = true
     @State private var dailySummary = true
@@ -3055,8 +3050,6 @@ private struct ExactSettingsHerScreen: View {
                             SettingsToggleRow(icon: "lock", label: "Process on-device", subtitle: "ship to cloud only when you ask", isOn: $processOnDevice)
                             DividerLine()
                             SettingsToggleRow(icon: "shield", label: "Redact PII in cloud", subtitle: "phone numbers, addresses, names", isOn: $redactPII)
-                            DividerLine()
-                            SettingsToggleRow(icon: "eyeglasses", label: "Glasses indicator LED", subtitle: "recording light always visible", isOn: $glassesIndicator)
                             DividerLine()
                             SettingsToggleRow(icon: "faceid", label: "Require Face ID", subtitle: "to open conversations", isOn: $requireFaceID)
                         }
@@ -3373,13 +3366,9 @@ private struct SettingsGlassesCard: View {
                 .padding(16)
 
                 DividerLine()
-                SettingsActionRow(icon: "plus", label: "Pair another device", action: onPair)
-                DividerLine()
                 SettingsActionRow(icon: "arrow.clockwise", label: "Refresh audio route", subtitle: bridge.audioRoute.routeSummary) {
                     bridge.refreshAudioRoute()
                 }
-                DividerLine()
-                SettingsActionRow(icon: "xmark", label: "Forget this device", subtitle: "will erase pairing key from phone", danger: true)
             }
         }
     }
@@ -3389,16 +3378,16 @@ private struct SettingsGlassesCard: View {
     }
 
     private var glassesTitle: String {
-        bridge.audioRoute.primaryDetectedDevice?.name ?? "Ray-Ban Meta · Wayfarer"
+        bridge.audioRoute.primaryDetectedDevice?.name ?? "Audio route"
     }
 
     private var glassesSubtitle: String {
         guard let device = bridge.audioRoute.primaryDetectedDevice else {
-            return "Pair from iOS Bluetooth, then refresh here."
+            return "Using iPhone microphone. Refresh after selecting Bluetooth in iOS."
         }
 
         let input = device.supportsInput ? "MIC READY" : "OUTPUT ONLY"
-        return "\(input) · \(bridge.state.detail.uppercased())"
+        return "\(input) · \(bridge.audioRoute.routeSummary.uppercased())"
     }
 }
 
@@ -3588,7 +3577,7 @@ private struct SettingsDangerFooter: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            Text("erases everything — conversations, memory, glasses pairing — in 30 days. you can cancel anytime.")
+            Text("erases everything - conversations, memory, and local settings - in 30 days. you can cancel anytime.")
                 .font(.system(size: 11.5, weight: .regular, design: .serif))
                 .italic()
                 .foregroundColor(AppTheme.dim)
@@ -3678,23 +3667,18 @@ private struct ExactTabBar: View {
 
 private struct SmallGlassesIcon: View {
     var body: some View {
-        RayBanPhoto()
+        Image(systemName: "eyeglasses")
+            .font(.system(size: 20, weight: .regular))
+            .foregroundColor(AppTheme.fg)
             .frame(width: 34, height: 18)
     }
 }
 
 private struct LargeGlassesIcon: View {
     var body: some View {
-        RayBanPhoto()
-    }
-}
-
-private struct RayBanPhoto: View {
-    var body: some View {
-        Image("RayBanMetaWayfarer")
-            .resizable()
-            .scaledToFit()
-            .accessibilityLabel("Ray-Ban Meta Wayfarer")
+        Image(systemName: "eyeglasses")
+            .font(.system(size: 72, weight: .light))
+            .foregroundColor(AppTheme.fg)
     }
 }
 
@@ -4016,8 +4000,8 @@ private struct WarmGlassesStatusCard: View {
                         .background(Circle().fill(AppTheme.fg))
 
                     VStack(alignment: .leading, spacing: 5) {
-                        MonoLabel("Ray-Ban Meta")
-                        Text(bridge.audioRoute.primaryDetectedDevice?.name ?? "Glasses not detected")
+                        MonoLabel("Audio route")
+                        Text(bridge.audioRoute.primaryDetectedDevice?.name ?? "iPhone microphone")
                             .font(.system(size: 17, weight: .medium, design: .serif))
                             .foregroundColor(AppTheme.fg)
                             .lineLimit(1)
@@ -4045,12 +4029,8 @@ private struct WarmGlassesStatusCard: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 10) {
-                    WarmMiniButton(title: "Scan", icon: "dot.radiowaves.left.and.right", filled: true) {
+                    WarmMiniButton(title: "Refresh", icon: "arrow.clockwise", filled: true) {
                         bridge.connectDetectedAudioRoute()
-                    }
-
-                    WarmMiniButton(title: "DAT", icon: "play.circle", filled: false) {
-                        bridge.startGlassesSession()
                     }
                 }
             }
@@ -4059,10 +4039,10 @@ private struct WarmGlassesStatusCard: View {
 
     private var routeStatusTitle: String {
         guard let device = bridge.audioRoute.primaryDetectedDevice else {
-            return "not found"
+            return "iPhone mic"
         }
         if device.supportsInput && device.isActive {
-            return "linked"
+            return "mic active"
         }
         if device.supportsInput {
             return "mic ready"
@@ -4074,14 +4054,8 @@ private struct WarmGlassesStatusCard: View {
         switch bridge.state {
         case .failed:
             return AppTheme.danger
-        case .sessionStarted:
-            return AppTheme.success
-        case .configurationMissing:
-            return AppTheme.warn
-        case .detected, .ready:
+        case .detected:
             return bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.fg
-        case .registrationAvailable, .registrationStarted:
-            return AppTheme.warn
         case .notDetected:
             return AppTheme.dim
         }
@@ -4224,7 +4198,7 @@ private struct WarmRecentConversationCard: View {
         if !viewModel.transcript.isEmpty {
             return viewModel.transcript
         }
-        return "Start a meeting from the phone or connected glasses. When it ends, the transcript and summary will appear here."
+        return "Start a meeting from the phone or selected iOS microphone. When it ends, the transcript and summary will appear here."
     }
 }
 
@@ -4461,7 +4435,7 @@ private struct WearablesPanel: View {
                     IconTile(systemName: bridge.audioRoute.primaryDetectedDevice == nil ? "antenna.radiowaves.left.and.right" : "eyeglasses")
 
                     VStack(alignment: .leading, spacing: 6) {
-                        MonoLabel("META WEARABLES")
+                        MonoLabel("AUDIO ROUTE")
                         Text(bridge.state.title)
                             .font(.system(size: 19, weight: .semibold))
                             .foregroundColor(AppTheme.fg)
@@ -4474,7 +4448,6 @@ private struct WearablesPanel: View {
 
                 HStack(spacing: 8) {
                     StateChip(title: routeStatusTitle, icon: routeStatusIcon, color: routeStatusColor, accented: bridge.audioRoute.primaryDetectedDevice != nil)
-                    StateChip(title: datStatusTitle, icon: "shippingbox", color: datStatusColor)
                 }
 
                 VStack(alignment: .leading, spacing: 9) {
@@ -4493,15 +4466,6 @@ private struct WearablesPanel: View {
                     }
                     OutlineButton(title: "Scan", icon: "dot.radiowaves.left.and.right") {
                         bridge.connectDetectedAudioRoute()
-                    }
-                }
-
-                HStack(spacing: 10) {
-                    OutlineButton(title: "Register", icon: "link") {
-                        bridge.startRegistration()
-                    }
-                    OutlineButton(title: "DAT Session", icon: "play.circle") {
-                        bridge.startGlassesSession()
                     }
                 }
             }
@@ -4528,32 +4492,12 @@ private struct WearablesPanel: View {
         return device.supportsInput ? "mic.circle" : "speaker.wave.2"
     }
 
-    private var datStatusTitle: String {
-        if !bridge.isDATLinked {
-            return "DAT missing"
-        }
-        return bridge.hasDATCredentials ? "DAT ready" : "DAT setup"
-    }
-
-    private var datStatusColor: Color {
-        if !bridge.isDATLinked {
-            return AppTheme.dim
-        }
-        return bridge.hasDATCredentials ? AppTheme.success : AppTheme.warn
-    }
-
     private var routeStatusColor: Color {
         switch bridge.state {
         case .failed:
             return AppTheme.danger
-        case .sessionStarted:
-            return AppTheme.success
-        case .configurationMissing:
-            return AppTheme.warn
-        case .detected, .ready:
+        case .detected:
             return bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.accent
-        case .registrationAvailable, .registrationStarted:
-            return AppTheme.accent
         case .notDetected:
             return AppTheme.dim
         }
@@ -6790,7 +6734,6 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
     case aiName
     case voiceProfile
     case permissions
-    case glasses
 
     var label: String {
         switch self {
@@ -6804,8 +6747,6 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
             return "AI"
         case .permissions:
             return "ACCESS"
-        case .glasses:
-            return "GLASSES"
         }
     }
 
@@ -6821,8 +6762,6 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
             return "Assistant name"
         case .permissions:
             return "Permissions"
-        case .glasses:
-            return "Pair Ray-Ban"
         }
     }
 
@@ -6837,9 +6776,7 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
         case .aiName:
             return "This is the assistant name you will see across recordings and summaries."
         case .permissions:
-            return "Enable the access needed for recording, transcripts, pairing, and reminders."
-        case .glasses:
-            return "Pair now or skip and connect from settings later."
+            return "Enable the access needed for recording, transcripts, and reminders."
         }
     }
 
@@ -6853,8 +6790,6 @@ private enum OnboardingStep: Int, CaseIterable, Hashable {
             return "waveform.badge.plus"
         case .permissions:
             return "checkmark.seal"
-        case .glasses:
-            return "eyeglasses"
         }
     }
 }
@@ -7022,26 +6957,13 @@ private struct OnboardingView: View {
                 microphonePermission: microphonePermission,
                 locationPermission: locationPermission.state,
                 notificationPermission: notificationPermission,
-                bluetoothPermission: bluetoothPermission,
                 onMicrophone: requestMicrophonePermission,
                 onLocation: requestLocationPermission,
                 onNotifications: requestNotificationPermission,
-                onBluetooth: wearablesBridge.refreshAudioRoute,
                 onBack: goBack
             ) {
-                go(to: .glasses)
+                finish(glassesSkipped: true)
             }
-        case .glasses:
-            ExactPairRayBanScreen(
-                bridge: wearablesBridge,
-                onBack: goBack,
-                onFinish: {
-                    finish(glassesSkipped: false)
-                },
-                onSkip: {
-                    finish(glassesSkipped: true)
-                }
-            )
         }
     }
 
@@ -7117,10 +7039,6 @@ private struct OnboardingView: View {
 
     private func requestLocationPermission() {
         locationPermission.request()
-    }
-
-    private var bluetoothPermission: PermissionState {
-        wearablesBridge.audioRoute.primaryDetectedDevice == nil ? .unknown : .granted
     }
 }
 
@@ -7263,7 +7181,7 @@ private struct SetupAccountPage: View {
                         .minimumScaleFactor(0.64)
                 }
 
-                Text("Records voice. Listens through your Ray-Ban. Summarizes everything — only when you ask.")
+                Text("Records voice from the selected iOS microphone. Summarizes everything - only when you ask.")
                     .font(.system(size: 15, weight: .regular, design: .serif))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(5)
@@ -7273,7 +7191,7 @@ private struct SetupAccountPage: View {
             VStack {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 12) {
                     FeatureCheck(title: "voice capture", icon: "mic")
-                    FeatureCheck(title: "glasses pair", icon: "eyeglasses")
+                    FeatureCheck(title: "audio route", icon: "waveform")
                     FeatureCheck(title: "on-device first", icon: "lock")
                     FeatureCheck(title: "ask anything later", icon: "sparkles")
                 }
@@ -7377,7 +7295,7 @@ private struct SetupOwnerNamePage: View {
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
-            WwSteps(step: 1, total: 5, label: "you")
+            WwSteps(step: 1, total: 4, label: "you")
             WwHeader(pre: prefixText, title: "What should I call you?", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
@@ -7470,7 +7388,7 @@ private struct SetupVoiceProfilePage: View {
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
-            WwSteps(step: 3, total: 5, label: "voice")
+            WwSteps(step: 3, total: 4, label: "voice")
             WwHeader(pre: "your voice", title: "Teach Her your voice.", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
@@ -7663,7 +7581,7 @@ private struct SetupAgentNamePage: View {
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
-            WwSteps(step: 2, total: 5, label: "agent")
+            WwSteps(step: 2, total: 4, label: "agent")
             WwHeader(pre: "wake word", title: "What should wake me?", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
@@ -7871,18 +7789,16 @@ private struct SetupPermissionsPage: View {
     let microphonePermission: PermissionState
     let locationPermission: PermissionState
     let notificationPermission: PermissionState
-    let bluetoothPermission: PermissionState
     let onMicrophone: () -> Void
     let onLocation: () -> Void
     let onNotifications: () -> Void
-    let onBluetooth: () -> Void
     let onBack: () -> Void
     let onContinue: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
-            WwSteps(step: 4, total: 5, label: "access")
+            WwSteps(step: 4, total: 4, label: "access")
             WwHeader(pre: "permissions", title: "Let me help.", italic: true)
 
             ScrollView(showsIndicators: false) {
@@ -7920,15 +7836,6 @@ private struct SetupPermissionsPage: View {
                                 state: notificationPermission,
                                 defaultOn: true,
                                 action: onNotifications
-                            )
-                            DividerLine()
-                            ExactPermissionRow(
-                                icon: "eyeglasses",
-                                title: "Bluetooth",
-                                subtitle: "pair Ray-Ban Meta",
-                                state: bluetoothPermission,
-                                defaultOn: true,
-                                action: onBluetooth
                             )
                         }
                     }
@@ -8016,14 +7923,14 @@ private struct SetupGlassesPage: View {
     let onSkip: () -> Void
 
     var body: some View {
-        SetupPageShell(label: "device", title: "Pair your Ray-Ban.", icon: "eyeglasses") {
+        SetupPageShell(label: "device", title: "Check audio route.", icon: "waveform") {
             VStack(spacing: 18) {
                 GlassesLineArt()
                     .frame(maxWidth: .infinity)
                     .frame(height: 168)
                     .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppTheme.bgSoft))
 
-                Text("We will use the iOS audio route first. If Ray-Ban Meta is already paired in Bluetooth, Her can detect it here.")
+                Text("Her uses the current iOS audio route. If Bluetooth glasses are available as an HFP microphone, Her can detect them here.")
                     .font(.system(size: 15, weight: .regular))
                     .foregroundColor(AppTheme.muted)
                     .lineSpacing(4)
@@ -8168,8 +8075,8 @@ private struct OnboardingGlassesCard: View {
                 IconTile(systemName: bridge.audioRoute.primaryDetectedDevice == nil ? "antenna.radiowaves.left.and.right" : "eyeglasses")
 
                 VStack(alignment: .leading, spacing: 6) {
-                    MonoLabel("META WEARABLES")
-                    Text(bridge.audioRoute.primaryDetectedDevice == nil ? "No glasses detected" : "Glasses detected")
+                    MonoLabel("AUDIO ROUTE")
+                    Text(bridge.audioRoute.primaryDetectedDevice == nil ? "Using iPhone microphone" : "Bluetooth route detected")
                         .font(.system(size: 19, weight: .semibold))
                         .foregroundColor(AppTheme.fg)
                     Text(bridge.state.detail)
@@ -8180,8 +8087,7 @@ private struct OnboardingGlassesCard: View {
             }
 
             HStack(spacing: 8) {
-                StateChip(title: bridge.audioRoute.primaryDetectedDevice == nil ? "not found" : "detected", icon: "dot.radiowaves.left.and.right", color: bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.accent, accented: bridge.audioRoute.primaryDetectedDevice != nil)
-                StateChip(title: datStatusTitle, icon: "shippingbox", color: datStatusColor)
+                StateChip(title: bridge.audioRoute.primaryDetectedDevice == nil ? "iPhone mic" : "Bluetooth", icon: "dot.radiowaves.left.and.right", color: bridge.audioRoute.primaryDetectedDevice == nil ? AppTheme.dim : AppTheme.accent, accented: bridge.audioRoute.primaryDetectedDevice != nil)
             }
 
             HStack(spacing: 10) {
@@ -8192,25 +8098,7 @@ private struct OnboardingGlassesCard: View {
                     bridge.connectDetectedAudioRoute()
                 }
             }
-
-            OutlineButton(title: "Start DAT session", icon: "play.circle") {
-                bridge.startGlassesSession()
-            }
         }
-    }
-
-    private var datStatusTitle: String {
-        if !bridge.isDATLinked {
-            return "DAT missing"
-        }
-        return bridge.hasDATCredentials ? "DAT ready" : "DAT setup"
-    }
-
-    private var datStatusColor: Color {
-        if !bridge.isDATLinked {
-            return AppTheme.dim
-        }
-        return bridge.hasDATCredentials ? AppTheme.success : AppTheme.warn
     }
 }
 

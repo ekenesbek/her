@@ -2,58 +2,12 @@ import AVFoundation
 import Combine
 import Foundation
 
-#if canImport(MWDATCore)
-import MWDATCore
-#endif
-
 @MainActor
 final class WearablesBridge: ObservableObject {
     @Published private(set) var state: WearablesState = .notDetected(activeRoute: "Checking audio route")
     @Published private(set) var audioRoute = WearablesAudioRoute.empty
 
-    #if canImport(MWDATCore)
-    private var activeSession: DeviceSession?
-    private var datConfigured = false
-    #endif
-
     private var routeObserver: NSObjectProtocol?
-
-    var isDATLinked: Bool {
-        #if canImport(MWDATCore)
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    var hasDATCredentials: Bool {
-        #if canImport(MWDATCore)
-        return AppConfig.hasMetaDATCredentials
-        #else
-        return false
-        #endif
-    }
-
-    var setupPairActionTitle: String {
-        #if canImport(MWDATCore)
-        guard AppConfig.hasMetaDATCredentials, datConfigured else {
-            return "pair"
-        }
-
-        switch Wearables.shared.registrationState {
-        case .registered:
-            return "start"
-        case .registering:
-            return "open"
-        case .available, .unavailable:
-            return "register"
-        @unknown default:
-            return "pair"
-        }
-        #else
-        return "pair"
-        #endif
-    }
 
     init() {
         configure()
@@ -68,28 +22,6 @@ final class WearablesBridge: ObservableObject {
 
     func configure() {
         refreshAudioRoute()
-
-        #if canImport(MWDATCore)
-        guard AppConfig.hasMetaDATCredentials else {
-            datConfigured = false
-            state = .configurationMissing
-            return
-        }
-
-        do {
-            try Wearables.configure()
-            datConfigured = true
-            refreshDATState()
-        } catch {
-            switch error {
-            case .alreadyConfigured:
-                datConfigured = true
-                refreshDATState()
-            default:
-                state = .failed("Meta DAT configure failed: \(error.description)")
-            }
-        }
-        #endif
     }
 
     func refreshAudioRoute() {
@@ -110,131 +42,9 @@ final class WearablesBridge: ObservableObject {
         updateStateFromAudioRoute()
     }
 
-    func startRegistration() {
-        #if canImport(MWDATCore)
-        guard ensureDATConfigured() else {
-            return
-        }
-
-        Task {
-            do {
-                state = .registrationStarted
-                try await Wearables.shared.startRegistration()
-                refreshDATState()
-            } catch let error as RegistrationError {
-                switch error {
-                case .alreadyRegistered:
-                    refreshDATState()
-                default:
-                    state = .failed("Meta registration failed: \(error.description)")
-                }
-            } catch {
-                state = .failed("Meta registration failed: \(describe(error))")
-            }
-        }
-        #else
-        state = .failed("Meta Wearables DAT is not linked in this build. Bluetooth audio detection is available.")
-        #endif
-    }
-
     func handleCallback(url: URL) async {
-        #if canImport(MWDATCore)
-        guard ensureDATConfigured() else {
-            return
-        }
-
-        do {
-            let handled = try await Wearables.shared.handleUrl(url)
-            if handled {
-                refreshAudioRoute()
-                refreshDATState()
-            }
-        } catch {
-            state = .failed("Meta callback failed: \(error.description)")
-        }
-        #else
         _ = url
-        #endif
-    }
-
-    func startGlassesSession() {
-        #if canImport(MWDATCore)
-        guard ensureDATConfigured() else {
-            return
-        }
-
-        Task {
-            do {
-                let wearables = Wearables.shared
-                guard wearables.registrationState == .registered else {
-                    state = .registrationAvailable(audioRoute.primaryDetectedDevice)
-                    try await wearables.startRegistration()
-                    state = .registrationStarted
-                    return
-                }
-
-                let permissionStatus = try await wearables.checkPermissionStatus(.microphone)
-                if permissionStatus != .granted {
-                    let requestedStatus = try await wearables.requestPermission(.microphone)
-                    guard requestedStatus == .granted else {
-                        state = .failed("Meta microphone permission was denied for the glasses.")
-                        return
-                    }
-                }
-
-                let selector = AutoDeviceSelector(wearables: wearables)
-                let session = try wearables.createSession(deviceSelector: selector)
-                activeSession?.stop()
-                activeSession = session
-                try session.start()
-                refreshAudioRoute()
-                state = .sessionStarted(audioRoute.primaryDetectedDevice)
-            } catch let error as RegistrationError {
-                state = .failed("Meta registration failed: \(error.description)")
-            } catch let error as PermissionError {
-                state = .failed("Meta permission failed: \(error.description)")
-            } catch let error as DeviceSessionError {
-                state = .failed(error.localizedDescription)
-            } catch {
-                state = .failed("Meta DAT session failed: \(describe(error))")
-            }
-        }
-        #else
-        connectDetectedAudioRoute()
-        #endif
-    }
-
-    @discardableResult
-    func performSetupPairAction() -> Bool {
-        #if canImport(MWDATCore)
-        guard AppConfig.hasMetaDATCredentials else {
-            connectDetectedAudioRoute()
-            return true
-        }
-
-        if !datConfigured {
-            configure()
-        }
-
-        guard datConfigured else {
-            return false
-        }
-
-        switch Wearables.shared.registrationState {
-        case .registered:
-            startGlassesSession()
-            return true
-        case .registering, .available, .unavailable:
-            startRegistration()
-            return false
-        @unknown default:
-            startRegistration()
-            return false
-        }
-        #else
-        connectDetectedAudioRoute()
-        return true
-        #endif
+        refreshAudioRoute()
     }
 
     func connectDetectedAudioRoute() {
@@ -246,7 +56,7 @@ final class WearablesBridge: ObservableObject {
             if let device = audioRoute.primaryDetectedDevice {
                 state = .detected(device)
             } else {
-                state = .failed("No glasses audio route detected. Pair the glasses in iOS Bluetooth, then refresh.")
+                state = .failed("No Bluetooth audio route detected. Pair or select the glasses in iOS Bluetooth, then refresh.")
             }
         } catch {
             state = .failed(error.localizedDescription)
@@ -266,79 +76,12 @@ final class WearablesBridge: ObservableObject {
     }
 
     private func updateStateFromAudioRoute() {
-        let detectedDevice = audioRoute.primaryDetectedDevice
-
-        #if canImport(MWDATCore)
-        guard datConfigured else {
-            state = AppConfig.hasMetaDATCredentials ? state : .configurationMissing
-            return
-        }
-
-        switch state {
-        case .registrationStarted:
-            break
-        case .sessionStarted:
-            state = .sessionStarted(detectedDevice)
-        case .failed:
-            break
-        default:
-            refreshDATState()
-        }
-        #else
-        if let detectedDevice {
+        if let detectedDevice = audioRoute.primaryDetectedDevice {
             state = .detected(detectedDevice)
         } else {
             state = .notDetected(activeRoute: audioRoute.routeSummary)
         }
-        #endif
     }
-
-    #if canImport(MWDATCore)
-    @discardableResult
-    private func ensureDATConfigured() -> Bool {
-        if datConfigured {
-            return true
-        }
-
-        guard AppConfig.hasMetaDATCredentials else {
-            state = .configurationMissing
-            return false
-        }
-
-        configure()
-        return datConfigured
-    }
-
-    private func refreshDATState() {
-        guard datConfigured else {
-            state = AppConfig.hasMetaDATCredentials ? state : .configurationMissing
-            return
-        }
-
-        let detectedDevice = audioRoute.primaryDetectedDevice
-
-        switch Wearables.shared.registrationState {
-        case .registered:
-            state = .ready(detectedDevice)
-        case .registering:
-            state = .registrationStarted
-        case .available:
-            state = .registrationAvailable(detectedDevice)
-        case .unavailable:
-            state = .failed("Meta DAT registration is unavailable. Install and sign in to Meta AI, then verify MetaAppID, ClientToken, TeamID, and the URL scheme.")
-        @unknown default:
-            state = .ready(detectedDevice)
-        }
-    }
-
-    private func describe(_ error: Error) -> String {
-        if let localizedError = error as? LocalizedError,
-           let errorDescription = localizedError.errorDescription {
-            return errorDescription
-        }
-        return String(describing: error)
-    }
-    #endif
 
     private func configureAudioSessionForDiscovery(activate: Bool) throws {
         let session = AVAudioSession.sharedInstance()
@@ -465,34 +208,22 @@ final class WearablesBridge: ObservableObject {
 enum WearablesState: Equatable {
     case notDetected(activeRoute: String)
     case detected(WearableDevice)
-    case configurationMissing
-    case registrationAvailable(WearableDevice?)
-    case ready(WearableDevice?)
-    case registrationStarted
-    case sessionStarted(WearableDevice?)
     case failed(String)
 
     var title: String {
         switch self {
         case .notDetected:
-            return "Glasses not detected"
+            return "Using iPhone microphone"
         case let .detected(device):
-            return "\(device.name) detected"
-        case .configurationMissing:
-            return "DAT credentials needed"
-        case .registrationAvailable:
-            return "Meta registration ready"
-        case .ready:
-            return "Meta DAT ready"
-        case .registrationStarted:
-            return "Registration opened"
-        case let .sessionStarted(device):
-            if let device {
-                return "\(device.name) selected"
+            if device.supportsInput && device.isActive {
+                return "Using \(device.name)"
             }
-            return "Glasses session active"
+            if device.supportsInput {
+                return "\(device.name) microphone ready"
+            }
+            return "\(device.name) output only"
         case .failed:
-            return "Wearables error"
+            return "Audio route issue"
         }
     }
 
@@ -502,25 +233,6 @@ enum WearablesState: Equatable {
             return "Route: \(activeRoute)"
         case let .detected(device):
             return device.detailText
-        case .configurationMissing:
-            return "Meta DAT SDK is linked, but Info.plist still has placeholder MetaAppID, ClientToken, TeamID, or URL scheme. Bluetooth audio fallback still works."
-        case let .registrationAvailable(device):
-            if let device {
-                return "Tap register to authorize the app in Meta AI. iOS also sees \(device.name)."
-            }
-            return "Tap register to authorize the app in Meta AI, then return here to start a glasses session."
-        case let .ready(device):
-            if let device {
-                return "Meta DAT is linked. Audio route sees \(device.name)."
-            }
-            return "Meta DAT is linked. No glasses audio route is active yet."
-        case .registrationStarted:
-            return "Finish the Meta AI app flow and return to this app."
-        case let .sessionStarted(device):
-            if let device {
-                return "\(device.name) session is active. Recording uses the glasses microphone when Bluetooth input is available."
-            }
-            return "Glasses session is active. Recording uses glasses when Bluetooth input is available."
         case let .failed(message):
             return message
         }
@@ -543,7 +255,7 @@ struct WearableDevice: Equatable, Identifiable {
             return "\(routeType) is available as microphone input."
         }
         if isActive {
-            return "\(routeType) is active as output."
+            return "\(routeType) is active as output only. Recording will use the iPhone mic unless an HFP input is available."
         }
         return "\(routeType) is available."
     }
