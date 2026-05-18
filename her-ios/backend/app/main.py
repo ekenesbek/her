@@ -343,17 +343,11 @@ def relabel_transcript(
         for profile, blob in profiles
     ]
 
-    speaker_to_name: dict[str, str] = {}
-    for speaker_id, embedding in per_speaker_embeddings.items():
-        best_score = -1.0
-        best_name: str | None = None
-        for profile, profile_vec in profile_vectors:
-            score = voice_embedder.cosine_similarity(embedding, profile_vec)
-            if score > best_score:
-                best_score = score
-                best_name = profile.name
-        if best_name and best_score >= threshold:
-            speaker_to_name[speaker_id] = best_name
+    speaker_to_name = _speaker_profile_matches(
+        per_speaker_embeddings,
+        profile_vectors,
+        threshold,
+    )
 
     if not speaker_to_name:
         return result
@@ -364,6 +358,49 @@ def relabel_transcript(
     ]
     transcript_text = _format_transcript(new_segments)
     return result.model_copy(update={"segments": new_segments, "transcript": transcript_text})
+
+
+def _speaker_profile_matches(
+    per_speaker_embeddings,
+    profile_vectors,
+    threshold: float,
+) -> dict[str, str]:
+    candidates: list[tuple[float, str, str]] = []
+    if len(profile_vectors) == 1:
+        profile, profile_vec = profile_vectors[0]
+        scores = [
+            (
+                voice_embedder.cosine_similarity(embedding, profile_vec),
+                speaker_id,
+            )
+            for speaker_id, embedding in per_speaker_embeddings.items()
+        ]
+        scores.sort(reverse=True)
+        if not scores:
+            return {}
+
+        best_score, best_speaker = scores[0]
+        next_score = scores[1][0] if len(scores) > 1 else -1.0
+        min_score = min(threshold, settings.voice_profile_single_profile_match_threshold)
+        min_margin = max(0.0, settings.voice_profile_single_profile_match_margin)
+        if best_score >= min_score and best_score - next_score >= min_margin:
+            return {best_speaker: profile.name}
+        return {}
+
+    for speaker_id, embedding in per_speaker_embeddings.items():
+        for profile, profile_vec in profile_vectors:
+            score = voice_embedder.cosine_similarity(embedding, profile_vec)
+            if score >= threshold:
+                candidates.append((score, speaker_id, profile.name))
+
+    speaker_to_name: dict[str, str] = {}
+    used_names: set[str] = set()
+    for _, speaker_id, profile_name in sorted(candidates, reverse=True):
+        if speaker_id in speaker_to_name or profile_name in used_names:
+            continue
+        speaker_to_name[speaker_id] = profile_name
+        used_names.add(profile_name)
+    return speaker_to_name
 
 
 def _format_transcript(segments: list) -> str:

@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     diarization_single_speaker_retry_min_speaker_seconds: float = 3.0
     diarization_single_speaker_retry_max_speakers: int = 6
     voice_profile_match_threshold: float = 0.62
+    voice_profile_single_profile_match_threshold: float = 0.55
+    voice_profile_single_profile_match_margin: float = 0.08
 
     @field_validator("transcription_provider", mode="before")
     @classmethod

@@ -1643,6 +1643,12 @@ Out of scope:
 - `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`
 - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+- 2026-05-18 voice-match threshold follow-up: inspected production account data for the Apple/private-relay user backing `ekenesbek@icloud.com`; the two latest meetings still had raw `SPEAKER_*` labels, one `Yerasyl` voice profile existed, and dry-run speaker-profile scores were just below the old `0.62` threshold.
+- `python3 -m compileall her-ios/backend/app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Remote deploy to `51.195.200.207`: backed up previous files at `/home/ubuntu/meta-ios-deploy-backups/backend-20260518-145318-ios13-voice-match.tgz`, copied `app/main.py` and `app/settings.py`, compiled remote backend, restarted `meta-ios-backend.service`, verified `GET /health`.
+- Remote DB update for the two latest Apple/private-relay meetings: backed up SQLite at `/home/ubuntu/meta-ios-deploy-backups/meetings-20260518-145526-before-voice-relabel.sqlite3`, relabeled meeting `2279c2aa-b302-415f-baee-d6317d5a8390` from `SPEAKER_00` to `Yerasyl` and meeting `cc9d6c19-4b76-4220-9845-c8a414437227` from `SPEAKER_01` to `Yerasyl`, then verified the persisted speaker counts.
 
 Not run:
 - Manual UI smoke for assigning a real speaker on production meeting audio.
@@ -1661,6 +1667,8 @@ iOS transcript displays now decorate the current user's speaker name as `(you)`.
 
 Deployment note: the main backend server had a full root disk. Only Docker builder cache and the failed zero-byte partial backup from this deploy were removed; containers, user data, databases, recordings, and Docker images were not pruned. After freeing cache, backend deployment and restart succeeded.
 
+2026-05-18 follow-up: the production account reached through Apple Sign In uses a private relay address, not the literal `ekenesbek@icloud.com` email. The two latest recordings had a saved `Yerasyl` profile, valid audio, and diarized speakers, but the best matching speakers scored `0.5616` and `0.5839`, below the previous strict `VOICE_PROFILE_MATCH_THRESHOLD=0.62`. Automatic relabeling now uses a safer single-profile path: when a user has exactly one saved voice profile, a clearly best diarized speaker can match at `VOICE_PROFILE_SINGLE_PROFILE_MATCH_THRESHOLD=0.55` if it beats the next speaker by `VOICE_PROFILE_SINGLE_PROFILE_MATCH_MARGIN=0.08`; only one speaker label can be assigned to that profile in a recording. The backend fix is deployed, and the two latest production meetings were relabeled in SQLite so `Yerasyl` appears in their saved segments.
+
 ## Next
 
-Result is ready for human review. Review gate: open the installed Her build on `iPhone (Yerasyl)`, open an existing meeting with audio and diarized speakers, tap a speaker name, verify the popup shows real saved voice profiles, assign one speaker to a new or existing profile, then record/process another meeting and confirm the assigned person is auto-labeled when confidence passes threshold. Also confirm segments labeled `Yerasyl` display as `Yerasyl (you)` in live recording transcript and saved meeting contents. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment/wake-word setup remains the next blocker.
+Result is ready for human review. Review gate: reopen Her, refresh/open the two latest recordings, and confirm the correct speaker rows now show `Yerasyl (you)` while the other speaker rows stay separate. Then record/process another short meeting and confirm the saved `Yerasyl` profile auto-labels when it is the clearly best speaker match. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment/wake-word setup remains the next blocker.
