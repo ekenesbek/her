@@ -41,6 +41,7 @@ final class WakeCommandController: ObservableObject {
     private var lastTrigger: (intent: WakeCommandIntent, date: Date)?
     private var lastWakeNotificationAt: Date?
     private var listeningMode: WakeListeningMode = .normal
+    private var ownsAudioSession = false
 
     init() {
         isEnabled = defaults.bool(forKey: defaultsKey)
@@ -178,6 +179,11 @@ final class WakeCommandController: ObservableObject {
             return
         }
 
+        if shouldPauseForOtherAudio(mode: .normal) {
+            stopListening(nextState: .paused("Wake commands are paused while other audio is playing."))
+            return
+        }
+
         if audioEngine.isRunning {
             if listeningMode != .normal {
                 stopRecognitionTask()
@@ -203,6 +209,11 @@ final class WakeCommandController: ObservableObject {
 
         guard appIsActive else {
             stopListening(nextState: .paused("Open Her to use wake commands."))
+            return
+        }
+
+        if shouldPauseForOtherAudio(mode: mode) {
+            stopListening(nextState: .paused("Wake commands are paused while other audio is playing."))
             return
         }
 
@@ -412,13 +423,22 @@ final class WakeCommandController: ObservableObject {
         recognitionTask?.cancel()
         recognitionRequest = nil
         recognitionTask = nil
+        if ownsAudioSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            ownsAudioSession = false
+        }
     }
 
     private func configureAudioSession(for mode: WakeListeningMode) throws {
         let session = AVAudioSession.sharedInstance()
         if mode == .recordingStop {
             try session.setActive(true)
+            ownsAudioSession = false
             return
+        }
+
+        if shouldPauseForOtherAudio(mode: .normal) {
+            throw WakeCommandAudioError.otherAudioPlaying
         }
 
         try session.setCategory(
@@ -427,6 +447,12 @@ final class WakeCommandController: ObservableObject {
             options: [.allowBluetoothHFP, .defaultToSpeaker, .mixWithOthers]
         )
         try session.setActive(true, options: .notifyOthersOnDeactivation)
+        ownsAudioSession = true
+    }
+
+    private func shouldPauseForOtherAudio(mode: WakeListeningMode) -> Bool {
+        let session = AVAudioSession.sharedInstance()
+        return mode == .normal && session.isOtherAudioPlaying
     }
 
     private func makeSpeechRecognizer() -> SFSpeechRecognizer? {
@@ -529,6 +555,17 @@ enum WakeCommandState: Equatable {
     case triggered(String)
     case paused(String)
     case unavailable(String)
+}
+
+private enum WakeCommandAudioError: LocalizedError {
+    case otherAudioPlaying
+
+    var errorDescription: String? {
+        switch self {
+        case .otherAudioPlaying:
+            return "Wake commands are paused while other audio is playing."
+        }
+    }
 }
 
 private enum WakeCommandIntent: Equatable {

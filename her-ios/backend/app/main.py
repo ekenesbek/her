@@ -7,11 +7,12 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.schemas import (
+    AppleSubscriptionTransactionRequest,
     AuthAppleRequest,
     AuthGoogleRequest,
     AuthResponse,
@@ -23,9 +24,12 @@ from app.schemas import (
     MeetingListResponse,
     MeetingResponse,
     MeetingSaveRequest,
+    MeetingTitleUpdateRequest,
     MeetingTranscriptUpdateRequest,
     SpeakerAssignmentRequest,
     SpeakerAssignmentResponse,
+    SubscriptionPlanUpdateRequest,
+    SubscriptionResponse,
     SummaryMode,
     SummaryModeRequest,
     SummaryRequest,
@@ -35,6 +39,7 @@ from app.schemas import (
     VoiceProfileListResponse,
     VoiceProfileResponse,
 )
+from app.services.app_store import AppStoreTransactionValidator, AppStoreValidationError
 from app.services.auth import (
     AuthError,
     create_session_token,
@@ -42,12 +47,14 @@ from app.services.auth import (
     verify_apple_id_token,
     verify_google_id_token,
 )
+from app.services.audio_chunks import audio_duration_seconds as probe_audio_duration_seconds
 from app.services.meeting_contents import build_outline_from_segments
 from app.services.storage import MeetingStore
 from app.services.summarizer import (
     SummaryService,
     SummaryUnavailableError,
     fallback_overview_from_transcript,
+    meeting_chat_messages,
 )
 from app.services.transcription_router import build_transcriber
 from app.services.voice_profiles import VoiceEmbedder
@@ -59,11 +66,15 @@ settings = get_settings()
 transcriber = build_transcriber(settings)
 summarizer = SummaryService(settings)
 store = MeetingStore(settings.data_dir)
+app_store_validator = AppStoreTransactionValidator(settings)
 voice_embedder = VoiceEmbedder(settings)
 meeting_job_executor = ThreadPoolExecutor(
     max_workers=max(1, settings.meeting_job_workers),
     thread_name_prefix="meeting-job",
 )
+
+FREE_RECORDING_LIMIT_SECONDS = 60 * 60
+PAID_RECORDING_LIMIT_SECONDS = 600 * 60
 
 
 def current_user(authorization: str | None = Header(default=None)) -> UserResponse:
@@ -82,6 +93,86 @@ def current_user(authorization: str | None = Header(default=None)) -> UserRespon
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists.")
     return user
+
+
+def subscription_period(now: datetime | None = None) -> tuple[datetime, datetime]:
+    now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return start, end
+
+
+def normalize_subscription_plan(plan: str | None) -> str:
+    return "plus" if plan in {"plus", "paid"} else "free"
+
+
+def subscription_limit_seconds(plan: str) -> int:
+    return PAID_RECORDING_LIMIT_SECONDS if normalize_subscription_plan(plan) == "plus" else FREE_RECORDING_LIMIT_SECONDS
+
+
+def subscription_response(user_id: str) -> SubscriptionResponse:
+    period_start, period_end = subscription_period()
+    plan = normalize_subscription_plan(store.get_user_subscription_plan(user_id))
+    source = store.get_user_subscription_source(user_id)
+    used = int(round(store.recording_usage_seconds(user_id, period_start, period_end)))
+    limit = subscription_limit_seconds(plan)
+    return SubscriptionResponse(
+        plan=plan,
+        recordingLimitSeconds=limit,
+        recordingUsedSeconds=used,
+        recordingRemainingSeconds=max(0, limit - used),
+        askAiEnabled=plan == "plus",
+        periodStartedAt=period_start,
+        periodEndsAt=period_end,
+        source=source,
+    )
+
+
+def ensure_recording_quota(user_id: str, requested_seconds: float | None) -> None:
+    if requested_seconds is None or requested_seconds <= 0:
+        return
+    subscription = subscription_response(user_id)
+    requested = int(round(requested_seconds))
+    if requested <= subscription.recordingRemainingSeconds:
+        return
+    remaining_minutes = subscription.recordingRemainingSeconds // 60
+    plan_minutes = subscription.recordingLimitSeconds // 60
+    raise HTTPException(
+        status_code=402,
+        detail=(
+            f"Recording limit reached. Your {subscription.plan} plan includes "
+            f"{plan_minutes} minutes per month and has {remaining_minutes} minutes remaining."
+        ),
+    )
+
+
+def require_ask_ai(user_id: str) -> None:
+    if subscription_response(user_id).askAiEnabled:
+        return
+    raise HTTPException(
+        status_code=402,
+        detail="Ask AI is included in the plus plan.",
+    )
+
+
+def chat_generation_runtime() -> tuple[str, str]:
+    if settings.llm_configured:
+        return settings.openai_summary_model, "llm"
+    return "local-fallback", "local_fallback"
+
+
+def chat_prompt_metrics(prompt_messages: list[dict[str, str]]) -> tuple[int, int]:
+    prompt_character_count = sum(len(item.get("content", "")) for item in prompt_messages)
+    return len(prompt_messages), prompt_character_count
+
+
+def chat_run_error_message(exc: Exception) -> str:
+    return str(exc).replace("\n", " ").strip()[:500] or exc.__class__.__name__
 
 app = FastAPI(title="Her iOS Backend", version="0.2.0")
 
@@ -162,6 +253,49 @@ def auth_me(user: UserResponse = Depends(current_user)) -> UserResponse:
     return user
 
 
+@app.get("/v1/subscription", response_model=SubscriptionResponse)
+def get_subscription(user: UserResponse = Depends(current_user)) -> SubscriptionResponse:
+    return subscription_response(user.id)
+
+
+@app.patch("/v1/subscription", response_model=SubscriptionResponse)
+def update_subscription(
+    payload: SubscriptionPlanUpdateRequest,
+    user: UserResponse = Depends(current_user),
+) -> SubscriptionResponse:
+    if not settings.local_subscription_overrides_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Local subscription overrides are disabled. Use StoreKit purchase validation.",
+        )
+    store.set_user_subscription_plan(user.id, payload.plan)
+    return subscription_response(user.id)
+
+
+@app.post("/v1/subscription/apple-transaction", response_model=SubscriptionResponse)
+def validate_apple_subscription_transaction(
+    payload: AppleSubscriptionTransactionRequest,
+    user: UserResponse = Depends(current_user),
+) -> SubscriptionResponse:
+    try:
+        transaction = app_store_validator.verify_subscription_transaction(payload.signedTransaction)
+    except AppStoreValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    store.save_apple_subscription_transaction(
+        user_id=user.id,
+        transaction_id=transaction.transaction_id,
+        original_transaction_id=transaction.original_transaction_id,
+        product_id=transaction.product_id,
+        environment=transaction.environment,
+        purchase_date=transaction.purchase_date,
+        expires_date=transaction.expires_date,
+        revocation_date=transaction.revocation_date,
+        signed_transaction=payload.signedTransaction,
+    )
+    return subscription_response(user.id)
+
+
 @app.post("/v1/transcriptions", response_model=TranscriptResponse)
 async def create_transcription(
     audio: UploadFile = File(...),
@@ -169,7 +303,9 @@ async def create_transcription(
 ) -> TranscriptResponse:
     path = await persist_upload(audio)
     try:
+        ensure_recording_quota(user.id, recording_duration_seconds(path))
         result = transcriber.transcribe(path)
+        ensure_recording_quota(user.id, result.durationSeconds)
         return relabel_transcript(result, user.id, audio_path=path)
     finally:
         path.unlink(missing_ok=True)
@@ -407,6 +543,9 @@ def _segments_duration_seconds(segments: list) -> float | None:
 
 
 def _audio_duration_seconds(path: Path) -> float | None:
+    probed_duration = probe_audio_duration_seconds(path)
+    if probed_duration is not None:
+        return probed_duration
     try:
         import wave
 
@@ -416,6 +555,10 @@ def _audio_duration_seconds(path: Path) -> float | None:
             return frames / float(rate) if rate else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def recording_duration_seconds(path: Path) -> float | None:
+    return _audio_duration_seconds(path)
 
 
 @app.post("/v1/summaries", response_model=SummaryResponse)
@@ -448,10 +591,12 @@ async def process_meeting(
     path = await persist_upload(audio)
     audio_stored = False
     try:
+        ensure_recording_quota(user.id, recording_duration_seconds(path))
         transcript = transcriber.transcribe(path)
         transcript = relabel_transcript(transcript, user.id, audio_path=path)
         if not transcript.transcript:
             raise HTTPException(status_code=422, detail="Whisper produced an empty transcript.")
+        ensure_recording_quota(user.id, transcript.durationSeconds)
 
         summary = summarize_or_make_unavailable(
             user.id,
@@ -505,6 +650,11 @@ async def create_meeting_job(
     user: UserResponse = Depends(current_user),
 ) -> MeetingJobResponse:
     path = await persist_job_upload(audio)
+    try:
+        ensure_recording_quota(user.id, recording_duration_seconds(path))
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
     job = store.create_meeting_job(
         user.id,
         path,
@@ -534,6 +684,7 @@ def save_meeting(
     payload: MeetingSaveRequest,
     user: UserResponse = Depends(current_user),
 ) -> MeetingResponse:
+    ensure_recording_quota(user.id, payload.durationSeconds)
     now = datetime.now(UTC)
     meeting = MeetingResponse(
         id=str(uuid4()),
@@ -561,6 +712,34 @@ def get_meeting(
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found.")
     return meeting
+
+
+@app.patch("/v1/meetings/{meeting_id}", response_model=MeetingResponse)
+def update_meeting_title(
+    meeting_id: str,
+    payload: MeetingTitleUpdateRequest,
+    user: UserResponse = Depends(current_user),
+) -> MeetingResponse:
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Meeting title cannot be empty.")
+    updated = store.update_meeting_title(meeting_id, user.id, title)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    return updated
+
+
+@app.delete("/v1/meetings/{meeting_id}", status_code=204)
+def delete_meeting(
+    meeting_id: str,
+    user: UserResponse = Depends(current_user),
+) -> Response:
+    deleted, audio_path = store.delete_meeting(meeting_id, user.id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    if audio_path is not None:
+        audio_path.unlink(missing_ok=True)
+    return Response(status_code=204)
 
 
 @app.patch("/v1/meetings/{meeting_id}/transcript", response_model=MeetingResponse)
@@ -636,10 +815,15 @@ def list_meeting_chat(
     meeting_id: str,
     user: UserResponse = Depends(current_user),
 ) -> MeetingChatListResponse:
+    require_ask_ai(user.id)
     meeting = store.get(meeting_id, user_id=user.id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found.")
-    return MeetingChatListResponse(messages=store.list_chat_messages(meeting_id, user.id))
+    thread = store.get_or_create_chat_thread(meeting_id, user.id)
+    return MeetingChatListResponse(
+        thread=thread,
+        messages=store.list_chat_messages(meeting_id, user.id),
+    )
 
 
 @app.post("/v1/meetings/{meeting_id}/chat", response_model=MeetingChatResponse)
@@ -648,6 +832,7 @@ def chat_with_meeting(
     payload: MeetingChatRequest,
     user: UserResponse = Depends(current_user),
 ) -> MeetingChatResponse:
+    require_ask_ai(user.id)
     meeting = store.get(meeting_id, user_id=user.id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found.")
@@ -655,10 +840,45 @@ def chat_with_meeting(
     if not question:
         raise HTTPException(status_code=422, detail="Question is required.")
     history = store.list_chat_messages(meeting_id, user.id)
-    store.append_chat_message(meeting_id, user.id, "user", question)
-    response = summarizer.answer_question(meeting, question, history)
-    store.append_chat_message(meeting_id, user.id, "assistant", response.answer)
-    return response
+    prompt_messages = meeting_chat_messages(meeting, question, history)
+    model, source = chat_generation_runtime()
+    prompt_message_count, prompt_character_count = chat_prompt_metrics(prompt_messages)
+    run = store.create_chat_run(
+        meeting_id,
+        user.id,
+        model=model,
+        source=source,
+        prompt_message_count=prompt_message_count,
+        prompt_character_count=prompt_character_count,
+    )
+    user_message = store.append_chat_message(
+        meeting_id,
+        user.id,
+        "user",
+        question,
+        run_id=run.id,
+    )
+    try:
+        response = summarizer.answer_question(meeting, question, history)
+        assistant_message = store.append_chat_message(
+            meeting_id,
+            user.id,
+            "assistant",
+            response.answer,
+            run_id=run.id,
+        )
+        store.complete_chat_run(run.id, response_message_id=assistant_message.id)
+        return response.model_copy(
+            update={
+                "threadId": user_message.threadId,
+                "runId": run.id,
+                "messageId": assistant_message.id,
+                "model": model,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        store.fail_chat_run(run.id, chat_run_error_message(exc))
+        raise
 
 
 @app.post("/v1/meetings/{meeting_id}/chat/stream")
@@ -667,6 +887,7 @@ def stream_chat_with_meeting(
     payload: MeetingChatRequest,
     user: UserResponse = Depends(current_user),
 ) -> StreamingResponse:
+    require_ask_ai(user.id)
     meeting = store.get(meeting_id, user_id=user.id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found.")
@@ -674,7 +895,18 @@ def stream_chat_with_meeting(
     if not question:
         raise HTTPException(status_code=422, detail="Question is required.")
     history = store.list_chat_messages(meeting_id, user.id)
-    store.append_chat_message(meeting_id, user.id, "user", question)
+    prompt_messages = meeting_chat_messages(meeting, question, history)
+    model, source = chat_generation_runtime()
+    prompt_message_count, prompt_character_count = chat_prompt_metrics(prompt_messages)
+    run = store.create_chat_run(
+        meeting_id,
+        user.id,
+        model=model,
+        source=source,
+        prompt_message_count=prompt_message_count,
+        prompt_character_count=prompt_character_count,
+    )
+    store.append_chat_message(meeting_id, user.id, "user", question, run_id=run.id)
 
     def events():
         answer_parts: list[str] = []
@@ -685,9 +917,19 @@ def stream_chat_with_meeting(
                     yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
             answer = "".join(answer_parts).strip()
             if answer:
-                store.append_chat_message(meeting_id, user.id, "assistant", answer)
+                assistant_message = store.append_chat_message(
+                    meeting_id,
+                    user.id,
+                    "assistant",
+                    answer,
+                    run_id=run.id,
+                )
+                store.complete_chat_run(run.id, response_message_id=assistant_message.id)
+            else:
+                store.complete_chat_run(run.id)
             yield "event: done\ndata: {}\n\n"
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            store.fail_chat_run(run.id, chat_run_error_message(exc))
             logger.exception("Meeting chat stream failed for meeting %s", meeting_id)
             payload_json = json.dumps({"error": "Chat stream failed."})
             yield f"event: error\ndata: {payload_json}\n\n"
@@ -714,25 +956,21 @@ def run_meeting_job(job_id: str) -> None:
     audio_stored = False
     store.update_meeting_job(job_id, status="processing")
     try:
-        if not audio_path.exists():
-            raise RuntimeError("Uploaded audio file is missing.")
-
-        transcript = transcriber.transcribe(audio_path)
-        transcript = relabel_transcript(transcript, job["user_id"], audio_path=audio_path)
-        if not transcript.transcript:
-            raise RuntimeError("Whisper produced an empty transcript.")
-
         summary_mode = job.get("summary_mode", "reasoning")
-        if bool(job.get("generate_summary", True)):
-            summary = summarize_or_make_unavailable(
-                job["user_id"],
-                transcript.transcript,
-                transcript.segments,
-                transcript.language,
-                job.get("location_name"),
-                summary_mode,
-            )
-        else:
+        meeting = None
+        if job.get("meeting_id"):
+            meeting = store.get(job["meeting_id"], user_id=job["user_id"])
+
+        if meeting is None:
+            if not audio_path.exists():
+                raise RuntimeError("Uploaded audio file is missing.")
+
+            transcript = transcriber.transcribe(audio_path)
+            transcript = relabel_transcript(transcript, job["user_id"], audio_path=audio_path)
+            if not transcript.transcript:
+                raise RuntimeError("Whisper produced an empty transcript.")
+            ensure_recording_quota(job["user_id"], transcript.durationSeconds)
+
             summary = make_unavailable_summary(
                 job["user_id"],
                 transcript.transcript,
@@ -740,33 +978,55 @@ def run_meeting_job(job_id: str) -> None:
                 job.get("location_name"),
                 summary_mode,
             )
-        now = datetime.now(UTC)
-        meeting = MeetingResponse(
-            id=str(uuid4()),
-            transcript=transcript.transcript,
-            segments=transcript.segments,
-            language=transcript.language,
-            durationSeconds=transcript.durationSeconds,
-            source=job.get("source"),
-            deviceName=job.get("device_name"),
-            locationName=job.get("location_name"),
-            title=summary.title,
-            overview=summary.overview,
-            keyTopics=summary.keyTopics,
-            decisions=summary.decisions,
-            actionItems=summary.actionItems,
-            followUps=summary.followUps,
-            outline=summary.outline,
-            generatedAt=summary.generatedAt,
-            summaryStatus=summary.summaryStatus,
-            summaryMode=summary.summaryMode,
-            createdAt=now,
-        )
-        store.save(meeting, user_id=job["user_id"])
-        stored_audio_path = persist_meeting_audio(audio_path, job["user_id"], meeting.id, job.get("location_name"))
-        audio_stored = True
-        content_type = mimetypes.guess_type(stored_audio_path.name)[0]
-        store.attach_meeting_audio(meeting.id, job["user_id"], stored_audio_path, content_type)
+            now = datetime.now(UTC)
+            meeting = MeetingResponse(
+                id=str(uuid4()),
+                transcript=transcript.transcript,
+                segments=transcript.segments,
+                language=transcript.language,
+                durationSeconds=transcript.durationSeconds,
+                source=job.get("source"),
+                deviceName=job.get("device_name"),
+                locationName=job.get("location_name"),
+                title=summary.title,
+                overview=summary.overview,
+                keyTopics=summary.keyTopics,
+                decisions=summary.decisions,
+                actionItems=summary.actionItems,
+                followUps=summary.followUps,
+                outline=summary.outline,
+                generatedAt=summary.generatedAt,
+                summaryStatus=summary.summaryStatus,
+                summaryMode=summary.summaryMode,
+                createdAt=now,
+            )
+            store.save(meeting, user_id=job["user_id"])
+            stored_audio_path = persist_meeting_audio(audio_path, job["user_id"], meeting.id, job.get("location_name"))
+            audio_stored = True
+            content_type = mimetypes.guess_type(stored_audio_path.name)[0]
+            store.attach_meeting_audio(meeting.id, job["user_id"], stored_audio_path, content_type)
+            store.update_meeting_job(job_id, status="processing", meeting_id=meeting.id)
+        else:
+            audio_stored = True
+
+        if bool(job.get("generate_summary", True)):
+            summary = summarize_or_make_unavailable(
+                job["user_id"],
+                meeting.transcript,
+                meeting.segments,
+                meeting.language,
+                job.get("location_name"),
+                summary_mode,
+            )
+        else:
+            summary = make_unavailable_summary(
+                job["user_id"],
+                meeting.transcript,
+                meeting.segments,
+                job.get("location_name"),
+                summary_mode,
+            )
+        store.update_meeting_summary(meeting.id, job["user_id"], summary)
         store.update_meeting_job(job_id, status="completed", meeting_id=meeting.id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Meeting job %s failed", job_id)

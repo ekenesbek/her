@@ -2,6 +2,23 @@ import Foundation
 
 protocol MeetingProcessingService {
     func process(recordingURL: URL, source: String?, deviceName: String?, locationName: String?, summaryMode: MeetingSummaryMode) async throws -> MeetingProcessingResult
+    func submitJob(recordingURL: URL, source: String?, deviceName: String?, locationName: String?, summaryMode: MeetingSummaryMode) async throws -> MeetingProcessingJob
+    func fetchJob(id: String) async throws -> MeetingProcessingJobSnapshot
+    func pollJob(id: String) async throws -> MeetingProcessingResult
+}
+
+struct MeetingProcessingJob {
+    let id: String
+}
+
+struct MeetingProcessingJobSnapshot {
+    let id: String
+    let status: String
+    let result: MeetingProcessingResult?
+
+    var isCompleted: Bool {
+        status == "completed"
+    }
 }
 
 struct MeetingProcessingResult {
@@ -55,7 +72,7 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         }
     }
 
-    private func submitJob(recordingURL: URL, source: String?, deviceName: String?, locationName: String?, summaryMode: MeetingSummaryMode) async throws -> BackendMeetingJobResponse {
+    func submitJob(recordingURL: URL, source: String?, deviceName: String?, locationName: String?, summaryMode: MeetingSummaryMode) async throws -> MeetingProcessingJob {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: jobsEndpoint)
         request.httpMethod = "POST"
@@ -72,7 +89,7 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
                 "device_name": deviceName,
                 "location_name": locationName,
                 "summary_mode": summaryMode.rawValue,
-                "generate_summary": "false"
+                "generate_summary": "true"
             ]
         )
 
@@ -88,44 +105,48 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
             )
         }
 
-        return try Self.decoder().decode(BackendMeetingJobResponse.self, from: data)
+        let decoded = try Self.decoder().decode(BackendMeetingJobResponse.self, from: data)
+        return MeetingProcessingJob(id: decoded.id)
     }
 
-    private func pollJob(id: String) async throws -> MeetingProcessingResult {
+    func fetchJob(id: String) async throws -> MeetingProcessingJobSnapshot {
         var request = URLRequest(url: jobsEndpoint.appendingPathComponent(id))
         request.timeoutInterval = 30
         if let token = TokenSource.shared.token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        for _ in 0..<900 {
-            let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw MeetingProcessingError.invalidResponse
-            }
-            guard (200..<300).contains(httpResponse.statusCode) else {
-                throw MeetingProcessingError.backendFailed(
-                    statusCode: httpResponse.statusCode,
-                    detail: Self.backendErrorDetail(from: data)
-                )
-            }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MeetingProcessingError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw MeetingProcessingError.backendFailed(
+                statusCode: httpResponse.statusCode,
+                detail: Self.backendErrorDetail(from: data)
+            )
+        }
 
-            let job = try Self.decoder().decode(BackendMeetingJobResponse.self, from: data)
-            switch job.status {
+        let job = try Self.decoder().decode(BackendMeetingJobResponse.self, from: data)
+        if job.status == "failed" {
+            throw MeetingProcessingError.backendFailed(statusCode: 500, detail: job.error)
+        }
+        return MeetingProcessingJobSnapshot(
+            id: job.id,
+            status: job.status,
+            result: job.meeting?.processingResult
+        )
+    }
+
+    func pollJob(id: String) async throws -> MeetingProcessingResult {
+        for _ in 0..<900 {
+            let snapshot = try await fetchJob(id: id)
+            switch snapshot.status {
             case "completed":
-                guard let meeting = job.meeting else {
+                guard let result = snapshot.result else {
                     throw MeetingProcessingError.invalidResponse
                 }
-                return MeetingProcessingResult(
-                    transcript: meeting.transcript,
-                    segments: meeting.segments ?? [],
-                    language: meeting.language,
-                    durationSeconds: meeting.durationSeconds,
-                    summary: meeting.summary,
-                    meetingId: meeting.id
-                )
-            case "failed":
-                throw MeetingProcessingError.backendFailed(statusCode: 500, detail: job.error)
+                return result
             default:
                 try await Task.sleep(nanoseconds: 2_000_000_000)
             }
@@ -320,6 +341,17 @@ private struct BackendProcessedMeeting: Decodable {
             generatedAt: generatedAt,
             summaryStatus: status,
             summaryMode: summaryMode ?? .reasoning
+        )
+    }
+
+    var processingResult: MeetingProcessingResult {
+        MeetingProcessingResult(
+            transcript: transcript,
+            segments: segments ?? [],
+            language: language,
+            durationSeconds: durationSeconds,
+            summary: summary,
+            meetingId: id
         )
     }
 }

@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     auth_jwt_secret: str = "dev-secret-change-me-in-production"
     apple_client_id: str = "com.ekenesbek.her"
     google_client_ids: str = ""
+    apple_subscription_product_id: str = "com.ekenesbek.her.plus.monthly"
+    app_store_bundle_id: str = "com.ekenesbek.her"
+    app_store_environment: Literal["sandbox", "production"] = "sandbox"
+    app_store_app_apple_id: int | None = None
+    app_store_root_certificates_dir: Path | None = None
+    app_store_enable_online_checks: bool = True
+    local_subscription_overrides_enabled: bool = False
 
     huggingface_token: str | None = None
     diarization_enabled: bool = True
@@ -67,6 +74,7 @@ class Settings(BaseSettings):
         "deepgram_api_key",
         "deepgram_language",
         "external_transcription_url",
+        "app_store_root_certificates_dir",
         mode="before",
     )
     @classmethod

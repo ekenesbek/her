@@ -325,9 +325,12 @@ struct ContentView: View {
     @StateObject private var wakeCommands = WakeCommandController()
     @StateObject private var liveContext = LiveContextStore()
     @StateObject private var meetingsStore = MeetingsStore()
+    @StateObject private var subscriptionStore = SubscriptionStore()
     @State private var route: MainRoute = .home
     @State private var recordingMuted = false
     @State private var selectedMeeting: StoredMeeting?
+    @State private var selectedProcessingRecording: BackgroundProcessingRecording?
+    @State private var showingBilling = false
 
     init(wearablesBridge: WearablesBridge, settings: AppSettingsStore, authStore: AuthStore) {
         self.wearablesBridge = wearablesBridge
@@ -356,6 +359,7 @@ struct ContentView: View {
                         settings: settings,
                         liveContext: liveContext,
                         meetings: meetingsStore.meetings,
+                        processingRecordings: viewModel.backgroundProcessingRecordings,
                         onSettings: {
                             route = .her
                         },
@@ -372,8 +376,10 @@ struct ContentView: View {
                         },
                         onSelectConversation: { meeting in
                             selectedMeeting = meeting
+                            selectedProcessingRecording = nil
                             route = .detail
                         },
+                        onSelectProcessing: openProcessingRecording,
                         onGenerateSummary: {
                             Task { @MainActor in
                                 await viewModel.generateSummary()
@@ -396,11 +402,16 @@ struct ContentView: View {
                 case .conversations:
                     ExactConversationsScreen(
                         meetings: meetingsStore.meetings,
+                        processingRecordings: viewModel.backgroundProcessingRecordings,
                         onBackHome: { route = .home },
                         onSelect: { meeting in
                             selectedMeeting = meeting
+                            selectedProcessingRecording = nil
                             route = .detail
                         },
+                        onSelectProcessing: openProcessingRecording,
+                        onRename: renameMeeting,
+                        onDelete: deleteMeeting,
                         onRecord: showRecording,
                         onMemory: { route = .memory },
                         onHer: { route = .her }
@@ -408,7 +419,13 @@ struct ContentView: View {
                 case .detail:
                     ExactConversationDetailScreen(
                         meeting: selectedMeeting,
+                        processingRecording: selectedProcessingRecording,
+                        isSummaryProcessing: isSelectedSummaryProcessing,
                         currentUserName: currentUserDisplayName,
+                        subscription: subscriptionStore.state,
+                        onUpgradeSubscription: {
+                            showingBilling = true
+                        },
                         onBack: { route = .conversations },
                         onGenerateSummary: { meeting in
                             selectedMeeting = try? await meetingsStore.generateSummary(for: meeting)
@@ -431,7 +448,9 @@ struct ContentView: View {
                             )
                             selectedMeeting = result.meeting
                             return result
-                        }
+                        },
+                        onRename: renameMeeting,
+                        onDelete: deleteMeeting
                     )
                 case .memory:
                     ExactMemoryScreen(
@@ -464,11 +483,14 @@ struct ContentView: View {
                         viewModel: viewModel,
                         wakeCommands: wakeCommands,
                         authStore: authStore,
+                        subscriptionStore: subscriptionStore,
+                        meetingsStore: meetingsStore,
                         onHome: { route = .home },
                         onConversations: { route = .conversations },
                         onRecord: showRecording,
                         onMemory: { route = .memory },
-                        onPair: showDeviceFlow
+                        onPair: showDeviceFlow,
+                        onBilling: { showingBilling = true }
                     )
                 }
             }
@@ -476,12 +498,29 @@ struct ContentView: View {
             .navigationBarHidden(true)
         }
         .navigationViewStyle(.stack)
+        .sheet(isPresented: $showingBilling) {
+            if #available(iOS 16.0, *) {
+                BillingSheet(
+                    subscriptionStore: subscriptionStore,
+                    meetingsStore: meetingsStore
+                )
+                .presentationDetents([.fraction(0.82), .large])
+                .presentationDragIndicator(.visible)
+            } else {
+                BillingSheet(
+                    subscriptionStore: subscriptionStore,
+                    meetingsStore: meetingsStore
+                )
+            }
+        }
         .onAppear {
             liveContext.refreshIfAuthorized()
             wakeCommands.configure(assistantName: settings.aiDisplayName)
             wakeCommands.setAppActive(scenePhase == .active)
             Task { @MainActor in
                 await meetingsStore.refresh()
+                await subscriptionStore.refresh(meetings: meetingsStore.meetings)
+                viewModel.reconcileRecordingState()
                 await viewModel.recoverIfNeeded()
             }
         }
@@ -490,7 +529,7 @@ struct ContentView: View {
                 route = .recording
             }
             if newPhase == .recording {
-                wakeCommands.listenForStopWhileRecording()
+                wakeCommands.pauseForRecording()
             } else if newPhase == .interrupted {
                 wakeCommands.pauseForRecording()
             } else {
@@ -502,11 +541,24 @@ struct ContentView: View {
                 }
             }
         }
+        .onChange(of: viewModel.backgroundProcessingUpdateCounter) { _ in
+            Task { @MainActor in
+                await meetingsStore.refresh()
+                await subscriptionStore.refresh(meetings: meetingsStore.meetings)
+                syncSelectedProcessingAfterRefresh()
+            }
+        }
         .onChange(of: settings.aiDisplayName) { newName in
             wakeCommands.configure(assistantName: newName)
         }
         .onChange(of: scenePhase) { newPhase in
             wakeCommands.setAppActive(newPhase == .active)
+            if newPhase == .active {
+                Task { @MainActor in
+                    viewModel.reconcileRecordingState()
+                    await viewModel.recoverIfNeeded()
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .herWakeWordDetected)) { _ in
             handleWakeWordDetected()
@@ -530,6 +582,7 @@ struct ContentView: View {
 
     private func openCurrentProcessedMeeting() async {
         await meetingsStore.refresh()
+        await subscriptionStore.refresh(meetings: meetingsStore.meetings)
         guard let meetingId = viewModel.currentMeetingId,
               let meeting = meetingsStore.meetings.first(where: { $0.id == meetingId }) else {
             return
@@ -546,6 +599,10 @@ struct ContentView: View {
         }
 
         guard viewModel.canTapPrimaryButton else {
+            return
+        }
+        guard subscriptionStore.canStartRecording else {
+            viewModel.showMessage(subscriptionStore.limitReachedMessage)
             return
         }
 
@@ -569,15 +626,91 @@ struct ContentView: View {
         route = .deviceConnected
     }
 
+    private func renameMeeting(_ meeting: StoredMeeting, title: String) async {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else {
+            viewModel.showMessage("Recording title cannot be empty.")
+            return
+        }
+
+        do {
+            let updated = try await meetingsStore.rename(meeting, title: cleanTitle)
+            if selectedMeeting?.id == updated.id {
+                selectedMeeting = updated
+            }
+        } catch {
+            viewModel.showMessage(error.localizedDescription)
+        }
+    }
+
+    private func deleteMeeting(_ meeting: StoredMeeting) async {
+        do {
+            try await meetingsStore.delete(meeting)
+            if selectedMeeting?.id == meeting.id {
+                selectedMeeting = nil
+                selectedProcessingRecording = nil
+                route = .conversations
+            }
+            await subscriptionStore.refresh(meetings: meetingsStore.meetings)
+        } catch {
+            viewModel.showMessage(error.localizedDescription)
+        }
+    }
+
+    private func openProcessingRecording(_ recording: BackgroundProcessingRecording) {
+        selectedProcessingRecording = recording
+        if let meetingId = recording.meetingId,
+           let meeting = meetingsStore.meetings.first(where: { $0.id == meetingId }) {
+            selectedMeeting = meeting
+        } else {
+            selectedMeeting = nil
+            viewModel.retryBackgroundProcessing(recording)
+        }
+        route = .detail
+    }
+
+    private var isSelectedSummaryProcessing: Bool {
+        guard let meetingId = selectedMeeting?.id else {
+            return selectedProcessingRecording != nil
+        }
+        return viewModel.backgroundProcessingRecordings.contains { $0.meetingId == meetingId }
+    }
+
+    private func syncSelectedProcessingAfterRefresh() {
+        guard let selectedProcessingRecording else {
+            return
+        }
+        if let updatedProcessing = viewModel.backgroundProcessingRecordings.first(where: {
+            $0.recordingPath == selectedProcessingRecording.recordingPath
+                || ($0.meetingId != nil && $0.meetingId == selectedProcessingRecording.meetingId)
+        }) {
+            self.selectedProcessingRecording = updatedProcessing
+            if let meetingId = updatedProcessing.meetingId,
+               let meeting = meetingsStore.meetings.first(where: { $0.id == meetingId }) {
+                selectedMeeting = meeting
+            }
+            return
+        }
+
+        if let meetingId = selectedProcessingRecording.meetingId,
+           let meeting = meetingsStore.meetings.first(where: { $0.id == meetingId }) {
+            self.selectedProcessingRecording = nil
+            selectedMeeting = meeting
+        }
+    }
+
     private func stopRecordingAndStay() {
         guard viewModel.phase == .recording else {
             return
         }
 
         Task { @MainActor in
-            route = .recording
             wakeCommands.pauseForRecording()
-            await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName)
+            if let recording = await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName) {
+                openProcessingRecording(recording)
+            } else {
+                route = .home
+            }
         }
     }
 
@@ -599,9 +732,12 @@ struct ContentView: View {
         }
 
         Task { @MainActor in
-            route = .recording
             wakeCommands.pauseForRecording()
-            await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName)
+            if let recording = await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName) {
+                openProcessingRecording(recording)
+            } else {
+                route = .home
+            }
         }
     }
 
@@ -631,6 +767,10 @@ struct ContentView: View {
     }
 
     private var currentUserDisplayName: String {
+        let savedOwnerName = settings.ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !savedOwnerName.isEmpty, savedOwnerName != "Owner" {
+            return savedOwnerName
+        }
         if let name = authStore.session?.user.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
             return name
         }
@@ -668,6 +808,7 @@ private struct ExactHomeScreen: View {
     @ObservedObject var settings: AppSettingsStore
     @ObservedObject var liveContext: LiveContextStore
     let meetings: [StoredMeeting]
+    let processingRecordings: [BackgroundProcessingRecording]
     let onSettings: () -> Void
     let onPair: () -> Void
     let onConversations: () -> Void
@@ -675,6 +816,7 @@ private struct ExactHomeScreen: View {
     let onMemory: () -> Void
     let onHer: () -> Void
     let onSelectConversation: (StoredMeeting) -> Void
+    let onSelectProcessing: (BackgroundProcessingRecording) -> Void
     let onGenerateSummary: () -> Void
 
     var body: some View {
@@ -718,7 +860,13 @@ private struct ExactHomeScreen: View {
                     ExactTodaySnapshot(meetings: meetings, activeElapsedSeconds: isRecording ? viewModel.elapsedSeconds : 0)
                         .padding(.top, 18)
 
-                    ExactRecentList(items: Array(meetings.prefix(2)), onSelect: onSelectConversation, onSeeAll: onConversations)
+                    ExactRecentList(
+                        processingItems: processingRecordings,
+                        items: meetings,
+                        onSelect: onSelectConversation,
+                        onSelectProcessing: onSelectProcessing,
+                        onSeeAll: onConversations
+                    )
                         .padding(.top, 20)
                 }
                 .padding(.horizontal, 22)
@@ -1009,8 +1157,10 @@ private struct ExactMetric: View {
 }
 
 private struct ExactRecentList: View {
+    let processingItems: [BackgroundProcessingRecording]
     let items: [StoredMeeting]
     let onSelect: (StoredMeeting) -> Void
+    let onSelectProcessing: (BackgroundProcessingRecording) -> Void
     let onSeeAll: () -> Void
 
     var body: some View {
@@ -1029,7 +1179,7 @@ private struct ExactRecentList: View {
 
             WwCard(padding: 0) {
                 VStack(spacing: 0) {
-                    if items.isEmpty {
+                    if visibleProcessingItems.isEmpty && visibleItems.isEmpty {
                         Text("No saved conversations yet.")
                             .font(.system(size: 14, weight: .regular, design: .serif))
                             .italic()
@@ -1037,7 +1187,20 @@ private struct ExactRecentList: View {
                             .padding(14)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        ForEach(Array(visibleProcessingItems.enumerated()), id: \.element.id) { index, item in
+                            Button(action: { onSelectProcessing(item) }) {
+                                BackgroundProcessingRow(item: item)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 12)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+
+                            if index < visibleProcessingItems.count - 1 || !visibleItems.isEmpty {
+                                DividerLine()
+                            }
+                        }
+
+                        ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
                             Button(action: { onSelect(item) }) {
                                 ConversationListRow(item: item)
                                     .padding(.horizontal, 14)
@@ -1053,6 +1216,19 @@ private struct ExactRecentList: View {
                 }
             }
         }
+    }
+
+    private var visibleProcessingItems: [BackgroundProcessingRecording] {
+        Array(processingItems.prefix(2))
+    }
+
+    private var visibleItems: [StoredMeeting] {
+        let remaining = max(0, 2 - visibleProcessingItems.count)
+        return Array(items.filter { !processingMeetingIds.contains($0.id) }.prefix(remaining))
+    }
+
+    private var processingMeetingIds: Set<String> {
+        Set(processingItems.compactMap(\.meetingId))
     }
 }
 
@@ -1129,7 +1305,10 @@ private struct ExactPairRayBanScreen: View {
                     }
                 }
 
-                WwGhostButton(title: "I'll do it later", action: onSkip)
+                HStack(spacing: 10) {
+                    WwGhostButton(title: "Skip", action: onSkip)
+                    WwGhostButton(title: "Continue", action: onFinish)
+                }
                     .padding(.top, 12)
             }
             .padding(.horizontal, 22)
@@ -1246,7 +1425,7 @@ private struct ExactDeviceConnectedScreen: View {
         if device.supportsInput {
             return "bluetooth · microphone ready"
         }
-        return "connected · audio output"
+        return "bluetooth · output only"
     }
 
     private var micLabel: String {
@@ -1267,11 +1446,20 @@ private struct ExactDeviceConnectedScreen: View {
 
 private struct ExactConversationsScreen: View {
     let meetings: [StoredMeeting]
+    let processingRecordings: [BackgroundProcessingRecording]
     let onBackHome: () -> Void
     let onSelect: (StoredMeeting) -> Void
+    let onSelectProcessing: (BackgroundProcessingRecording) -> Void
+    let onRename: (StoredMeeting, String) async -> Void
+    let onDelete: (StoredMeeting) async -> Void
     let onRecord: () -> Void
     let onMemory: () -> Void
     let onHer: () -> Void
+    @State private var renamingMeeting: StoredMeeting?
+    @State private var renameDraft = ""
+    @State private var renamePresented = false
+    @State private var deletingMeeting: StoredMeeting?
+    @State private var deletePresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1281,7 +1469,7 @@ private struct ExactConversationsScreen: View {
                     .italic()
                     .foregroundColor(AppTheme.fg)
                 Spacer()
-                Text("\(items.count) ITEMS")
+                Text("\(items.count + processingRecordings.count) ITEMS")
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundColor(AppTheme.dim)
                     .tracking(1)
@@ -1293,7 +1481,7 @@ private struct ExactConversationsScreen: View {
 
             HStack(spacing: 10) {
                 HerOrb(size: 16)
-                Text(items.isEmpty ? "record a conversation to start the log." : "open a conversation to review transcript, summary, and chat.")
+                Text(items.isEmpty && processingRecordings.isEmpty ? "record a conversation to start the log." : "open a conversation to review transcript, summary, and chat.")
                     .font(.system(size: 13.5, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.muted)
@@ -1307,10 +1495,28 @@ private struct ExactConversationsScreen: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    if items.isEmpty {
+                    if items.isEmpty && processingRecordings.isEmpty {
                         ConversationEmptyState()
                             .padding(.top, 18)
                     } else {
+                        if !processingRecordings.isEmpty {
+                            Text("processing")
+                                .font(.system(size: 13, weight: .regular, design: .serif))
+                                .italic()
+                                .foregroundColor(AppTheme.dim)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 14)
+                                .padding(.bottom, 6)
+                                .overlay(alignment: .bottom) { DividerLine() }
+
+                            ForEach(processingRecordings) { item in
+                                Button(action: { onSelectProcessing(item) }) {
+                                    BackgroundProcessingRow(item: item)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            }
+                        }
+
                         ForEach(groupedItems.indices, id: \.self) { groupIndex in
                             let group = groupedItems[groupIndex]
                             Text(group.date)
@@ -1327,6 +1533,33 @@ private struct ExactConversationsScreen: View {
                                     ConversationListRow(item: item)
                                 }
                                 .buttonStyle(PlainButtonStyle())
+                                .contextMenu {
+                                    Button {
+                                        startRename(item)
+                                    } label: {
+                                        Label("Rename", systemImage: "pencil")
+                                    }
+                                    Button(role: .destructive) {
+                                        startDelete(item)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
+                                .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                    Button {
+                                        startRename(item)
+                                    } label: {
+                                        Label("Rename", systemImage: "pencil")
+                                    }
+                                    .tint(.gray)
+                                }
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button(role: .destructive) {
+                                        startDelete(item)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
                             }
                         }
                     }
@@ -1336,10 +1569,44 @@ private struct ExactConversationsScreen: View {
 
             ExactTabBar(activeIndex: 1, recording: false, onHome: onBackHome, onRecord: onRecord, onLog: {}, onMemory: onMemory, onHer: onHer)
         }
+        .alert("Rename recording", isPresented: $renamePresented) {
+            TextField("Title", text: $renameDraft)
+            Button("Cancel", role: .cancel) {
+                renamingMeeting = nil
+                renameDraft = ""
+            }
+            Button("Save") {
+                guard let meeting = renamingMeeting else {
+                    return
+                }
+                let title = renameDraft
+                renamingMeeting = nil
+                renameDraft = ""
+                Task { await onRename(meeting, title) }
+            }
+            .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Update the title shown in conversations and recording detail.")
+        }
+        .confirmationDialog("Delete recording?", isPresented: $deletePresented, titleVisibility: .visible) {
+            Button("Delete recording", role: .destructive) {
+                guard let meeting = deletingMeeting else {
+                    return
+                }
+                deletingMeeting = nil
+                Task { await onDelete(meeting) }
+            }
+            Button("Cancel", role: .cancel) {
+                deletingMeeting = nil
+            }
+        } message: {
+            Text("This removes the saved transcript, summary, chat, and linked audio.")
+        }
     }
 
     private var items: [StoredMeeting] {
-        meetings
+        let processingMeetingIds = Set(processingRecordings.compactMap(\.meetingId))
+        return meetings.filter { !processingMeetingIds.contains($0.id) }
     }
 
     private var groupedItems: [(date: String, items: [StoredMeeting])] {
@@ -1353,6 +1620,17 @@ private struct ExactConversationsScreen: View {
             }
         }
         return result
+    }
+
+    private func startRename(_ meeting: StoredMeeting) {
+        renamingMeeting = meeting
+        renameDraft = meeting.title
+        renamePresented = true
+    }
+
+    private func startDelete(_ meeting: StoredMeeting) {
+        deletingMeeting = meeting
+        deletePresented = true
     }
 }
 
@@ -1421,6 +1699,56 @@ private struct ConversationListRow: View {
     }
 }
 
+private struct BackgroundProcessingRow: View {
+    let item: BackgroundProcessingRecording
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.displayTime)
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundColor(AppTheme.fg)
+                Text(item.statusLabel.uppercased())
+                    .font(.system(size: 9, weight: .regular, design: .monospaced))
+                    .foregroundColor(AppTheme.dim)
+            }
+            .frame(width: 52, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(item.title)
+                    .font(.system(size: 15, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                Text("\(item.displayLocation) · backend processing")
+                    .font(.system(size: 12, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.dim)
+                HStack(spacing: 6) {
+                    Text("AI")
+                        .font(.system(size: 9, weight: .regular, design: .monospaced))
+                        .foregroundColor(AppTheme.fg)
+                        .padding(.horizontal, 9)
+                        .frame(height: 20)
+                        .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
+                    Text(item.meetingId != nil ? "SUMMARY" : (item.jobId == nil ? "UPLOAD" : "TRANSCRIPT"))
+                        .font(.system(size: 9, weight: .regular, design: .monospaced))
+                        .foregroundColor(AppTheme.fg)
+                        .padding(.horizontal, 9)
+                        .frame(height: 20)
+                        .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
+                }
+            }
+            Spacer()
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(AppTheme.fg)
+                .scaleEffect(0.72)
+                .padding(.top, 6)
+        }
+        .padding(.vertical, 14)
+        .overlay(alignment: .bottom) { DividerLine() }
+    }
+}
+
 private extension StoredMeeting {
     var displayTime: String {
         Self.timeFormatter.string(from: createdAt)
@@ -1459,60 +1787,102 @@ private extension StoredMeeting {
 
 private struct ExactConversationDetailScreen: View {
     let meeting: StoredMeeting?
+    let processingRecording: BackgroundProcessingRecording?
+    let isSummaryProcessing: Bool
     let currentUserName: String
+    let subscription: SubscriptionState
+    let onUpgradeSubscription: () -> Void
     let onBack: () -> Void
     let onGenerateSummary: (StoredMeeting) async -> Void
     let onUpdateTranscript: (StoredMeeting, String, [MeetingTranscriptSegment]) async throws -> StoredMeeting
     let onAssignSpeaker: (StoredMeeting, String, String?, String) async throws -> SpeakerAssignmentResult
+    let onRename: (StoredMeeting, String) async -> Void
+    let onDelete: (StoredMeeting) async -> Void
     private let tabs = ["contents", "summary", "chat"]
     @State private var selectedTab = 0
     @State private var isGeneratingSummary = false
+    @State private var renameDraft = ""
+    @State private var renamePresented = false
+    @State private var deletePresented = false
 
     var body: some View {
         VStack(spacing: 0) {
             detailHeader
 
-            if let meeting {
+            if meeting != nil || processingRecording != nil {
                 ExactSegmentedTabs(tabs: tabs, selectedIndex: $selectedTab)
                     .padding(.horizontal, 22)
                     .padding(.bottom, 14)
 
                 if selectedTab == 2 {
-                    ConversationChatPanel(meeting: meeting)
-                } else if selectedTab == 0 {
-                    ScrollViewReader { scrollProxy in
-                        ScrollView(showsIndicators: false) {
-                            VStack(alignment: .leading, spacing: 16) {
-                                ConversationContentsPanel(
-                                    meeting: meeting,
-                                    scrollProxy: scrollProxy,
-                                    currentUserName: currentUserName,
-                                    onUpdateTranscript: { transcript, segments in
-                                        try await onUpdateTranscript(meeting, transcript, segments)
-                                    },
-                                    onAssignSpeaker: { speaker, profileId, name in
-                                        try await onAssignSpeaker(meeting, speaker, profileId, name)
-                                    }
-                                )
-                            }
+                    if let meeting {
+                        ConversationChatPanel(
+                            meeting: meeting,
+                            subscription: subscription,
+                            onUpgradeSubscription: onUpgradeSubscription
+                        )
+                    } else {
+                        AskAIWaitingCard()
                             .padding(.horizontal, 22)
-                            .padding(.bottom, 14)
+                            .padding(.top, 4)
+                        Spacer()
+                    }
+                } else if selectedTab == 0 {
+                    if let meeting {
+                        ScrollViewReader { scrollProxy in
+                            ScrollView(showsIndicators: false) {
+                                VStack(alignment: .leading, spacing: 16) {
+                                    ConversationContentsPanel(
+                                        meeting: meeting,
+                                        scrollProxy: scrollProxy,
+                                        currentUserName: currentUserName,
+                                        onUpdateTranscript: { transcript, segments in
+                                            try await onUpdateTranscript(meeting, transcript, segments)
+                                        },
+                                        onAssignSpeaker: { speaker, profileId, name in
+                                            try await onAssignSpeaker(meeting, speaker, profileId, name)
+                                        }
+                                    )
+                                }
+                                .padding(.horizontal, 22)
+                                .padding(.bottom, 14)
+                            }
+                        }
+                    } else {
+                        ScrollView(showsIndicators: false) {
+                            TranscriptWaitingPanel(location: processingRecording?.displayLocation)
+                                .padding(.horizontal, 22)
+                                .padding(.bottom, 14)
                         }
                     }
                 } else {
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 16) {
-                            SummaryPanel(
-                                summary: meeting.summary,
-                                isGenerating: isGeneratingSummary,
-                                onGenerateSummary: meeting.hasGeneratedSummary ? nil : {
-                                    Task { @MainActor in
-                                        isGeneratingSummary = true
-                                        await onGenerateSummary(meeting)
-                                        isGeneratingSummary = false
-                                    }
+                            if let meeting {
+                                if meeting.hasGeneratedSummary {
+                                    SummaryPanel(
+                                        summary: meeting.summary,
+                                        isGenerating: isGeneratingSummary,
+                                        onGenerateSummary: nil
+                                    )
+                                } else if isSummaryProcessing {
+                                    SummaryWaitingPanel(transcriptReady: true)
+                                } else {
+                                    SummaryPanel(
+                                        summary: meeting.summary,
+                                        isGenerating: isGeneratingSummary,
+                                        onGenerateSummary: {
+                                            Task { @MainActor in
+                                                isGeneratingSummary = true
+                                                await onGenerateSummary(meeting)
+                                                isGeneratingSummary = false
+                                            }
+                                        }
+                                    )
                                 }
-                            )
+                            } else {
+                                SummaryWaitingPanel(transcriptReady: false)
+                            }
                         }
                         .padding(.horizontal, 22)
                         .padding(.bottom, 14)
@@ -1525,6 +1895,34 @@ private struct ExactConversationDetailScreen: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .alert("Rename recording", isPresented: $renamePresented) {
+            TextField("Title", text: $renameDraft)
+            Button("Cancel", role: .cancel) {
+                renameDraft = ""
+            }
+            Button("Save") {
+                guard let meeting else {
+                    return
+                }
+                let title = renameDraft
+                renameDraft = ""
+                Task { await onRename(meeting, title) }
+            }
+            .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Update this recording title.")
+        }
+        .confirmationDialog("Delete recording?", isPresented: $deletePresented, titleVisibility: .visible) {
+            Button("Delete recording", role: .destructive) {
+                guard let meeting else {
+                    return
+                }
+                Task { await onDelete(meeting) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the saved transcript, summary, chat, and linked audio.")
+        }
     }
 
     private var detailHeader: some View {
@@ -1536,12 +1934,34 @@ private struct ExactConversationDetailScreen: View {
                         .foregroundColor(AppTheme.fg)
                 }
                 .buttonStyle(PlainButtonStyle())
-                MonoLabel(meeting?.sourceLabel ?? "conversation")
+                MonoLabel(meeting?.sourceLabel ?? processingRecording?.statusLabel ?? "conversation")
+                Spacer()
+                if let meeting {
+                    Menu {
+                        Button {
+                            renameDraft = meeting.title
+                            renamePresented = true
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            deletePresented = true
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(AppTheme.fg)
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 8)
 
-            Text(meeting?.title ?? "No conversation selected")
+            Text(detailTitle)
                 .font(.system(size: 28, weight: .medium, design: .serif))
                 .italic()
                 .foregroundColor(AppTheme.fg)
@@ -1560,11 +1980,32 @@ private struct ExactConversationDetailScreen: View {
                 .foregroundColor(AppTheme.dim)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
+            } else if let processingRecording {
+                HStack(spacing: 14) {
+                    Text(processingRecording.displayLocation)
+                        .italic()
+                    Text(processingRecording.statusLabel)
+                        .italic()
+                }
+                .font(.system(size: 13, weight: .regular, design: .serif))
+                .foregroundColor(AppTheme.dim)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
             }
         }
         .padding(.horizontal, 22)
         .padding(.top, 6)
         .padding(.bottom, 14)
+    }
+
+    private var detailTitle: String {
+        if let meeting {
+            return meeting.title
+        }
+        if let processingRecording {
+            return processingRecording.title
+        }
+        return "No conversation selected"
     }
 }
 
@@ -1592,57 +2033,145 @@ private struct ExactSegmentedTabs: View {
     }
 }
 
+private struct TranscriptWaitingPanel: View {
+    let location: String?
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 9) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(AppTheme.fg)
+                    SectionTitle(label: "TRANSCRIPT", title: "Transcribing...", icon: "text.quote")
+                }
+
+                Text(detail)
+                    .font(.system(size: 15, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.muted)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var detail: String {
+        if let location, !location.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "The recording from \(location) is uploading and being transcribed. The transcript will appear here first."
+        }
+        return "The recording is uploading and being transcribed. The transcript will appear here first."
+    }
+}
+
+private struct SummaryWaitingPanel: View {
+    let transcriptReady: Bool
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 9) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(AppTheme.fg)
+                    SectionTitle(label: "SUMMARY", title: transcriptReady ? "Summarizing..." : "Waiting for transcript", icon: "sparkles")
+                }
+
+                Text(transcriptReady ? "Transcript is ready. AI is generating the title, summary, action items, and follow-ups." : "Summary starts after transcription finishes.")
+                    .font(.system(size: 15, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.muted)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+private struct AskAIWaitingCard: View {
+    var body: some View {
+        WwCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 9) {
+                    Image(systemName: "bubble.left.and.text.bubble.right")
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundColor(AppTheme.fg)
+                    MonoLabel("ask ai")
+                }
+
+                Text("Ask AI will unlock as soon as the transcript is ready.")
+                    .font(.system(size: 15, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.muted)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 private struct ConversationChatPanel: View {
     let meeting: StoredMeeting
+    let subscription: SubscriptionState
+    let onUpgradeSubscription: () -> Void
     @State private var draft = ""
     @State private var messages: [ConversationChatMessage] = []
     @State private var isSending = false
     private let chatService = MeetingChatServiceFactory.make()
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 10) {
-                    if messages.isEmpty {
-                        ChatEmptyState()
-                    } else {
-                        ForEach(messages) { message in
-                            ConversationChatBubble(message: message)
+        Group {
+            if subscription.askAiEnabled {
+                VStack(spacing: 0) {
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if messages.isEmpty {
+                                ChatEmptyState()
+                            } else {
+                                ForEach(messages) { message in
+                                    ConversationChatBubble(message: message)
+                                }
+                            }
                         }
+                        .padding(.horizontal, 22)
+                        .padding(.bottom, 14)
                     }
-                }
-                .padding(.horizontal, 22)
-                .padding(.bottom, 14)
-            }
 
-            HStack(spacing: 10) {
-                TextField("", text: $draft, prompt: Text("Ask about this conversation").foregroundColor(AppTheme.dim))
-                    .font(.system(size: 14, weight: .regular, design: .serif))
-                    .foregroundColor(AppTheme.fg)
-                    .foregroundStyle(AppTheme.fg)
-                    .tint(AppTheme.fg)
-                    .textFieldStyle(.plain)
-                    .padding(.leading, 16)
-                    .frame(height: 46)
+                    HStack(spacing: 10) {
+                        TextField("", text: $draft, prompt: Text("Ask about this conversation").foregroundColor(AppTheme.dim))
+                            .font(.system(size: 14, weight: .regular, design: .serif))
+                            .foregroundColor(AppTheme.fg)
+                            .foregroundStyle(AppTheme.fg)
+                            .tint(AppTheme.fg)
+                            .textFieldStyle(.plain)
+                            .padding(.leading, 16)
+                            .frame(height: 46)
 
-                Button(action: send) {
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(AppTheme.bg)
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(canSend ? AppTheme.fg : AppTheme.dim))
+                        Button(action: send) {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(AppTheme.bg)
+                                .frame(width: 36, height: 36)
+                                .background(Circle().fill(canSend ? AppTheme.fg : AppTheme.dim))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .disabled(!canSend)
+                        .padding(.trailing, 6)
+                    }
+                    .background(Capsule().fill(AppTheme.bgSoft).overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1)))
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 12)
+                    .overlay(alignment: .top) { DividerLine() }
                 }
-                .buttonStyle(PlainButtonStyle())
-                .disabled(!canSend)
-                .padding(.trailing, 6)
+                .task(id: meeting.id) {
+                    await loadMessages()
+                }
+            } else {
+                AskAIPaywallCard(subscription: subscription, onUpgrade: onUpgradeSubscription)
+                    .padding(.horizontal, 22)
+                    .padding(.top, 4)
+                Spacer()
             }
-            .background(Capsule().fill(AppTheme.bgSoft).overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1)))
-            .padding(.horizontal, 22)
-            .padding(.vertical, 12)
-            .overlay(alignment: .top) { DividerLine() }
-        }
-        .task(id: meeting.id) {
-            await loadMessages()
         }
     }
 
@@ -2074,6 +2603,32 @@ private struct ChatEmptyState: View {
                     .font(.system(size: 15, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.muted)
+            }
+        }
+    }
+}
+
+private struct AskAIPaywallCard: View {
+    let subscription: SubscriptionState
+    let onUpgrade: () -> Void
+
+    var body: some View {
+        WwCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundColor(AppTheme.fg)
+                    MonoLabel("ask ai")
+                }
+
+                Text("Plus includes Ask AI and 600 min/mo. Free keeps 60 min/mo for recording.")
+                    .font(.system(size: 15, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                WwPrimaryButton("view billing", action: onUpgrade)
             }
         }
     }
@@ -2908,19 +3463,22 @@ private struct ExactSettingsHerScreen: View {
     @ObservedObject var viewModel: ConversationSessionViewModel
     @ObservedObject var wakeCommands: WakeCommandController
     @ObservedObject var authStore: AuthStore
+    @ObservedObject var subscriptionStore: SubscriptionStore
+    @ObservedObject var meetingsStore: MeetingsStore
 
     let onHome: () -> Void
     let onConversations: () -> Void
     let onRecord: () -> Void
     let onMemory: () -> Void
     let onPair: () -> Void
+    let onBilling: () -> Void
 
     @State private var editingProfile = false
     @State private var aiName: String
     @State private var ownerName: String
     @State private var voiceProfiles: [VoiceProfile] = []
     @State private var voiceProfilesLoading = false
-    @State private var presentingVoiceEnrollment = false
+    @State private var showingPeople = false
     @State private var presentingLegal: LegalDocument?
     @State private var processOnDevice = true
     @State private var redactPII = true
@@ -2936,27 +3494,68 @@ private struct ExactSettingsHerScreen: View {
         viewModel: ConversationSessionViewModel,
         wakeCommands: WakeCommandController,
         authStore: AuthStore,
+        subscriptionStore: SubscriptionStore,
+        meetingsStore: MeetingsStore,
         onHome: @escaping () -> Void,
         onConversations: @escaping () -> Void,
         onRecord: @escaping () -> Void,
         onMemory: @escaping () -> Void,
-        onPair: @escaping () -> Void
+        onPair: @escaping () -> Void,
+        onBilling: @escaping () -> Void
     ) {
         self.settings = settings
         self.bridge = bridge
         self.viewModel = viewModel
         self.wakeCommands = wakeCommands
         self.authStore = authStore
+        self.subscriptionStore = subscriptionStore
+        self.meetingsStore = meetingsStore
         self.onHome = onHome
         self.onConversations = onConversations
         self.onRecord = onRecord
         self.onMemory = onMemory
         self.onPair = onPair
+        self.onBilling = onBilling
         _aiName = State(initialValue: settings.aiDisplayName)
         _ownerName = State(initialValue: settings.ownerDisplayName == "Owner" ? "" : settings.ownerDisplayName)
     }
 
     var body: some View {
+        Group {
+            if showingPeople {
+                ExactSettingsPeopleScreen(
+                    currentUserName: currentUserDisplayName,
+                    selfProfile: selfVoiceProfile,
+                    recognizedSpeakers: recognizedSpeakers,
+                    isLoading: voiceProfilesLoading,
+                    recording: viewModel.phase == .recording,
+                    onBack: { showingPeople = false },
+                    onRefresh: { Task { await refreshPeopleData() } },
+                    onDelete: { person in
+                        guard let profile = person.voiceProfile else { return }
+                        Task { await deleteVoiceProfile(profile) }
+                    },
+                    onHome: onHome,
+                    onRecord: onRecord,
+                    onConversations: onConversations,
+                    onMemory: onMemory
+                )
+            } else {
+                settingsHome
+            }
+        }
+        .onAppear {
+            Task {
+                await refreshPeopleData()
+                await subscriptionStore.refresh(meetings: meetingsStore.meetings)
+            }
+        }
+        .sheet(item: $presentingLegal) { doc in
+            LegalDocumentView(document: doc, current: $presentingLegal)
+        }
+    }
+
+    private var settingsHome: some View {
         VStack(spacing: 0) {
             ExactBrandBar(status: "SETTINGS")
 
@@ -2971,62 +3570,40 @@ private struct ExactSettingsHerScreen: View {
 
                     SettingsProfileCard(
                         settings: settings,
+                        subscription: subscriptionStore.state,
                         editingProfile: $editingProfile,
                         aiName: $aiName,
                         ownerName: $ownerName
                     )
                     .padding(.top, 18)
 
-                    SettingsSectionHeader(title: "people", hint: voiceProfiles.isEmpty ? "empty" : "\(voiceProfiles.count) known")
+                    SettingsSectionHeader(title: "subscription", hint: subscriptionStore.state.plan.title)
                     WwCard(padding: 0) {
                         VStack(spacing: 0) {
-                            if voiceProfiles.isEmpty {
-                                SettingsValueRow(
-                                    icon: "person.2",
-                                    label: "Known people",
-                                    subtitle: "Saved voices and speaker names will appear here",
-                                    value: "empty"
-                                )
+                            if let subscriptionError = subscriptionStore.errorMessage {
+                                ErrorBanner(message: subscriptionError)
+                                    .padding(16)
                                 DividerLine()
-                            } else {
-                                ForEach(voiceProfiles) { profile in
-                                    VoiceProfileRow(profile: profile) {
-                                        Task { await deleteVoiceProfile(profile) }
-                                    }
-                                    DividerLine()
-                                }
                             }
-                            Button(action: { presentingVoiceEnrollment = true }) {
-                                HStack(spacing: 14) {
-                                    Image(systemName: "waveform.badge.plus")
-                                        .font(.system(size: 16))
-                                        .frame(width: 24)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Add your voice")
-                                            .font(.system(size: 14.5, weight: .medium, design: .serif))
-                                        Text("60-second sample so Her can label you in transcripts")
-                                            .font(.system(size: 12, design: .serif))
-                                            .italic()
-                                            .foregroundColor(AppTheme.dim)
-                                    }
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .foregroundColor(AppTheme.dim)
-                                }
-                                .foregroundColor(AppTheme.fg)
-                                .padding(16)
-                            }
-                            .buttonStyle(PlainButtonStyle())
+                            SettingsActionRow(
+                                icon: "creditcard",
+                                label: "Billing",
+                                subtitle: billingSubtitle,
+                                action: onBilling
+                            )
                         }
                     }
-                    .onAppear { Task { await loadVoiceProfiles() } }
-                    .sheet(isPresented: $presentingVoiceEnrollment) {
-                        VoiceEnrollmentView(isPresented: $presentingVoiceEnrollment) { newProfile in
-                            voiceProfiles.insert(newProfile, at: 0)
+
+                    SettingsSectionHeader(title: "people", hint: peopleHint)
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            SettingsActionRow(
+                                icon: "person.2",
+                                label: "People",
+                                subtitle: peopleSummary,
+                                action: { showingPeople = true }
+                            )
                         }
-                    }
-                    .sheet(item: $presentingLegal) { doc in
-                        LegalDocumentView(document: doc, current: $presentingLegal)
                     }
 
                     SettingsSectionHeader(title: "memory & data")
@@ -3034,13 +3611,7 @@ private struct ExactSettingsHerScreen: View {
                         VStack(spacing: 0) {
                             SettingsValueRow(icon: "brain.head.profile", label: "What Her knows", subtitle: "connect backend memory to populate", value: "empty")
                             DividerLine()
-                            SettingsValueRow(icon: "square.stack.3d.up", label: "Conversations", subtitle: "loaded from backend meetings", value: "sync")
-                            DividerLine()
-                            SettingsValueRow(icon: "clock", label: "Auto-delete after", value: "90 days")
-                            DividerLine()
                             SettingsActionRow(icon: "square.and.arrow.up", label: "Export everything", subtitle: "json + audio archive")
-                            DividerLine()
-                            SettingsActionRow(icon: "xmark", label: "Clear by topic", subtitle: "forget a person, place, or event", danger: true)
                         }
                     }
 
@@ -3135,6 +3706,13 @@ private struct ExactSettingsHerScreen: View {
         }
     }
 
+    private var billingSubtitle: String {
+        if subscriptionStore.state.plan == .free {
+            return "free · 60 min/mo · Ask AI locked"
+        }
+        return "plus · 600 min/mo · Ask AI"
+    }
+
     private var appVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
@@ -3149,7 +3727,190 @@ private struct ExactSettingsHerScreen: View {
     }
 
     private var wakeCommandSubtitle: String {
-        "Say \"Hey \(settings.aiDisplayName)\" or \"\(settings.aiDisplayName)\", then \"start recording\" or \"stop recording\"."
+        "Say \"Hey \(settings.aiDisplayName)\" or \"\(settings.aiDisplayName)\", then \"start recording\". Use the on-screen Stop button while recording."
+    }
+
+    private var currentUserDisplayName: String {
+        let savedOwnerName = settings.ownerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !savedOwnerName.isEmpty, savedOwnerName != "Owner" {
+            return savedOwnerName
+        }
+        if let name = authStore.session?.user.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        if let email = authStore.session?.user.email?.trimmingCharacters(in: .whitespacesAndNewlines), !email.isEmpty {
+            return email.components(separatedBy: "@").first ?? email
+        }
+        return settings.ownerDisplayName
+    }
+
+    private var selfVoiceProfile: VoiceProfile? {
+        voiceProfiles.first { isCurrentUserProfile($0) }
+    }
+
+    private var speakerVoiceProfiles: [VoiceProfile] {
+        voiceProfiles.filter { !isCurrentUserProfile($0) }
+    }
+
+    private var recognizedSpeakers: [RecognizedSpeakerProfile] {
+        var people = speakerVoiceProfiles.map { profile in
+            RecognizedSpeakerProfile(
+                id: "profile:\(profile.id)",
+                name: profile.name,
+                subtitle: voiceProfileSubtitle(for: profile),
+                badge: "voice",
+                voiceProfile: profile
+            )
+        }
+        var knownNames = Set(people.map { normalizedPersonName($0.name) })
+
+        for speaker in transcriptRecognizedSpeakers {
+            let normalized = normalizedPersonName(speaker.name)
+            guard !normalized.isEmpty, !knownNames.contains(normalized), !isCurrentUserName(speaker.name) else {
+                continue
+            }
+            people.append(speaker)
+            knownNames.insert(normalized)
+        }
+
+        return people
+    }
+
+    private var transcriptRecognizedSpeakers: [RecognizedSpeakerProfile] {
+        var statsByName: [String: TranscriptSpeakerStats] = [:]
+        var order: [String] = []
+
+        for meeting in meetingsStore.meetings {
+            let preferences = SpeakerNamePreferences.load(meetingId: meeting.id)
+            let speakerOrder = orderedSpeakerKeys(in: meeting)
+
+            for segment in meeting.segments {
+                let rawSpeaker = rawSpeakerKey(for: segment)
+                guard !rawSpeaker.isEmpty, rawSpeaker != "Speaker" else {
+                    continue
+                }
+                let displayName = displayName(
+                    forRawSpeaker: rawSpeaker,
+                    preferences: preferences,
+                    speakerOrder: speakerOrder
+                )
+                let normalized = normalizedPersonName(displayName)
+                guard !normalized.isEmpty, !isCurrentUserName(displayName) else {
+                    continue
+                }
+
+                let isNewSpeaker = statsByName[normalized] == nil
+                var stats = statsByName[normalized] ?? TranscriptSpeakerStats(name: displayName)
+                stats.segmentCount += 1
+                stats.meetingIds.insert(meeting.id)
+                statsByName[normalized] = stats
+                if isNewSpeaker {
+                    order.append(normalized)
+                }
+            }
+        }
+
+        return order.compactMap { key in
+            guard let stats = statsByName[key] else { return nil }
+            return RecognizedSpeakerProfile(
+                id: "transcript:\(key)",
+                name: stats.name,
+                subtitle: transcriptSpeakerSubtitle(stats),
+                badge: "speaker",
+                voiceProfile: nil
+            )
+        }
+    }
+
+    private var peopleHint: String {
+        voiceProfilesLoading ? "loading" : "\(1 + recognizedSpeakers.count) known"
+    }
+
+    private var peopleSummary: String {
+        let speakerCount = recognizedSpeakers.count
+        let suffix = speakerCount == 1 ? "1 recognized speaker" : "\(speakerCount) recognized speakers"
+        return "\(currentUserDisplayName) (you) · \(suffix)"
+    }
+
+    private func isCurrentUserProfile(_ profile: VoiceProfile) -> Bool {
+        let normalizedProfile = normalizedPersonName(profile.name)
+        guard !normalizedProfile.isEmpty else {
+            return false
+        }
+        return normalizedProfile == normalizedPersonName(currentUserDisplayName) || normalizedProfile == "yerasyl"
+    }
+
+    private func isCurrentUserName(_ name: String) -> Bool {
+        let normalized = normalizedPersonName(name)
+        guard !normalized.isEmpty else {
+            return false
+        }
+        return normalized == normalizedPersonName(currentUserDisplayName) || normalized == "yerasyl"
+    }
+
+    private func normalizedPersonName(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "(you)", with: "", options: .caseInsensitive)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+    }
+
+    private func voiceProfileSubtitle(for profile: VoiceProfile) -> String {
+        var parts: [String] = []
+        if let sampleCount = profile.sampleCount, sampleCount > 0 {
+            parts.append(sampleCount == 1 ? "1 sample" : "\(sampleCount) samples")
+        }
+        if let duration = profile.durationSeconds, duration.isFinite, duration > 0 {
+            parts.append(String(format: "%.0fs voice", duration))
+        }
+        return parts.isEmpty ? "recognized speaker" : parts.joined(separator: " · ")
+    }
+
+    private func transcriptSpeakerSubtitle(_ stats: TranscriptSpeakerStats) -> String {
+        let recordingText = stats.meetingIds.count == 1 ? "1 recording" : "\(stats.meetingIds.count) recordings"
+        let segmentText = stats.segmentCount == 1 ? "1 segment" : "\(stats.segmentCount) segments"
+        return "\(recordingText) · \(segmentText)"
+    }
+
+    private func rawSpeakerKey(for segment: MeetingTranscriptSegment) -> String {
+        let trimmed = segment.speaker?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Speaker" : trimmed
+    }
+
+    private func orderedSpeakerKeys(in meeting: StoredMeeting) -> [String] {
+        var keys: [String] = []
+        for segment in meeting.segments {
+            let key = rawSpeakerKey(for: segment)
+            guard !key.isEmpty, !keys.contains(key) else {
+                continue
+            }
+            keys.append(key)
+        }
+        return keys
+    }
+
+    private func displayName(
+        forRawSpeaker rawSpeaker: String,
+        preferences: [String: String],
+        speakerOrder: [String]
+    ) -> String {
+        if let renamed = preferences[rawSpeaker]?.trimmingCharacters(in: .whitespacesAndNewlines), !renamed.isEmpty {
+            return SpeakerDisplayNames.decorated(renamed, currentUserName: currentUserDisplayName)
+        }
+        if !rawSpeaker.localizedCaseInsensitiveContains("speaker") {
+            return SpeakerDisplayNames.decorated(rawSpeaker, currentUserName: currentUserDisplayName)
+        }
+        if let index = speakerOrder.firstIndex(of: rawSpeaker) {
+            return "Speaker \(index + 1)"
+        }
+        return rawSpeaker
+    }
+
+    @MainActor
+    private func refreshPeopleData() async {
+        await loadVoiceProfiles()
+        await meetingsStore.refresh()
     }
 
     @MainActor
@@ -3173,6 +3934,212 @@ private struct ExactSettingsHerScreen: View {
         } catch {
             // Stay quiet; could surface error if needed.
         }
+    }
+}
+
+private struct RecognizedSpeakerProfile: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let subtitle: String
+    let badge: String
+    let voiceProfile: VoiceProfile?
+}
+
+private struct TranscriptSpeakerStats {
+    let name: String
+    var segmentCount = 0
+    var meetingIds: Set<String> = []
+}
+
+private struct ExactSettingsPeopleScreen: View {
+    let currentUserName: String
+    let selfProfile: VoiceProfile?
+    let recognizedSpeakers: [RecognizedSpeakerProfile]
+    let isLoading: Bool
+    let recording: Bool
+    let onBack: () -> Void
+    let onRefresh: () -> Void
+    let onDelete: (RecognizedSpeakerProfile) -> Void
+    let onHome: () -> Void
+    let onRecord: () -> Void
+    let onConversations: () -> Void
+    let onMemory: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ExactBrandBar(status: "PEOPLE")
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 10) {
+                        Button(action: onBack) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(AppTheme.fg)
+                                .frame(width: 38, height: 38)
+                                .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+
+                        MonoLabel("settings")
+                        Spacer()
+                        Button(action: onRefresh) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(AppTheme.fg)
+                                .frame(width: 38, height: 38)
+                                .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+
+                    Text("People.")
+                        .font(.system(size: 28, weight: .medium, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.fg)
+                        .padding(.top, 14)
+
+                    SettingsSectionHeader(title: "you")
+                    WwCard(padding: 0) {
+                        PeopleProfileRow(
+                            icon: "person.crop.circle.fill",
+                            name: "\(currentUserName) (you)",
+                            subtitle: selfSubtitle,
+                            badge: "you",
+                            onDelete: nil
+                        )
+                    }
+
+                    SettingsSectionHeader(title: "recognized speakers", hint: speakersHint)
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            if isLoading {
+                                SettingsValueRow(
+                                    icon: "person.2",
+                                    label: "Loading people",
+                                    subtitle: "Fetching saved voices and transcript speakers",
+                                    value: "..."
+                                )
+                            } else if recognizedSpeakers.isEmpty {
+                                SettingsValueRow(
+                                    icon: "person.2",
+                                    label: "No other speakers yet",
+                                    subtitle: "Name a transcript speaker to save them here",
+                                    value: "empty"
+                                )
+                            } else {
+                                ForEach(Array(recognizedSpeakers.enumerated()), id: \.element.id) { index, profile in
+                                    PeopleProfileRow(
+                                        icon: "person.wave.2",
+                                        name: profile.name,
+                                        subtitle: profile.subtitle,
+                                        badge: profile.badge,
+                                        onDelete: deleteAction(for: profile)
+                                    )
+                                    if index < recognizedSpeakers.count - 1 {
+                                        DividerLine()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 4)
+                .padding(.bottom, 32)
+            }
+
+            ExactTabBar(
+                activeIndex: 3,
+                recording: recording,
+                onHome: onHome,
+                onRecord: onRecord,
+                onLog: onConversations,
+                onMemory: onMemory,
+                onHer: {}
+            )
+        }
+        .onAppear(perform: onRefresh)
+    }
+
+    private var selfSubtitle: String {
+        guard let selfProfile else {
+            return "Current account"
+        }
+        return subtitle(for: selfProfile)
+    }
+
+    private var speakersHint: String {
+        if isLoading {
+            return "loading"
+        }
+        return recognizedSpeakers.isEmpty ? "empty" : "\(recognizedSpeakers.count) known"
+    }
+
+    private func subtitle(for profile: VoiceProfile) -> String {
+        var parts: [String] = []
+        if let sampleCount = profile.sampleCount, sampleCount > 0 {
+            parts.append(sampleCount == 1 ? "1 sample" : "\(sampleCount) samples")
+        }
+        if let duration = profile.durationSeconds, duration.isFinite, duration > 0 {
+            parts.append(String(format: "%.0fs voice", duration))
+        }
+        return parts.isEmpty ? "recognized speaker" : parts.joined(separator: " · ")
+    }
+
+    private func deleteAction(for profile: RecognizedSpeakerProfile) -> (() -> Void)? {
+        guard profile.voiceProfile != nil else {
+            return nil
+        }
+        return { onDelete(profile) }
+    }
+}
+
+private struct PeopleProfileRow: View {
+    let icon: String
+    let name: String
+    let subtitle: String
+    let badge: String
+    let onDelete: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .regular))
+                .foregroundColor(AppTheme.fg)
+                .frame(width: 26)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name)
+                    .font(.system(size: 15.5, weight: .medium, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.76)
+                Text(subtitle)
+                    .font(.system(size: 12, weight: .regular, design: .serif))
+                    .italic()
+                    .foregroundColor(AppTheme.dim)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            if let onDelete {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundColor(AppTheme.danger)
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(PlainButtonStyle())
+            } else {
+                Text(badge)
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundColor(AppTheme.muted)
+                    .tracking(0.8)
+            }
+        }
+        .padding(16)
     }
 }
 
@@ -3208,8 +4175,199 @@ private struct VoiceProfileRow: View {
     }
 }
 
+private struct BillingSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var subscriptionStore: SubscriptionStore
+    @ObservedObject var meetingsStore: MeetingsStore
+    @State private var loaded = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    MonoLabel("billing")
+                    Text("Subscription.")
+                        .font(.system(size: 28, weight: .medium, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.fg)
+                }
+
+                Spacer()
+
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(AppTheme.fg)
+                        .frame(width: 36, height: 36)
+                        .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+
+            DividerLine()
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let error = subscriptionStore.errorMessage {
+                        ErrorBanner(message: error)
+                    }
+
+                    BillingPlanCard(
+                        title: "Free",
+                        subtitle: "60 min/mo",
+                        icon: "timer",
+                        isCurrent: subscriptionStore.state.plan == .free,
+                        features: [
+                            "60 recording minutes per month",
+                            "Meeting transcripts and summaries",
+                            "Ask AI locked"
+                        ]
+                    )
+
+                    BillingPlanCard(
+                        title: "Plus",
+                        subtitle: plusSubtitle,
+                        icon: "sparkles",
+                        isCurrent: subscriptionStore.state.plan != .free,
+                        emphasized: true,
+                        features: [
+                            "600 recording minutes per month",
+                            "Ask AI for every conversation",
+                            "App Store subscription billing"
+                        ]
+                    )
+
+                    VStack(spacing: 10) {
+                        WwPrimaryButton(subscriptionStore.purchaseButtonTitle, disabled: subscriptionStore.isPurchasing) {
+                            Task {
+                                await subscriptionStore.purchasePlus(meetings: meetingsStore.meetings)
+                            }
+                        }
+
+                        WwGhostButton(title: restoreTitle) {
+                            Task {
+                                await subscriptionStore.restorePurchases(meetings: meetingsStore.meetings)
+                            }
+                        }
+                        .disabled(subscriptionStore.isPurchasing)
+                        .opacity(subscriptionStore.isPurchasing ? 0.45 : 1)
+                    }
+                    .padding(.top, 2)
+
+                    Text("Current usage: \(subscriptionStore.state.recordingUsageText), \(subscriptionStore.state.recordingRemainingText).")
+                        .font(.system(size: 12.5, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.dim)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 2)
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 18)
+                .padding(.bottom, 32)
+            }
+        }
+        .background(AppTheme.bg.ignoresSafeArea())
+        .task {
+            guard !loaded else {
+                return
+            }
+            loaded = true
+            await subscriptionStore.refresh(meetings: meetingsStore.meetings)
+        }
+    }
+
+    private var plusSubtitle: String {
+        if let price = subscriptionStore.plusDisplayPrice {
+            return "\(price) · monthly"
+        }
+        return "600 min/mo · Ask AI"
+    }
+
+    private var restoreTitle: String {
+        subscriptionStore.isPurchasing ? "syncing purchase..." : "restore purchase"
+    }
+}
+
+private struct BillingPlanCard: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let isCurrent: Bool
+    var emphasized = false
+    let features: [String]
+
+    var body: some View {
+        WwCard(padding: 0, background: emphasized ? AppTheme.fg : AppTheme.bg) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: icon)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(foreground)
+                        .frame(width: 28)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(title)
+                                .font(.system(size: 20, weight: .medium, design: .serif))
+                                .foregroundColor(foreground)
+                            if isCurrent {
+                                Text("current")
+                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                    .foregroundColor(emphasized ? AppTheme.fg : AppTheme.bg)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Capsule().fill(emphasized ? AppTheme.bg : AppTheme.fg))
+                            }
+                        }
+
+                        Text(subtitle)
+                            .font(.system(size: 12.5, weight: .regular, design: .serif))
+                            .italic()
+                            .foregroundColor(secondaryForeground)
+                    }
+
+                    Spacer()
+                }
+                .padding(16)
+
+                DividerLine()
+                    .opacity(emphasized ? 0.18 : 1)
+
+                VStack(alignment: .leading, spacing: 9) {
+                    ForEach(features, id: \.self) { feature in
+                        HStack(alignment: .top, spacing: 9) {
+                            Image(systemName: feature.contains("locked") ? "lock" : "checkmark")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(foreground)
+                                .frame(width: 14)
+                                .padding(.top, 2)
+                            Text(feature)
+                                .font(.system(size: 13.5, weight: .regular, design: .serif))
+                                .foregroundColor(secondaryForeground)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(16)
+            }
+        }
+    }
+
+    private var foreground: Color {
+        emphasized ? AppTheme.bg : AppTheme.fg
+    }
+
+    private var secondaryForeground: Color {
+        emphasized ? AppTheme.bg.opacity(0.76) : AppTheme.dim
+    }
+}
+
 private struct SettingsProfileCard: View {
     @ObservedObject var settings: AppSettingsStore
+    let subscription: SubscriptionState
     @Binding var editingProfile: Bool
     @Binding var aiName: String
     @Binding var ownerName: String
@@ -3253,7 +4411,7 @@ private struct SettingsProfileCard: View {
                 DividerLine()
 
                 HStack(spacing: 12) {
-                    SettingsProfileMetric(label: "plan", value: "mvp")
+                    SettingsProfileMetric(label: "plan", value: subscription.plan.title)
                     SettingsProfileMetric(label: "storage", value: "local")
                     SettingsProfileMetric(label: "agent", value: settings.aiDisplayName.lowercased())
                 }
@@ -3269,15 +4427,15 @@ private struct SettingsProfileCard: View {
                                 .fill(AppTheme.bgDeep)
                             Capsule()
                                 .fill(AppTheme.fg)
-                                .frame(width: geometry.size.width * 0.24)
+                                .frame(width: geometry.size.width * subscription.usageRatio)
                         }
                     }
                     .frame(height: 4)
 
                     HStack {
-                        MonoLabel("local backend")
+                        MonoLabel(subscription.recordingLimitText)
                         Spacer()
-                        Text("active")
+                        Text(subscription.recordingRemainingText)
                             .font(.system(size: 11, weight: .regular, design: .serif))
                             .italic()
                             .foregroundColor(AppTheme.fg)
@@ -3327,7 +4485,6 @@ private struct SettingsProfileMetric: View {
 
 private struct SettingsGlassesCard: View {
     @ObservedObject var bridge: WearablesBridge
-    let onPair: () -> Void
 
     var body: some View {
         WwCard(padding: 0) {
@@ -3577,7 +4734,7 @@ private struct SettingsDangerFooter: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            Text("erases everything - conversations, memory, and local settings - in 30 days. you can cancel anytime.")
+            Text("erases everything — conversations, memory, glasses pairing — in 30 days. you can cancel anytime.")
                 .font(.system(size: 11.5, weight: .regular, design: .serif))
                 .italic()
                 .foregroundColor(AppTheme.dim)
@@ -4198,7 +5355,7 @@ private struct WarmRecentConversationCard: View {
         if !viewModel.transcript.isEmpty {
             return viewModel.transcript
         }
-        return "Start a meeting from the phone or selected iOS microphone. When it ends, the transcript and summary will appear here."
+        return "Start a meeting from the phone or connected glasses. When it ends, the transcript and summary will appear here."
     }
 }
 
@@ -4474,7 +5631,7 @@ private struct WearablesPanel: View {
 
     private var routeStatusTitle: String {
         guard let device = bridge.audioRoute.primaryDetectedDevice else {
-            return "not found"
+            return "iPhone mic"
         }
         if device.supportsInput && device.isActive {
             return "mic active"
@@ -7040,6 +8197,7 @@ private struct OnboardingView: View {
     private func requestLocationPermission() {
         locationPermission.request()
     }
+
 }
 
 private struct SetupFlowHeader: View {
@@ -7609,7 +8767,7 @@ private struct SetupAgentNamePage: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(AppTheme.muted)
                         .padding(.top, 2)
-                    Text("This name is the wake word. Say \"Hey \(displayName)\" or \"\(displayName)\", then \"start recording\" or \"stop recording\". Use at least four letters so it does not wake accidentally.")
+                    Text("This name is the wake word. Say \"Hey \(displayName)\" or \"\(displayName)\", then \"start recording\". Use the on-screen Stop button while recording so the recorder owns the microphone.")
                         .font(.system(size: 12.5, weight: .regular, design: .serif))
                         .foregroundColor(AppTheme.muted)
                         .lineSpacing(4)
@@ -8098,6 +9256,7 @@ private struct OnboardingGlassesCard: View {
                     bridge.connectDetectedAudioRoute()
                 }
             }
+
         }
     }
 }

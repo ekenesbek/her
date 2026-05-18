@@ -21,6 +21,20 @@ http://Yerasyls-MacBook-Pro.local:8787
 
 The default summary/chat model is `gpt-oss`. Set `ALEM_OSS_API_KEY` for the platform-managed Alem OSS provider, or set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_SUMMARY_MODEL` in `.env` to use another OpenAI-compatible provider.
 
+Subscription enforcement is backend-owned. The free plan allows 60 recording minutes per authenticated user per calendar month. The plus plan allows 600 recording minutes and enables the meeting Ask AI chat endpoints. Users default to free until the backend validates an active Apple StoreKit subscription transaction for `APPLE_SUBSCRIPTION_PRODUCT_ID`. The old `PATCH /v1/subscription` local entitlement switch is disabled unless `LOCAL_SUBSCRIPTION_OVERRIDES_ENABLED=true`.
+
+For StoreKit validation, install `app-store-server-library`, create the auto-renewable subscription product in App Store Connect, set the same product id in the iOS `PlusSubscriptionProductID`, and configure the backend with Apple root certificate files from the Apple PKI site:
+
+```text
+APPLE_SUBSCRIPTION_PRODUCT_ID=com.ekenesbek.her.plus.monthly
+APP_STORE_BUNDLE_ID=com.ekenesbek.her
+APP_STORE_ENVIRONMENT=sandbox
+APP_STORE_ROOT_CERTIFICATES_DIR=/etc/meta-ios-app-store-roots
+APP_STORE_APP_APPLE_ID=
+```
+
+`APP_STORE_APP_APPLE_ID` is required by Apple's verifier when `APP_STORE_ENVIRONMENT=production`.
+
 The transcription backend is selected with `TRANSCRIPTION_PROVIDER`:
 
 - `local`: run `faster-whisper` or WhisperX inside this FastAPI process. This remains the default and fallback.
@@ -30,6 +44,9 @@ The transcription backend is selected with `TRANSCRIPTION_PROVIDER`:
 ## Endpoints
 
 - `GET /health`
+- `GET /v1/subscription`
+- `POST /v1/subscription/apple-transaction` with JSON `{ "signedTransaction": "..." }` from StoreKit 2.
+- `PATCH /v1/subscription` with JSON `{ "plan": "free" | "plus" }` only when `LOCAL_SUBSCRIPTION_OVERRIDES_ENABLED=true`. The backend still accepts legacy `"paid"` as a plus alias for local testing.
 - `POST /v1/transcriptions` with multipart field `audio`
 - `POST /v1/summaries` with JSON `{ "transcript": "..." }`
 - `POST /v1/meetings/process` with multipart field `audio`
@@ -37,6 +54,8 @@ The transcription backend is selected with `TRANSCRIPTION_PROVIDER`:
 - `GET /v1/meetings/jobs/{job_id}`
 - `GET /v1/meetings`
 - `GET /v1/meetings/{id}`
+- `PATCH /v1/meetings/{id}` with JSON `{ "title": "..." }`
+- `DELETE /v1/meetings/{id}`
 - `GET /v1/meetings/{id}/audio`
 - `POST /v1/meetings/{id}/summary`
 - `GET /v1/meetings/{id}/chat`
@@ -48,6 +67,8 @@ The transcription backend is selected with `TRANSCRIPTION_PROVIDER`:
 The backend stores data in `DATA_DIR/meetings.sqlite3` with normalized tables:
 
 - `meetings`: transcript, title, overview, language, duration, source/device/location metadata, and the backend path to original meeting audio when available.
+- `user_subscriptions`: optional local override entitlement per authenticated user, disabled by default outside controlled testing.
+- `apple_subscription_transactions`: Apple-signed StoreKit subscription transactions used to derive active plus entitlement.
 - `meetings.outline_json`: chronological contents outline generated from timestamped transcript segments.
 - `meetings.segments_json`: timestamped transcript segments with optional speaker labels.
 - `meeting_chat_messages`: ordered per-meeting chat turns for the meeting Q&A thread.
@@ -71,4 +92,4 @@ OPENAI_SUMMARY_MODEL=gpt-oss
 
 For multilingual transcription, leave `WHISPER_LANGUAGE` empty. The backend keeps Whisper in `transcribe` mode, enables multilingual decoding for `faster-whisper`, and uses short overlapping chunks by default so English, Russian, Kazakh, and other spoken languages are preserved instead of forcing the whole recording into one detected language. `TRANSCRIPTION_CHUNKING_ENABLED=true` splits recordings into overlapping WAV chunks with `ffmpeg`, transcribes chunks in parallel with `TRANSCRIPTION_CHUNK_WORKERS`, then merges the transcript by timestamp. Tune `TRANSCRIPTION_CHUNK_SECONDS`, `TRANSCRIPTION_CHUNK_OVERLAP_SECONDS`, and `TRANSCRIPTION_CHUNK_MIN_DURATION_SECONDS` for the server. `WHISPER_CPU_THREADS` and `WHISPER_NUM_WORKERS` are passed to `faster-whisper`, while `WHISPERX_BATCH_SIZE` controls WhisperX batch size when diarization is enabled. When `DIARIZATION_ENABLED=true`, WhisperX uses full-file diarization context instead of external chunk-level diarization so speaker labels remain more stable across the recording. Use `DIARIZATION_MIN_SPEAKERS` / `DIARIZATION_MAX_SPEAKERS` only when you know the expected speaker count.
 
-Saved meetings include a contents outline and the original timestamped transcript segments. When the AI summary endpoint is unavailable, the backend still saves the transcript and names the meeting from the submitted location, adding numeric suffixes such as `Кошек батыр 14 1` for repeated recordings at the same place. `POST /v1/meetings/{id}/summary` can later generate the AI summary and retitle the saved meeting from the AI summary title.
+Saved meetings include a contents outline and the original timestamped transcript segments. When the AI summary endpoint is unavailable, the backend still saves the transcript and names the meeting from the submitted location, adding numeric suffixes such as `Кошек батыр 14 1` for repeated recordings at the same place. `PATCH /v1/meetings/{id}` lets the owning user rename a recording, `DELETE /v1/meetings/{id}` removes the recording and linked server audio, and `POST /v1/meetings/{id}/summary` can later generate the AI summary and retitle the saved meeting from the AI summary title.

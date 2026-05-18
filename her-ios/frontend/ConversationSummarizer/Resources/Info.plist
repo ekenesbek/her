@@ -2,24 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>$(EXECUTABLE_NAME)</string>
-    <key>CFBundleIdentifier</key>
-    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleDisplayName</key>
-    <string>Her</string>
-    <key>CFBundleName</key>
-    <string>$(PRODUCT_NAME)</string>
-    <key>CFBundlePackageType</key>
-    <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$(MARKETING_VERSION)</string>
-    <key>CFBundleURLTypes</key>
-    <array>
+	<key>BackendAPIURL</key>
+	<string>http://51.195.200.207:8787</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Her</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
 		<dict>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
@@ -41,54 +43,407 @@
 			</array>
 		</dict>
 	</array>
-    <key>GoogleClientID</key>
-    <string>974292390528-1ebrtf8fqjjuh6q0apkp478co6vqr8u0.apps.googleusercontent.com</string>
-    <key>CFBundleVersion</key>
-    <string>$(CURRENT_PROJECT_VERSION)</string>
-    <key>LSRequiresIPhoneOS</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Microphone access is needed to record meetings for transcription and summaries.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Speech recognition is needed to detect the assistant name and start or stop recordings by voice.</string>
-    <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Location is used to tag recordings, save meeting audio by place, and add optional city-level context to summaries.</string>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>Local network access is needed to reach the meeting backend running on your Mac during MVP testing.</string>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsArbitraryLoads</key>
-        <true/>
-        <key>NSAllowsArbitraryLoadsInWebContent</key>
-        <true/>
-        <key>NSAllowsArbitraryLoadsForMedia</key>
-        <true/>
-        <key>NSAllowsLocalNetworking</key>
-        <true/>
-        <key>NSExceptionDomains</key>
-        <dict>
-            <key>51.195.200.207</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-                <key>NSTemporaryExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-                <key>NSExceptionMinimumTLSVersion</key>
-                <string>TLSv1.2</string>
-                <key>NSIncludesSubdomains</key>
-                <true/>
-            </dict>
-        </dict>
-    </dict>
-    <key>BackendAPIURL</key>
-    <string>http://51.195.200.207:8787</string>
-    <key>SummaryAPIURL</key>
-    <string></string>
-    <key>UILaunchScreen</key>
-    <dict/>
-    <key>UIBackgroundModes</key>
-    <array>
-        <string>audio</string>
-    </array>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>GoogleClientID</key>
+	<string>974292390528-1ebrtf8fqjjuh6q0apkp478co6vqr8u0.apps.googleusercontent.com</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsForMedia</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>51.195.200.207</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.2</string>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSTemporaryExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Local network access is needed to reach the meeting backend running on your Mac during MVP testing.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Location is used to tag recordings, save meeting audio by place, and add optional city-level context to summaries.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Microphone access is needed to record meetings for transcription and summaries.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Speech recognition is needed to detect the assistant name and start or stop recordings by voice.</string>
+	<key>PlusSubscriptionPriceList</key>
+	<dict>
+		<key>AE</key>
+		<string>AED 69.99</string>
+		<key>AF</key>
+		<string>USD 17.99</string>
+		<key>AG</key>
+		<string>USD 17.99</string>
+		<key>AI</key>
+		<string>USD 17.99</string>
+		<key>AL</key>
+		<string>USD 19.99</string>
+		<key>AM</key>
+		<string>USD 19.99</string>
+		<key>AO</key>
+		<string>USD 17.99</string>
+		<key>AR</key>
+		<string>USD 17.99</string>
+		<key>AT</key>
+		<string>EUR 19.99</string>
+		<key>AU</key>
+		<string>AUD 29.99</string>
+		<key>AZ</key>
+		<string>USD 19.99</string>
+		<key>BA</key>
+		<string>EUR 19.99</string>
+		<key>BB</key>
+		<string>USD 19.99</string>
+		<key>BE</key>
+		<string>EUR 19.99</string>
+		<key>BF</key>
+		<string>USD 17.99</string>
+		<key>BG</key>
+		<string>EUR 19.99</string>
+		<key>BH</key>
+		<string>USD 19.99</string>
+		<key>BJ</key>
+		<string>USD 19.99</string>
+		<key>BM</key>
+		<string>USD 17.99</string>
+		<key>BN</key>
+		<string>USD 17.99</string>
+		<key>BO</key>
+		<string>USD 17.99</string>
+		<key>BR</key>
+		<string>BRL 119.9</string>
+		<key>BS</key>
+		<string>USD 19.99</string>
+		<key>BT</key>
+		<string>USD 17.99</string>
+		<key>BW</key>
+		<string>USD 17.99</string>
+		<key>BY</key>
+		<string>USD 19.99</string>
+		<key>BZ</key>
+		<string>USD 17.99</string>
+		<key>CA</key>
+		<string>CAD 24.99</string>
+		<key>CD</key>
+		<string>USD 17.99</string>
+		<key>CG</key>
+		<string>USD 17.99</string>
+		<key>CH</key>
+		<string>CHF 15</string>
+		<key>CI</key>
+		<string>USD 19.99</string>
+		<key>CL</key>
+		<string>CLP 19990</string>
+		<key>CM</key>
+		<string>USD 19.99</string>
+		<key>CN</key>
+		<string>CNY 128</string>
+		<key>CO</key>
+		<string>COP 79900</string>
+		<key>CR</key>
+		<string>USD 17.99</string>
+		<key>CV</key>
+		<string>USD 17.99</string>
+		<key>CY</key>
+		<string>EUR 19.99</string>
+		<key>CZ</key>
+		<string>CZK 499</string>
+		<key>DE</key>
+		<string>EUR 19.99</string>
+		<key>DK</key>
+		<string>DKK 149</string>
+		<key>DM</key>
+		<string>USD 17.99</string>
+		<key>DO</key>
+		<string>USD 17.99</string>
+		<key>DZ</key>
+		<string>USD 17.99</string>
+		<key>EC</key>
+		<string>USD 17.99</string>
+		<key>EE</key>
+		<string>EUR 19.99</string>
+		<key>EG</key>
+		<string>EGP 999.99</string>
+		<key>ES</key>
+		<string>EUR 19.99</string>
+		<key>FI</key>
+		<string>EUR 19.99</string>
+		<key>FJ</key>
+		<string>USD 17.99</string>
+		<key>FM</key>
+		<string>USD 17.99</string>
+		<key>FR</key>
+		<string>EUR 19.99</string>
+		<key>GA</key>
+		<string>USD 17.99</string>
+		<key>GB</key>
+		<string>GBP 17.99</string>
+		<key>GD</key>
+		<string>USD 17.99</string>
+		<key>GE</key>
+		<string>USD 19.99</string>
+		<key>GH</key>
+		<string>USD 19.99</string>
+		<key>GM</key>
+		<string>USD 17.99</string>
+		<key>GR</key>
+		<string>EUR 19.99</string>
+		<key>GT</key>
+		<string>USD 17.99</string>
+		<key>GW</key>
+		<string>USD 17.99</string>
+		<key>GY</key>
+		<string>USD 17.99</string>
+		<key>HK</key>
+		<string>HKD 148</string>
+		<key>HN</key>
+		<string>USD 17.99</string>
+		<key>HR</key>
+		<string>EUR 19.99</string>
+		<key>HU</key>
+		<string>HUF 7990</string>
+		<key>ID</key>
+		<string>IDR 299000</string>
+		<key>IE</key>
+		<string>EUR 19.99</string>
+		<key>IL</key>
+		<string>ILS 59.9</string>
+		<key>IN</key>
+		<string>INR 1999</string>
+		<key>IQ</key>
+		<string>USD 17.99</string>
+		<key>IS</key>
+		<string>USD 19.99</string>
+		<key>IT</key>
+		<string>EUR 19.99</string>
+		<key>JM</key>
+		<string>USD 17.99</string>
+		<key>JO</key>
+		<string>USD 17.99</string>
+		<key>JP</key>
+		<string>JPY 3000</string>
+		<key>KE</key>
+		<string>USD 19.99</string>
+		<key>KG</key>
+		<string>USD 19.99</string>
+		<key>KH</key>
+		<string>USD 19.99</string>
+		<key>KN</key>
+		<string>USD 17.99</string>
+		<key>KR</key>
+		<string>KRW 25000</string>
+		<key>KW</key>
+		<string>USD 17.99</string>
+		<key>KY</key>
+		<string>USD 17.99</string>
+		<key>KZ</key>
+		<string>KZT 9990</string>
+		<key>LA</key>
+		<string>USD 19.99</string>
+		<key>LB</key>
+		<string>USD 17.99</string>
+		<key>LC</key>
+		<string>USD 17.99</string>
+		<key>LK</key>
+		<string>USD 17.99</string>
+		<key>LR</key>
+		<string>USD 17.99</string>
+		<key>LT</key>
+		<string>EUR 19.99</string>
+		<key>LU</key>
+		<string>EUR 19.99</string>
+		<key>LV</key>
+		<string>EUR 19.99</string>
+		<key>LY</key>
+		<string>USD 17.99</string>
+		<key>MA</key>
+		<string>USD 17.99</string>
+		<key>MD</key>
+		<string>USD 19.99</string>
+		<key>ME</key>
+		<string>EUR 17.99</string>
+		<key>MG</key>
+		<string>USD 17.99</string>
+		<key>MK</key>
+		<string>USD 17.99</string>
+		<key>ML</key>
+		<string>USD 17.99</string>
+		<key>MM</key>
+		<string>USD 17.99</string>
+		<key>MN</key>
+		<string>USD 17.99</string>
+		<key>MO</key>
+		<string>USD 17.99</string>
+		<key>MR</key>
+		<string>USD 17.99</string>
+		<key>MS</key>
+		<string>USD 17.99</string>
+		<key>MT</key>
+		<string>EUR 19.99</string>
+		<key>MU</key>
+		<string>USD 19.99</string>
+		<key>MV</key>
+		<string>USD 17.99</string>
+		<key>MW</key>
+		<string>USD 17.99</string>
+		<key>MX</key>
+		<string>MXN 399</string>
+		<key>MY</key>
+		<string>MYR 79.9</string>
+		<key>MZ</key>
+		<string>USD 17.99</string>
+		<key>NA</key>
+		<string>USD 17.99</string>
+		<key>NE</key>
+		<string>USD 17.99</string>
+		<key>NG</key>
+		<string>NGN 29900</string>
+		<key>NI</key>
+		<string>USD 17.99</string>
+		<key>NL</key>
+		<string>EUR 19.99</string>
+		<key>NO</key>
+		<string>NOK 229</string>
+		<key>NP</key>
+		<string>USD 19.99</string>
+		<key>NR</key>
+		<string>USD 17.99</string>
+		<key>NZ</key>
+		<string>NZD 29.99</string>
+		<key>OM</key>
+		<string>USD 17.99</string>
+		<key>PA</key>
+		<string>USD 17.99</string>
+		<key>PE</key>
+		<string>PEN 79.9</string>
+		<key>PG</key>
+		<string>USD 17.99</string>
+		<key>PH</key>
+		<string>PHP 999</string>
+		<key>PK</key>
+		<string>PKR 4900</string>
+		<key>PL</key>
+		<string>PLN 79.99</string>
+		<key>PT</key>
+		<string>EUR 19.99</string>
+		<key>PW</key>
+		<string>USD 17.99</string>
+		<key>PY</key>
+		<string>USD 17.99</string>
+		<key>QA</key>
+		<string>QAR 69.99</string>
+		<key>RO</key>
+		<string>RON 99.99</string>
+		<key>RS</key>
+		<string>EUR 19.99</string>
+		<key>RU</key>
+		<string>RUB 1490</string>
+		<key>RW</key>
+		<string>USD 17.99</string>
+		<key>SA</key>
+		<string>SAR 79.99</string>
+		<key>SB</key>
+		<string>USD 17.99</string>
+		<key>SC</key>
+		<string>USD 17.99</string>
+		<key>SE</key>
+		<string>SEK 229</string>
+		<key>SG</key>
+		<string>SGD 24.98</string>
+		<key>SI</key>
+		<string>EUR 19.99</string>
+		<key>SK</key>
+		<string>EUR 19.99</string>
+		<key>SL</key>
+		<string>USD 17.99</string>
+		<key>SN</key>
+		<string>USD 19.99</string>
+		<key>SR</key>
+		<string>USD 19.99</string>
+		<key>ST</key>
+		<string>USD 17.99</string>
+		<key>SV</key>
+		<string>USD 17.99</string>
+		<key>SZ</key>
+		<string>USD 17.99</string>
+		<key>TC</key>
+		<string>USD 17.99</string>
+		<key>TD</key>
+		<string>USD 17.99</string>
+		<key>TH</key>
+		<string>THB 699</string>
+		<key>TJ</key>
+		<string>USD 19.99</string>
+		<key>TM</key>
+		<string>USD 17.99</string>
+		<key>TN</key>
+		<string>USD 17.99</string>
+		<key>TO</key>
+		<string>USD 17.99</string>
+		<key>TR</key>
+		<string>TRY 999.99</string>
+		<key>TT</key>
+		<string>USD 17.99</string>
+		<key>TW</key>
+		<string>TWD 590</string>
+		<key>TZ</key>
+		<string>TZS 49900</string>
+		<key>UA</key>
+		<string>USD 19.99</string>
+		<key>UG</key>
+		<string>USD 19.99</string>
+		<key>US</key>
+		<string>USD 17.99</string>
+		<key>UY</key>
+		<string>USD 17.99</string>
+		<key>UZ</key>
+		<string>USD 19.99</string>
+		<key>VC</key>
+		<string>USD 17.99</string>
+		<key>VE</key>
+		<string>USD 17.99</string>
+		<key>VG</key>
+		<string>USD 17.99</string>
+		<key>VN</key>
+		<string>VND 499000</string>
+		<key>VU</key>
+		<string>USD 17.99</string>
+		<key>XK</key>
+		<string>EUR 19.99</string>
+		<key>YE</key>
+		<string>USD 17.99</string>
+		<key>ZA</key>
+		<string>ZAR 399.99</string>
+		<key>ZM</key>
+		<string>USD 19.99</string>
+		<key>ZW</key>
+		<string>USD 19.99</string>
+	</dict>
+	<key>PlusSubscriptionProductID</key>
+	<string>com.ekenesbek.her.plus.monthly</string>
+	<key>SummaryAPIURL</key>
+	<string></string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
 </dict>
 </plist>

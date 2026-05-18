@@ -58,6 +58,28 @@ class SpeakerAssignmentResponse(BaseModel):
     sampleDurationSeconds: float | None = None
 
 
+SubscriptionPlan = Literal["free", "plus", "paid"]
+
+
+class SubscriptionResponse(BaseModel):
+    plan: SubscriptionPlan
+    recordingLimitSeconds: int
+    recordingUsedSeconds: int
+    recordingRemainingSeconds: int
+    askAiEnabled: bool
+    periodStartedAt: datetime
+    periodEndsAt: datetime
+    source: Literal["free", "apple", "manual"] = "free"
+
+
+class SubscriptionPlanUpdateRequest(BaseModel):
+    plan: SubscriptionPlan
+
+
+class AppleSubscriptionTransactionRequest(BaseModel):
+    signedTransaction: str = Field(min_length=1)
+
+
 SummaryStatus = Literal["generated", "unavailable"]
 SummaryMode = Literal[
     "reasoning",
@@ -127,6 +149,10 @@ class MeetingTranscriptUpdateRequest(BaseModel):
     segments: list[TranscriptSegment] = Field(default_factory=list)
 
 
+class MeetingTitleUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+
+
 class SummaryModeRequest(BaseModel):
     summaryMode: SummaryMode = "reasoning"
 
@@ -140,6 +166,15 @@ class MeetingChatRequest(BaseModel):
 
 
 MeetingChatRole = Literal["user", "assistant"]
+MeetingChatRunStatus = Literal["running", "completed", "failed"]
+
+
+class MeetingChatThreadResponse(BaseModel):
+    id: str
+    meetingId: str
+    title: str
+    createdAt: datetime
+    updatedAt: datetime
 
 
 class MeetingChatMessageResponse(BaseModel):
@@ -147,15 +182,36 @@ class MeetingChatMessageResponse(BaseModel):
     role: MeetingChatRole
     content: str
     createdAt: datetime
+    threadId: str | None = None
+    runId: str | None = None
+
+
+class MeetingChatRunResponse(BaseModel):
+    id: str
+    threadId: str
+    status: MeetingChatRunStatus
+    model: str
+    source: str
+    promptMessageCount: int
+    promptCharacterCount: int
+    responseMessageId: str | None = None
+    error: str | None = None
+    createdAt: datetime
+    completedAt: datetime | None = None
 
 
 class MeetingChatListResponse(BaseModel):
     messages: list[MeetingChatMessageResponse]
+    thread: MeetingChatThreadResponse | None = None
 
 
 class MeetingChatResponse(BaseModel):
     answer: str
     generatedAt: datetime
+    threadId: str | None = None
+    runId: str | None = None
+    messageId: str | None = None
+    model: str | None = None
 
 
 MeetingJobStatus = Literal["queued", "processing", "completed", "failed"]

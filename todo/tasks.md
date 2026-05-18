@@ -27,6 +27,9 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-13 | review | P1 | ios | current worktree | Persist speaker identities from meetings | `todo/ios.md` |
 | IOS-14 | review | P1 | ios | current worktree | Connect Sign in with Apple entitlement | `todo/ios.md` |
 | IOS-15 | review | P1 | ios | current worktree | Make recording jobs transcript-first and add People settings | `todo/ios.md` |
+| IOS-16 | review | P1 | ios | current worktree | Add subscription limits and Ask AI entitlement | `todo/ios.md` |
+| IOS-17 | review | P1 | ios | current worktree | Add StoreKit Plus subscription purchase flow | `todo/ios.md` |
+| IOS-18 | review | P1 | ios | current worktree | Clean settings and add recording management actions | `todo/ios.md` |
 | IOS-19 | review | P1 | ios | current worktree | Remove DAT pairing from iOS audio route UX | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow

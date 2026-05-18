@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
@@ -9,6 +10,8 @@ from uuid import uuid4
 
 from app.schemas import (
     MeetingChatMessageResponse,
+    MeetingChatRunResponse,
+    MeetingChatThreadResponse,
     MeetingJobResponse,
     MeetingOutlineItem,
     MeetingResponse,
@@ -20,6 +23,20 @@ from app.schemas import (
 
 SUMMARY_ITEM_KINDS = ("decision", "action", "follow_up")
 MEETING_JOB_ACTIVE_STATUSES = ("queued", "processing")
+MEETING_CHAT_RUN_STATUSES = ("running", "completed", "failed")
+
+
+@dataclass(frozen=True)
+class AppleSubscriptionRecord:
+    transaction_id: str
+    original_transaction_id: str | None
+    product_id: str
+    environment: str | None
+    purchase_date: datetime | None
+    expires_date: datetime | None
+    revocation_date: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class MeetingStore:
@@ -161,6 +178,41 @@ class MeetingStore:
         self.save(updated, user_id=user_id)
         return self.get(meeting_id, user_id=user_id)
 
+    def update_meeting_title(
+        self,
+        meeting_id: str,
+        user_id: str,
+        title: str,
+    ) -> MeetingResponse | None:
+        meeting = self.get(meeting_id, user_id=user_id)
+        if meeting is None:
+            return None
+        updated = meeting.model_copy(update={"title": title})
+        self.save(updated, user_id=user_id)
+        return self.get(meeting_id, user_id=user_id)
+
+    def delete_meeting(
+        self,
+        meeting_id: str,
+        user_id: str,
+    ) -> tuple[bool, Path | None]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT audio_path FROM meetings
+                WHERE id = ? AND user_id = ?
+                """,
+                (meeting_id, user_id),
+            ).fetchone()
+            if row is None:
+                return False, None
+            audio_path = Path(row["audio_path"]) if row["audio_path"] else None
+            cursor = connection.execute(
+                "DELETE FROM meetings WHERE id = ? AND user_id = ?",
+                (meeting_id, user_id),
+            )
+            return cursor.rowcount > 0, audio_path
+
     def list_chat_messages(
         self,
         meeting_id: str,
@@ -170,16 +222,30 @@ class MeetingStore:
         with self._connect() as connection:
             if not self._meeting_exists_for_user(connection, meeting_id, user_id):
                 return []
+            thread = self._get_or_create_chat_thread(connection, meeting_id)
+            self._attach_legacy_chat_messages_to_thread(connection, meeting_id, thread.id)
             rows = connection.execute(
                 """
                 SELECT * FROM meeting_chat_messages
-                WHERE meeting_id = ?
+                WHERE meeting_id = ? AND thread_id = ?
                 ORDER BY created_at ASC, id ASC
                 LIMIT ?
                 """,
-                (meeting_id, limit),
+                (meeting_id, thread.id, limit),
             ).fetchall()
             return [self._chat_message_from_row(row) for row in rows]
+
+    def get_or_create_chat_thread(
+        self,
+        meeting_id: str,
+        user_id: str,
+    ) -> MeetingChatThreadResponse | None:
+        with self._connect() as connection:
+            if not self._meeting_exists_for_user(connection, meeting_id, user_id):
+                return None
+            thread = self._get_or_create_chat_thread(connection, meeting_id)
+            self._attach_legacy_chat_messages_to_thread(connection, meeting_id, thread.id)
+            return thread
 
     def append_chat_message(
         self,
@@ -187,6 +253,7 @@ class MeetingStore:
         user_id: str,
         role: str,
         content: str,
+        run_id: str | None = None,
     ) -> MeetingChatMessageResponse:
         if role not in {"user", "assistant"}:
             raise ValueError("Invalid chat message role.")
@@ -195,18 +262,107 @@ class MeetingStore:
         with self._connect() as connection:
             if not self._meeting_exists_for_user(connection, meeting_id, user_id):
                 raise ValueError("Meeting not found.")
+            thread = self._get_or_create_chat_thread(connection, meeting_id)
+            self._attach_legacy_chat_messages_to_thread(connection, meeting_id, thread.id)
             connection.execute(
                 """
-                INSERT INTO meeting_chat_messages (id, meeting_id, role, content, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO meeting_chat_messages (
+                    id, meeting_id, thread_id, run_id, role, content, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (message_id, meeting_id, role, content, now),
+                (message_id, meeting_id, thread.id, run_id, role, content, now),
+            )
+            connection.execute(
+                "UPDATE meeting_chat_threads SET updated_at = ? WHERE id = ?",
+                (now, thread.id),
             )
             row = connection.execute(
                 "SELECT * FROM meeting_chat_messages WHERE id = ?",
                 (message_id,),
             ).fetchone()
             return self._chat_message_from_row(row)
+
+    def create_chat_run(
+        self,
+        meeting_id: str,
+        user_id: str,
+        model: str,
+        source: str,
+        prompt_message_count: int,
+        prompt_character_count: int,
+    ) -> MeetingChatRunResponse:
+        run_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            if not self._meeting_exists_for_user(connection, meeting_id, user_id):
+                raise ValueError("Meeting not found.")
+            thread = self._get_or_create_chat_thread(connection, meeting_id)
+            self._attach_legacy_chat_messages_to_thread(connection, meeting_id, thread.id)
+            connection.execute(
+                """
+                INSERT INTO meeting_chat_runs (
+                    id, meeting_id, thread_id, status, model, source,
+                    prompt_message_count, prompt_character_count, created_at
+                )
+                VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    meeting_id,
+                    thread.id,
+                    model,
+                    source,
+                    prompt_message_count,
+                    prompt_character_count,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM meeting_chat_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            return self._chat_run_from_row(row)
+
+    def complete_chat_run(
+        self,
+        run_id: str,
+        response_message_id: str | None = None,
+    ) -> None:
+        self._finish_chat_run(
+            run_id,
+            status="completed",
+            response_message_id=response_message_id,
+            error=None,
+        )
+
+    def fail_chat_run(self, run_id: str, error: str) -> None:
+        self._finish_chat_run(
+            run_id,
+            status="failed",
+            response_message_id=None,
+            error=error,
+        )
+
+    def _finish_chat_run(
+        self,
+        run_id: str,
+        status: str,
+        response_message_id: str | None,
+        error: str | None,
+    ) -> None:
+        if status not in MEETING_CHAT_RUN_STATUSES:
+            raise ValueError("Invalid chat run status.")
+        completed_at = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE meeting_chat_runs
+                SET status = ?, response_message_id = ?, error = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (status, response_message_id, error, completed_at, run_id),
+            )
 
     def create_meeting_job(
         self,
@@ -272,7 +428,8 @@ class MeetingStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, user_id, audio_path, source, device_name, location_name, summary_mode, generate_summary, status
+                SELECT id, user_id, audio_path, source, device_name, location_name,
+                       summary_mode, generate_summary, status, meeting_id
                 FROM meeting_jobs
                 WHERE id = ?
                 """,
@@ -306,7 +463,7 @@ class MeetingStore:
             connection.execute(
                 """
                 UPDATE meeting_jobs
-                SET status = ?, meeting_id = ?, error = ?, updated_at = ?
+                SET status = ?, meeting_id = COALESCE(?, meeting_id), error = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (status, meeting_id, error, now, job_id),
@@ -372,6 +529,172 @@ class MeetingStore:
             ).fetchone()
             return self._user_from_row(row) if row else None
 
+    def get_user_subscription_plan(self, user_id: str) -> str:
+        with self._connect() as connection:
+            active_apple = self._active_apple_subscription_with_connection(
+                connection,
+                user_id,
+                datetime.now(UTC),
+            )
+            if active_apple is not None:
+                return "plus"
+            row = connection.execute(
+                "SELECT plan FROM user_subscriptions WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            plan = row["plan"] if row else "free"
+            return "plus" if plan == "paid" else plan
+
+    def get_user_subscription_source(self, user_id: str) -> str:
+        with self._connect() as connection:
+            active_apple = self._active_apple_subscription_with_connection(
+                connection,
+                user_id,
+                datetime.now(UTC),
+            )
+            if active_apple is not None:
+                return "apple"
+            row = connection.execute(
+                "SELECT plan FROM user_subscriptions WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is not None and row["plan"] == "paid":
+                return "manual"
+            return "free"
+
+    def set_user_subscription_plan(self, user_id: str, plan: str) -> str:
+        if plan not in {"free", "plus", "paid"}:
+            raise ValueError("Invalid subscription plan.")
+        stored_plan = "paid" if plan in {"plus", "paid"} else "free"
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_subscriptions (user_id, plan, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    plan = excluded.plan,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, stored_plan, now, now),
+            )
+        return "plus" if stored_plan == "paid" else "free"
+
+    def save_apple_subscription_transaction(
+        self,
+        *,
+        user_id: str,
+        transaction_id: str,
+        original_transaction_id: str | None,
+        product_id: str,
+        environment: str | None,
+        purchase_date: datetime | None,
+        expires_date: datetime | None,
+        revocation_date: datetime | None,
+        signed_transaction: str,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO apple_subscription_transactions (
+                    user_id,
+                    transaction_id,
+                    original_transaction_id,
+                    product_id,
+                    environment,
+                    purchase_date,
+                    expires_date,
+                    revocation_date,
+                    signed_transaction,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(transaction_id) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    original_transaction_id = excluded.original_transaction_id,
+                    product_id = excluded.product_id,
+                    environment = excluded.environment,
+                    purchase_date = excluded.purchase_date,
+                    expires_date = excluded.expires_date,
+                    revocation_date = excluded.revocation_date,
+                    signed_transaction = excluded.signed_transaction,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    transaction_id,
+                    original_transaction_id,
+                    product_id,
+                    environment,
+                    purchase_date.isoformat() if purchase_date else None,
+                    expires_date.isoformat() if expires_date else None,
+                    revocation_date.isoformat() if revocation_date else None,
+                    signed_transaction,
+                    now,
+                    now,
+                ),
+            )
+
+    def active_apple_subscription(
+        self,
+        user_id: str,
+        now: datetime | None = None,
+    ) -> AppleSubscriptionRecord | None:
+        with self._connect() as connection:
+            return self._active_apple_subscription_with_connection(
+                connection,
+                user_id,
+                now or datetime.now(UTC),
+            )
+
+    def recording_usage_seconds(
+        self,
+        user_id: str,
+        period_start: datetime,
+        period_end: datetime,
+    ) -> float:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN duration_seconds IS NOT NULL AND duration_seconds > 0
+                        THEN duration_seconds
+                        ELSE 0
+                    END
+                ), 0) AS used_seconds
+                FROM meetings
+                WHERE user_id = ?
+                  AND created_at >= ?
+                  AND created_at < ?
+                """,
+                (user_id, period_start.isoformat(), period_end.isoformat()),
+            ).fetchone()
+            return float(row["used_seconds"] or 0)
+
+    def _active_apple_subscription_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        user_id: str,
+        now: datetime,
+    ) -> AppleSubscriptionRecord | None:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM apple_subscription_transactions
+            WHERE user_id = ?
+              AND revocation_date IS NULL
+              AND expires_date IS NOT NULL
+              AND expires_date > ?
+            ORDER BY expires_date DESC, updated_at DESC
+            LIMIT 1
+            """,
+            (user_id, now.isoformat()),
+        ).fetchone()
+        return self._apple_subscription_from_row(row) if row else None
+
     def _user_from_row(self, row: sqlite3.Row) -> UserResponse:
         return UserResponse(
             id=row["id"],
@@ -380,6 +703,28 @@ class MeetingStore:
             name=row["name"],
             createdAt=row["created_at"],
         )
+
+    def _apple_subscription_from_row(self, row: sqlite3.Row) -> AppleSubscriptionRecord:
+        return AppleSubscriptionRecord(
+            transaction_id=row["transaction_id"],
+            original_transaction_id=row["original_transaction_id"],
+            product_id=row["product_id"],
+            environment=row["environment"],
+            purchase_date=self._parse_optional_datetime(row["purchase_date"]),
+            expires_date=self._parse_optional_datetime(row["expires_date"]),
+            revocation_date=self._parse_optional_datetime(row["revocation_date"]),
+            created_at=self._parse_datetime(row["created_at"]),
+            updated_at=self._parse_datetime(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _parse_datetime(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+    @classmethod
+    def _parse_optional_datetime(cls, value: str | None) -> datetime | None:
+        return cls._parse_datetime(value) if value else None
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -396,6 +741,8 @@ class MeetingStore:
                 self._create_tables(connection)
 
             self._ensure_users_table(connection)
+            self._ensure_user_subscriptions_table(connection)
+            self._ensure_apple_subscription_transactions_table(connection)
             self._ensure_meetings_user_id_column(connection)
             self._ensure_meeting_content_columns(connection)
             self._ensure_meeting_summary_status_column(connection)
@@ -404,6 +751,8 @@ class MeetingStore:
             self._ensure_voice_profiles_table(connection)
             self._ensure_voice_profile_samples_table(connection)
             self._ensure_meeting_jobs_table(connection)
+            self._ensure_meeting_chat_threads_table(connection)
+            self._ensure_meeting_chat_runs_table(connection)
             self._ensure_meeting_chat_messages_table(connection)
 
     def _ensure_users_table(self, connection: sqlite3.Connection) -> None:
@@ -418,6 +767,45 @@ class MeetingStore:
                 created_at TEXT NOT NULL,
                 UNIQUE(provider, provider_user_id)
             )
+            """
+        )
+
+    def _ensure_user_subscriptions_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_subscriptions (
+                user_id TEXT PRIMARY KEY,
+                plan TEXT NOT NULL DEFAULT 'free' CHECK (plan IN ('free', 'paid')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _ensure_apple_subscription_transactions_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS apple_subscription_transactions (
+                transaction_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                original_transaction_id TEXT,
+                product_id TEXT NOT NULL,
+                environment TEXT,
+                purchase_date TEXT,
+                expires_date TEXT,
+                revocation_date TEXT,
+                signed_transaction TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_apple_subscription_transactions_user_active
+            ON apple_subscription_transactions (user_id, product_id, expires_date, revocation_date)
             """
         )
 
@@ -551,23 +939,92 @@ class MeetingStore:
                 "ALTER TABLE meeting_jobs ADD COLUMN generate_summary INTEGER NOT NULL DEFAULT 1"
             )
 
-    def _ensure_meeting_chat_messages_table(self, connection: sqlite3.Connection) -> None:
+    def _ensure_meeting_chat_threads_table(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS meeting_chat_messages (
+            CREATE TABLE IF NOT EXISTS meeting_chat_threads (
                 id TEXT PRIMARY KEY,
                 meeting_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-                content TEXT NOT NULL,
+                title TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
                 FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
             )
             """
         )
         connection.execute(
             """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_chat_threads_meeting
+            ON meeting_chat_threads (meeting_id)
+            """
+        )
+
+    def _ensure_meeting_chat_runs_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meeting_chat_runs (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+                model TEXT NOT NULL,
+                source TEXT NOT NULL,
+                prompt_message_count INTEGER NOT NULL DEFAULT 0,
+                prompt_character_count INTEGER NOT NULL DEFAULT 0,
+                response_message_id TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+                FOREIGN KEY (thread_id) REFERENCES meeting_chat_threads(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_meeting_chat_runs_thread_created
+            ON meeting_chat_runs (thread_id, created_at ASC)
+            """
+        )
+
+    def _ensure_meeting_chat_messages_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meeting_chat_messages (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                thread_id TEXT,
+                run_id TEXT,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+                FOREIGN KEY (thread_id) REFERENCES meeting_chat_threads(id) ON DELETE CASCADE,
+                FOREIGN KEY (run_id) REFERENCES meeting_chat_runs(id) ON DELETE SET NULL
+            )
+            """
+        )
+        columns = self._table_columns(connection, "meeting_chat_messages")
+        if "thread_id" not in columns:
+            connection.execute("ALTER TABLE meeting_chat_messages ADD COLUMN thread_id TEXT")
+        if "run_id" not in columns:
+            connection.execute("ALTER TABLE meeting_chat_messages ADD COLUMN run_id TEXT")
+        connection.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_meeting_chat_messages_meeting_created
             ON meeting_chat_messages (meeting_id, created_at ASC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_meeting_chat_messages_thread_created
+            ON meeting_chat_messages (thread_id, created_at ASC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_meeting_chat_messages_run
+            ON meeting_chat_messages (run_id)
             """
         )
 
@@ -1055,10 +1512,83 @@ class MeetingStore:
         ).fetchone()
         return row is not None
 
+    def _get_or_create_chat_thread(
+        self,
+        connection: sqlite3.Connection,
+        meeting_id: str,
+    ) -> MeetingChatThreadResponse:
+        row = connection.execute(
+            """
+            SELECT * FROM meeting_chat_threads
+            WHERE meeting_id = ?
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (meeting_id,),
+        ).fetchone()
+        if row is not None:
+            return self._chat_thread_from_row(row)
+
+        thread_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        connection.execute(
+            """
+            INSERT INTO meeting_chat_threads (id, meeting_id, title, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (thread_id, meeting_id, "Recording chat", now, now),
+        )
+        row = connection.execute(
+            "SELECT * FROM meeting_chat_threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+        return self._chat_thread_from_row(row)
+
+    def _attach_legacy_chat_messages_to_thread(
+        self,
+        connection: sqlite3.Connection,
+        meeting_id: str,
+        thread_id: str,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE meeting_chat_messages
+            SET thread_id = ?
+            WHERE meeting_id = ? AND thread_id IS NULL
+            """,
+            (thread_id, meeting_id),
+        )
+
+    def _chat_thread_from_row(self, row: sqlite3.Row) -> MeetingChatThreadResponse:
+        return MeetingChatThreadResponse(
+            id=row["id"],
+            meetingId=row["meeting_id"],
+            title=row["title"],
+            createdAt=row["created_at"],
+            updatedAt=row["updated_at"],
+        )
+
+    def _chat_run_from_row(self, row: sqlite3.Row) -> MeetingChatRunResponse:
+        return MeetingChatRunResponse(
+            id=row["id"],
+            threadId=row["thread_id"],
+            status=row["status"],
+            model=row["model"],
+            source=row["source"],
+            promptMessageCount=row["prompt_message_count"],
+            promptCharacterCount=row["prompt_character_count"],
+            responseMessageId=row["response_message_id"],
+            error=row["error"],
+            createdAt=row["created_at"],
+            completedAt=row["completed_at"],
+        )
+
     def _chat_message_from_row(self, row: sqlite3.Row) -> MeetingChatMessageResponse:
         return MeetingChatMessageResponse(
             id=row["id"],
             role=row["role"],
             content=row["content"],
             createdAt=row["created_at"],
+            threadId=row["thread_id"],
+            runId=row["run_id"],
         )

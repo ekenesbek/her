@@ -25,6 +25,7 @@
 		00000000000000000000B705 /* GoogleSignInService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F705 /* GoogleSignInService.swift */; };
 		00000000000000000000B706 /* VoiceProfilesService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F706 /* VoiceProfilesService.swift */; };
 		00000000000000000000B707 /* VoiceEnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F707 /* VoiceEnrollmentView.swift */; };
+		00000000000000000000B708 /* SubscriptionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F708 /* SubscriptionStore.swift */; };
 		00000000000000000000B208 /* RecordIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000F208 /* RecordIntents.swift */; };
 /* End PBXBuildFile section */
 
@@ -51,6 +52,7 @@
 		00000000000000000000F705 /* GoogleSignInService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleSignInService.swift; sourceTree = "<group>"; };
 		00000000000000000000F706 /* VoiceProfilesService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceProfilesService.swift; sourceTree = "<group>"; };
 		00000000000000000000F707 /* VoiceEnrollmentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceEnrollmentView.swift; sourceTree = "<group>"; };
+		00000000000000000000F708 /* SubscriptionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -119,6 +121,7 @@
 				00000000000000000000F705 /* GoogleSignInService.swift */,
 				00000000000000000000F706 /* VoiceProfilesService.swift */,
 				00000000000000000000F707 /* VoiceEnrollmentView.swift */,
+				00000000000000000000F708 /* SubscriptionStore.swift */,
 			);
 			path = Auth;
 			sourceTree = "<group>";
@@ -260,6 +263,7 @@
 				00000000000000000000B705 /* GoogleSignInService.swift in Sources */,
 				00000000000000000000B706 /* VoiceProfilesService.swift in Sources */,
 				00000000000000000000B707 /* VoiceEnrollmentView.swift in Sources */,
+				00000000000000000000B708 /* SubscriptionStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -398,7 +402,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.her;
 				PRODUCT_NAME = Her;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -427,7 +431,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ekenesbek.her;
 				PRODUCT_NAME = Her;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -461,7 +465,6 @@
 		};
 /* End XCConfigurationList section */
 
-
-	};
+		};
 	rootObject = 000000000000000000000001 /* Project object */;
 }

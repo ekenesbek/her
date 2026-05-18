@@ -15,6 +15,13 @@ final class MeetingRecorder {
         AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName ?? selectedInputName
     }
 
+    var captureStoppedUnexpectedly: Bool {
+        guard currentRecordingURL != nil else {
+            return false
+        }
+        return recorder?.isRecording != true
+    }
+
     var recordedDurationSeconds: Double {
         let completedDuration = completedSegmentURLs.reduce(0) { total, url in
             total + Self.audioDurationSeconds(for: url)

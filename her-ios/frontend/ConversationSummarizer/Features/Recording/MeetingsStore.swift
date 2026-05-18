@@ -114,6 +114,28 @@ final class MeetingsStore: ObservableObject {
         return updated
     }
 
+    func rename(_ meeting: StoredMeeting, title: String) async throws -> StoredMeeting {
+        guard let service else {
+            throw MeetingsServiceError.backendFailed
+        }
+        let updated = try await service.renameMeeting(meetingId: meeting.id, title: title)
+        if let index = meetings.firstIndex(where: { $0.id == updated.id }) {
+            meetings[index] = updated
+        } else {
+            meetings.insert(updated, at: 0)
+        }
+        return updated
+    }
+
+    func delete(_ meeting: StoredMeeting) async throws {
+        guard let service else {
+            throw MeetingsServiceError.backendFailed
+        }
+        try await service.deleteMeeting(meetingId: meeting.id)
+        meetings.removeAll { $0.id == meeting.id }
+        MeetingAudioFileStore.delete(meetingId: meeting.id)
+    }
+
     func assignSpeaker(
         for meeting: StoredMeeting,
         speaker: String,
@@ -160,6 +182,8 @@ protocol MeetingsService {
     func listMeetings() async throws -> [StoredMeeting]
     func saveMeeting(_ payload: MeetingSavePayload) async throws -> StoredMeeting
     func generateSummary(meetingId: String, mode: MeetingSummaryMode) async throws -> StoredMeeting
+    func renameMeeting(meetingId: String, title: String) async throws -> StoredMeeting
+    func deleteMeeting(meetingId: String) async throws
     func updateTranscript(meetingId: String, transcript: String, segments: [MeetingTranscriptSegment]) async throws -> StoredMeeting
     func assignSpeaker(meetingId: String, speaker: String, profileId: String?, name: String) async throws -> SpeakerAssignmentResult
 }
@@ -262,6 +286,36 @@ struct BackendMeetingsService: MeetingsService {
         }
 
         return try Self.decoder().decode(BackendMeetingRecord.self, from: data).storedMeeting
+    }
+
+    func renameMeeting(meetingId: String, title: String) async throws -> StoredMeeting {
+        var request = URLRequest(url: endpoint.appendingPathComponent(meetingId))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONEncoder().encode(BackendMeetingTitleUpdateBody(title: title))
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw MeetingsServiceError.backendFailed
+        }
+
+        return try Self.decoder().decode(BackendMeetingRecord.self, from: data).storedMeeting
+    }
+
+    func deleteMeeting(meetingId: String) async throws {
+        var request = URLRequest(url: endpoint.appendingPathComponent(meetingId))
+        request.httpMethod = "DELETE"
+        if let token = TokenSource.shared.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (_, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw MeetingsServiceError.backendFailed
+        }
     }
 
     func assignSpeaker(
@@ -399,6 +453,10 @@ private struct BackendMeetingTranscriptUpdateBody: Encodable {
     let segments: [MeetingTranscriptSegment]
 }
 
+private struct BackendMeetingTitleUpdateBody: Encodable {
+    let title: String
+}
+
 private struct BackendSpeakerAssignmentBody: Encodable {
     let speaker: String
     let profileId: String?
@@ -506,6 +564,16 @@ enum MeetingAudioFileStore {
             return discoveredURL
         }
         return nil
+    }
+
+    static func delete(meetingId: String) {
+        if let path = UserDefaults.standard.string(forKey: key(meetingId)) {
+            try? FileManager.default.removeItem(atPath: path)
+            UserDefaults.standard.removeObject(forKey: key(meetingId))
+        }
+        if let discoveredURL = discoverPersistedAudio(meetingId: meetingId) {
+            try? FileManager.default.removeItem(at: discoveredURL)
+        }
     }
 
     static func saveDownloadedAudio(

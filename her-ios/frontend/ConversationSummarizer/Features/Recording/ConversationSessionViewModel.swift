@@ -3,6 +3,45 @@ import Combine
 import Foundation
 import UIKit
 
+struct BackgroundProcessingRecording: Identifiable, Equatable {
+    let id: String
+    let recordingPath: String
+    let jobId: String?
+    let meetingId: String?
+    let locationName: String?
+    let submittedAt: Date
+
+    var title: String {
+        if meetingId != nil {
+            return "Summarizing recording"
+        }
+        return jobId == nil ? "Uploading recording" : "Transcribing recording"
+    }
+
+    var statusLabel: String {
+        if meetingId != nil {
+            return "summarizing"
+        }
+        return jobId == nil ? "uploading" : "transcribing"
+    }
+
+    var displayLocation: String {
+        let trimmed = locationName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "location unavailable" : trimmed
+    }
+
+    var displayTime: String {
+        Self.timeFormatter.string(from: submittedAt)
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+}
+
 @MainActor
 final class ConversationSessionViewModel: ObservableObject {
     @Published private(set) var phase: RecordingPhase = .idle
@@ -16,6 +55,9 @@ final class ConversationSessionViewModel: ObservableObject {
     @Published private(set) var transcriptDurationSeconds: Double?
     @Published private(set) var audioLevel: Double = 0
     @Published private(set) var currentMeetingId: String?
+    @Published private(set) var backgroundProcessedMeetingId: String?
+    @Published private(set) var backgroundProcessingUpdateCounter = 0
+    @Published private(set) var backgroundProcessingRecordings: [BackgroundProcessingRecording] = []
 
     private let recorder: MeetingRecorder
     private let summaryService: SummaryService
@@ -28,6 +70,7 @@ final class ConversationSessionViewModel: ObservableObject {
     private let speechSynthesizer = AVSpeechSynthesizer()
     private var intentObservers: [NSObjectProtocol] = []
     private var audioSessionObservers: [NSObjectProtocol] = []
+    private var backgroundProcessingPaths: Set<String> = []
 
     init(
         recorder: MeetingRecorder,
@@ -39,6 +82,7 @@ final class ConversationSessionViewModel: ObservableObject {
         self.summaryService = summaryService
         self.meetingProcessor = meetingProcessor
         self.meetingsService = meetingsService
+        refreshBackgroundProcessingRecordings()
         registerIntentObservers()
         registerAudioSessionObservers()
     }
@@ -175,6 +219,10 @@ final class ConversationSessionViewModel: ObservableObject {
         }
     }
 
+    func showMessage(_ message: String) {
+        errorMessage = message
+    }
+
     @discardableResult
     func startRecording() async -> Bool {
         errorMessage = nil
@@ -244,78 +292,95 @@ final class ConversationSessionViewModel: ObservableObject {
     }
 
     func recoverIfNeeded() async {
-        guard phase == .idle, let recovery = MeetingRecorder.recoverOrphanedRecording() else {
+        reconcileRecordingState()
+        refreshBackgroundProcessingRecordings()
+        guard phase == .idle || phase == .failed else {
             return
         }
-        guard let meetingProcessor else {
+        let pendingJobs = PendingMeetingProcessingJobStore.loadAll()
+        if !pendingJobs.isEmpty {
+            if phase == .failed {
+                clearCurrentSessionForBackgroundProcessing()
+            }
+            resumePendingProcessingsInBackground(pendingJobs)
+            return
+        }
+        guard phase == .idle else {
+            return
+        }
+        guard let recovery = MeetingRecorder.recoverOrphanedRecording() else {
+            return
+        }
+        guard meetingProcessor != nil else {
             errorMessage = "Found an unfinished recording but the backend is not configured."
             return
         }
 
-        phase = .transcribing
-        do {
-            let result = try await meetingProcessor.process(
-                recordingURL: recovery.url,
-                source: "recording",
-                deviceName: nil,
-                locationName: nil,
-                summaryMode: .reasoning
-            )
-            applyProcessingResult(result)
-            if let meetingId = result.meetingId {
-                MeetingAudioFileStore.save(url: recovery.url, meetingId: meetingId, locationName: nil)
-            }
-            if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                phase = .failed
-                errorMessage = "Recovered recording but no speech was detected."
-            } else if summary != nil {
-                phase = .completed
-            } else {
-                phase = .transcriptReady
-            }
-        } catch {
-            phase = .failed
-            errorMessage = "Recovered recording could not be transcribed: \(error.localizedDescription)"
-            return
-        }
-
+        let pending = PendingMeetingProcessingJob(
+            jobId: nil,
+            meetingId: nil,
+            recordingPath: recovery.url.path,
+            source: "recording",
+            deviceName: nil,
+            locationName: nil,
+            submittedAt: recovery.startedAt ?? Date()
+        )
+        PendingMeetingProcessingJobStore.save(pending)
         MeetingRecorder.clearActiveRecording()
+        refreshBackgroundProcessingRecordings()
+        errorMessage = "Recovered an unfinished recording. Backend processing will continue in the background."
+        resumePendingProcessingsInBackground([pending])
     }
 
-    func stopAndTranscribe(locationName: String? = nil) async {
-        let wasInterrupted = phase == .interrupted
+    func reconcileRecordingState() {
+        guard phase == .recording, recorder.captureStoppedUnexpectedly else {
+            return
+        }
+        markRecordingInterrupted(reason: "Recording paused because iOS stopped microphone capture.")
+    }
+
+    @discardableResult
+    func stopAndTranscribe(locationName: String? = nil) async -> BackgroundProcessingRecording? {
+        guard phase == .recording || phase == .interrupted else {
+            return nil
+        }
         stopTimer()
         refreshElapsedFromRecorder()
-        playFeedback(wasInterrupted ? "Finishing captured audio." : "Stopped, transcribing.", success: true)
 
         do {
             let recordingURL = try recorder.stop()
             lastProcessedRecordingURL = recordingURL
             lastProcessedLocationName = cleanLocationName(locationName)
-            phase = .transcribing
-            guard let meetingProcessor else {
+            guard meetingProcessor != nil else {
                 fail("Transcription backend is not configured. Set BackendAPIURL in Info.plist.")
-                return
+                return nil
             }
-            let result = try await meetingProcessor.process(
-                recordingURL: recordingURL,
+            let pending = PendingMeetingProcessingJob(
+                jobId: nil,
+                meetingId: nil,
+                recordingPath: recordingURL.path,
                 source: "recording",
                 deviceName: activeInputName == "Not recording" ? nil : activeInputName,
                 locationName: lastProcessedLocationName,
-                summaryMode: .reasoning
+                submittedAt: Date()
             )
-            applyProcessingResult(result)
-            if let meetingId = result.meetingId {
-                MeetingAudioFileStore.save(url: recordingURL, meetingId: meetingId, locationName: lastProcessedLocationName)
-            }
-            if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                fail("Transcription finished, but no speech was detected.")
-                return
-            }
-            phase = summary == nil ? .transcriptReady : .completed
+            PendingMeetingProcessingJobStore.save(pending)
+            MeetingRecorder.clearActiveRecording()
+            refreshBackgroundProcessingRecordings()
+            clearCurrentSessionForBackgroundProcessing()
+            playFeedback("Saved. Processing in background.", success: true)
+            errorMessage = "Recording saved. Backend is uploading, transcribing, and generating the summary in the background."
+            resumePendingProcessingsInBackground([pending])
+            return backgroundRecording(for: pending)
+        } catch is CancellationError {
+            phase = .failed
+            errorMessage = PendingMeetingProcessingJobStore.load() == nil
+                ? "Recording processing was interrupted before the backend accepted it. Reopen Her to retry from the saved local audio."
+                : "Recording upload was accepted or is pending. Backend processing will continue; reopen Her to refresh the result."
         } catch {
             fail(error.localizedDescription)
         }
+        return nil
     }
 
     func generateSummary() async {
@@ -365,7 +430,14 @@ final class ConversationSessionViewModel: ObservableObject {
         refreshElapsedFromRecorder()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshElapsedFromRecorder()
+                guard let self else {
+                    return
+                }
+                if self.phase == .recording, self.recorder.captureStoppedUnexpectedly {
+                    self.markRecordingInterrupted(reason: "Recording paused because iOS stopped microphone capture.")
+                    return
+                }
+                self.refreshElapsedFromRecorder()
             }
         }
 
@@ -406,6 +478,222 @@ final class ConversationSessionViewModel: ObservableObject {
         }
     }
 
+    private func resumePendingProcessingsInBackground(_ pendingJobs: [PendingMeetingProcessingJob]) {
+        refreshBackgroundProcessingRecordings()
+        let jobsToResume = pendingJobs.filter { !backgroundProcessingPaths.contains($0.recordingPath) }
+        guard !jobsToResume.isEmpty else {
+            return
+        }
+
+        if jobsToResume.count == 1, let pending = jobsToResume.first {
+            errorMessage = pending.jobId == nil
+                ? "Retrying previous recording upload so backend processing can continue."
+                : "Checking backend processing for the previous recording."
+        } else {
+            errorMessage = "Retrying \(jobsToResume.count) previous recordings so backend processing can continue."
+        }
+
+        for pending in jobsToResume {
+            backgroundProcessingPaths.insert(pending.recordingPath)
+            Task { @MainActor in
+                await self.resumePendingProcessing(pending, foreground: false)
+            }
+        }
+    }
+
+    private func resumePendingProcessing(_ pending: PendingMeetingProcessingJob, foreground: Bool = true) async {
+        defer {
+            backgroundProcessingPaths.remove(pending.recordingPath)
+        }
+
+        guard let meetingProcessor else {
+            errorMessage = "Found a pending recording but the backend is not configured."
+            return
+        }
+        let recordingURL = URL(fileURLWithPath: pending.recordingPath)
+        guard FileManager.default.fileExists(atPath: recordingURL.path) else {
+            PendingMeetingProcessingJobStore.clear(matching: pending)
+            errorMessage = "A pending recording could not be resumed because the local audio file is missing."
+            return
+        }
+
+        if foreground {
+            lastProcessedRecordingURL = recordingURL
+            lastProcessedLocationName = pending.locationName
+            activeInputName = pending.deviceName ?? "Backend processing"
+            phase = .transcribing
+            errorMessage = pending.jobId == nil
+                ? "Retrying recording upload so backend processing can continue."
+                : "Checking backend processing for the last recording."
+        }
+
+        do {
+            let result = try await processPendingRecording(pending, with: meetingProcessor)
+            PendingMeetingProcessingJobStore.clear(matching: pending)
+            refreshBackgroundProcessingRecordings()
+            if let meetingId = result.meetingId {
+                MeetingAudioFileStore.save(url: recordingURL, meetingId: meetingId, locationName: pending.locationName)
+            }
+            if foreground {
+                applyProcessingResult(result)
+                if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    fail("Transcription finished, but no speech was detected.")
+                    return
+                }
+                phase = summary == nil ? .transcriptReady : .completed
+            } else if result.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                errorMessage = "Previous recording finished, but no speech was detected."
+            } else {
+                notifyBackgroundProcessingUpdated(meetingId: result.meetingId)
+                errorMessage = result.summary == nil
+                    ? "Previous recording transcript is saved. Generate a summary from the conversation detail."
+                    : "Previous recording transcript and summary are saved."
+            }
+        } catch is CancellationError {
+            refreshBackgroundProcessingRecordings()
+            if foreground {
+                phase = .failed
+            }
+            errorMessage = "Backend processing is still pending. Reopen Her to refresh the result."
+        } catch {
+            refreshBackgroundProcessingRecordings()
+            errorMessage = "Pending recording could not be processed: \(error.localizedDescription)"
+            if foreground {
+                phase = .failed
+            }
+        }
+    }
+
+    private func processPendingRecording(
+        _ pending: PendingMeetingProcessingJob,
+        with meetingProcessor: MeetingProcessingService
+    ) async throws -> MeetingProcessingResult {
+        let recordingURL = URL(fileURLWithPath: pending.recordingPath)
+        if let jobId = pending.jobId {
+            return try await pollPendingJob(id: jobId, pending: pending, with: meetingProcessor)
+        }
+
+        do {
+            let job = try await withBackgroundTask(named: "Upload meeting recording") {
+                try await meetingProcessor.submitJob(
+                    recordingURL: recordingURL,
+                    source: pending.source,
+                    deviceName: pending.deviceName,
+                    locationName: pending.locationName,
+                    summaryMode: .reasoning
+                )
+            }
+            let submitted = pending.withJobId(job.id)
+            PendingMeetingProcessingJobStore.save(submitted)
+            refreshBackgroundProcessingRecordings()
+            return try await pollPendingJob(id: job.id, pending: submitted, with: meetingProcessor)
+        } catch MeetingProcessingError.backendFailed(statusCode: 404, detail: _) {
+            let result = try await withBackgroundTask(named: "Process meeting recording") {
+                try await meetingProcessor.process(
+                    recordingURL: recordingURL,
+                    source: pending.source,
+                    deviceName: pending.deviceName,
+                    locationName: pending.locationName,
+                    summaryMode: .reasoning
+                )
+            }
+            PendingMeetingProcessingJobStore.clear(matching: pending)
+            return result
+        }
+    }
+
+    private func pollPendingJob(
+        id: String,
+        pending: PendingMeetingProcessingJob,
+        with meetingProcessor: MeetingProcessingService
+    ) async throws -> MeetingProcessingResult {
+        var trackedPending = pending
+        let recordingURL = URL(fileURLWithPath: pending.recordingPath)
+        for _ in 0..<900 {
+            let snapshot = try await meetingProcessor.fetchJob(id: id)
+            if let result = snapshot.result {
+                if let meetingId = result.meetingId, trackedPending.meetingId != meetingId {
+                    trackedPending = trackedPending.withMeetingId(meetingId)
+                    PendingMeetingProcessingJobStore.save(trackedPending)
+                    MeetingAudioFileStore.save(url: recordingURL, meetingId: meetingId, locationName: pending.locationName)
+                    refreshBackgroundProcessingRecordings()
+                    notifyBackgroundProcessingUpdated(meetingId: meetingId)
+                }
+                if snapshot.isCompleted {
+                    return result
+                }
+            }
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        throw MeetingProcessingError.timedOut
+    }
+
+    private func withBackgroundTask<T>(
+        named name: String,
+        operation: () async throws -> T
+    ) async throws -> T {
+        var taskIdentifier: UIBackgroundTaskIdentifier = .invalid
+        taskIdentifier = UIApplication.shared.beginBackgroundTask(withName: name) {
+            if taskIdentifier != .invalid {
+                UIApplication.shared.endBackgroundTask(taskIdentifier)
+                taskIdentifier = .invalid
+            }
+        }
+        defer {
+            if taskIdentifier != .invalid {
+                UIApplication.shared.endBackgroundTask(taskIdentifier)
+            }
+        }
+        return try await operation()
+    }
+
+    func retryBackgroundProcessing(_ recording: BackgroundProcessingRecording) {
+        let jobs = PendingMeetingProcessingJobStore.loadAll().filter { $0.recordingPath == recording.recordingPath }
+        guard !jobs.isEmpty else {
+            refreshBackgroundProcessingRecordings()
+            errorMessage = "That recording has already finished or is no longer pending."
+            return
+        }
+        if backgroundProcessingPaths.contains(recording.recordingPath) {
+            errorMessage = "That recording is already processing in the background."
+            return
+        }
+        resumePendingProcessingsInBackground(jobs)
+    }
+
+    private func clearCurrentSessionForBackgroundProcessing() {
+        phase = .idle
+        activeInputName = "Not recording"
+        audioLevel = 0
+        transcript = ""
+        transcriptSegments = []
+        transcriptLanguage = nil
+        transcriptDurationSeconds = nil
+        summary = nil
+        currentMeetingId = nil
+        elapsedSeconds = 0
+    }
+
+    private func refreshBackgroundProcessingRecordings() {
+        backgroundProcessingRecordings = PendingMeetingProcessingJobStore.loadAll().map(backgroundRecording(for:))
+    }
+
+    private func notifyBackgroundProcessingUpdated(meetingId: String?) {
+        backgroundProcessedMeetingId = meetingId
+        backgroundProcessingUpdateCounter += 1
+    }
+
+    private func backgroundRecording(for pending: PendingMeetingProcessingJob) -> BackgroundProcessingRecording {
+        BackgroundProcessingRecording(
+            id: pending.meetingId ?? pending.jobId ?? pending.recordingPath,
+            recordingPath: pending.recordingPath,
+            jobId: pending.jobId,
+            meetingId: pending.meetingId,
+            locationName: pending.locationName,
+            submittedAt: pending.submittedAt
+        )
+    }
+
     private func refreshElapsedFromRecorder() {
         let duration = recorder.recordedDurationSeconds
         guard duration.isFinite, duration >= 0 else {
@@ -427,13 +715,7 @@ final class ConversationSessionViewModel: ObservableObject {
             guard phase == .recording else {
                 return
             }
-            stopTimer()
-            _ = recorder.finishInterruptedSegment()
-            refreshElapsedFromRecorder()
-            activeInputName = "Recording interrupted"
-            audioLevel = 0
-            phase = .interrupted
-            errorMessage = "Recording paused by a phone call. Captured \(elapsedText). Continue recording or finish with the saved audio."
+            markRecordingInterrupted(reason: "Recording paused by a phone call.")
         case .ended:
             guard phase == .interrupted else {
                 return
@@ -442,6 +724,16 @@ final class ConversationSessionViewModel: ObservableObject {
         @unknown default:
             break
         }
+    }
+
+    private func markRecordingInterrupted(reason: String) {
+        stopTimer()
+        _ = recorder.finishInterruptedSegment()
+        refreshElapsedFromRecorder()
+        activeInputName = "Recording interrupted"
+        audioLevel = 0
+        phase = .interrupted
+        errorMessage = "\(reason) Captured \(elapsedText). Continue recording or finish with the saved audio."
     }
 
     private func cleanLocationName(_ value: String?) -> String? {
@@ -482,5 +774,115 @@ enum RecordingPhase: Equatable {
         case .failed:
             return "Needs attention"
         }
+    }
+}
+
+private struct PendingMeetingProcessingJob: Codable, Equatable {
+    let jobId: String?
+    let meetingId: String?
+    let recordingPath: String
+    let source: String?
+    let deviceName: String?
+    let locationName: String?
+    let submittedAt: Date
+
+    func withJobId(_ jobId: String) -> PendingMeetingProcessingJob {
+        PendingMeetingProcessingJob(
+            jobId: jobId,
+            meetingId: meetingId,
+            recordingPath: recordingPath,
+            source: source,
+            deviceName: deviceName,
+            locationName: locationName,
+            submittedAt: submittedAt
+        )
+    }
+
+    func withMeetingId(_ meetingId: String) -> PendingMeetingProcessingJob {
+        PendingMeetingProcessingJob(
+            jobId: jobId,
+            meetingId: meetingId,
+            recordingPath: recordingPath,
+            source: source,
+            deviceName: deviceName,
+            locationName: locationName,
+            submittedAt: submittedAt
+        )
+    }
+}
+
+private enum PendingMeetingProcessingJobStore {
+    private static let defaultsKey = "her.meeting.pendingProcessingJob"
+    private static let queueDefaultsKey = "her.meeting.pendingProcessingJobs"
+
+    static func save(_ job: PendingMeetingProcessingJob) {
+        var jobs = loadAll().filter { existing in
+            if existing.recordingPath == job.recordingPath {
+                return false
+            }
+            if let existingJobId = existing.jobId, let jobId = job.jobId, existingJobId == jobId {
+                return false
+            }
+            if let existingMeetingId = existing.meetingId, let meetingId = job.meetingId, existingMeetingId == meetingId {
+                return false
+            }
+            return true
+        }
+        jobs.append(job)
+        saveAll(jobs)
+    }
+
+    static func load() -> PendingMeetingProcessingJob? {
+        loadAll().first
+    }
+
+    static func loadAll() -> [PendingMeetingProcessingJob] {
+        let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey: queueDefaultsKey),
+           let jobs = try? JSONDecoder().decode([PendingMeetingProcessingJob].self, from: data) {
+            return jobs
+        }
+
+        guard let data = defaults.data(forKey: defaultsKey),
+              let legacyJob = try? JSONDecoder().decode(PendingMeetingProcessingJob.self, from: data) else {
+            return []
+        }
+        return [legacyJob]
+    }
+
+    static func clear(matching job: PendingMeetingProcessingJob) {
+        let jobs = loadAll().filter { current in
+            if current == job || current.recordingPath == job.recordingPath {
+                return false
+            }
+            if let currentJobId = current.jobId, let jobId = job.jobId, currentJobId == jobId {
+                return false
+            }
+            if let currentMeetingId = current.meetingId, let meetingId = job.meetingId, currentMeetingId == meetingId {
+                return false
+            }
+            return true
+        }
+        saveAll(jobs)
+    }
+
+    static func clear() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: defaultsKey)
+        defaults.removeObject(forKey: queueDefaultsKey)
+    }
+
+    private static func saveAll(_ jobs: [PendingMeetingProcessingJob]) {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: defaultsKey)
+        guard !jobs.isEmpty else {
+            defaults.removeObject(forKey: queueDefaultsKey)
+            return
+        }
+        let sortedJobs = jobs.sorted { $0.submittedAt > $1.submittedAt }
+        guard let data = try? JSONEncoder().encode(sortedJobs) else {
+            return
+        }
+        defaults.set(data, forKey: queueDefaultsKey)
     }
 }
