@@ -2,6 +2,71 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# IOS-20: Add Call-Source Intake For Phone And Meeting Apps
+
+Status: planned
+Priority: P1
+Owner: mixed
+Stream: ios
+Branch: current worktree
+Created: 2026-05-18
+
+## Goal
+
+Let Her help the user capture and summarize calls that happen through phone/FaceTime, Google Meet dial-in or links, Telegram, WhatsApp, and similar phone-first meeting sources, without pretending the app can directly record protected audio from other iOS apps.
+
+## Context
+
+Stage 1 already records through the active iOS microphone route and handles phone-call interruptions. `BUG-3` explicitly kept phone-call audio recording out of scope because normal iOS apps do not receive another app's or the system Phone app's call audio stream.
+
+Apple's public path for Phone/FaceTime call recordings is the system Phone/Notes flow on iOS 18.1+, where recordings and transcripts are saved to Notes and can be copied or shared. Google Meet supports joining from links and, for eligible Workspace meetings, dial-in phone numbers. Telegram exposes official `t.me`/`tg://` deep links, including phone-number, group video chat, and conference call links. WhatsApp supports call links and chat links, but there is no stable public API to start arbitrary WhatsApp calls or access call audio.
+
+## Scope
+
+In scope:
+- Add a call-source intake model for `phone`, `facetime`, `googleMeet`, `telegram`, `whatsApp`, and `manualImport`.
+- Add UI to start a call capture session from a phone number, Meet URL/dial-in, Telegram link, WhatsApp call link, or imported audio/transcript.
+- Use public launch paths only: `tel:`/FaceTime URLs, HTTPS meeting links, Telegram `t.me`/`tg://` links, WhatsApp call/chat links where available.
+- Keep Her recording through the currently available microphone route only, with clear copy that app-call/system-call internal audio may not be captured.
+- Add import support for user-shared audio/transcript files from Apple Notes, Files, or provider exports, then feed them into the existing meeting processing flow.
+- Preserve consent language and source metadata on the saved meeting.
+
+Out of scope:
+- Directly recording protected Phone, FaceTime, WhatsApp, Telegram, or Google Meet app audio streams.
+- Silent/background joining of calls.
+- Bypassing iOS user confirmation for dialing or app switching.
+- WhatsApp/Telegram private or unofficial APIs.
+- Stage 2 scheduled/autonomous joins or credential-vault behavior.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [ ] Inspect the existing recording entrypoint, meeting source metadata, import/share extension support, and processing job flow.
+- [ ] Add source metadata types and storage fields without breaking existing saved meetings.
+- [ ] Add a call-intake screen with source-specific launch/import actions and consent copy.
+- [ ] Wire phone/FaceTime, Meet, Telegram, and WhatsApp link launch helpers through public URL handling.
+- [ ] Add audio/transcript file import into the existing meeting processing pipeline.
+- [ ] Add tests or smoke checks for source parsing, metadata persistence, and import processing.
+- [ ] Build and install on a physical iPhone, then manually verify each feasible source path.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Physical iPhone smoke: open a `tel:` call action and confirm iOS asks before dialing.
+- Physical iPhone smoke: open a Google Meet link or dial-in invite and confirm Her preserves source metadata.
+- Physical iPhone smoke: open Telegram and WhatsApp links where installed, and confirm graceful fallback when not installed.
+- Physical iPhone smoke: import a shared Apple Notes call recording/transcript or Files audio export and confirm it appears as a saved meeting.
+
+## Result
+
+Not started.
+
+## Next
+
+Needs human review of scope before implementation, especially the product decision that Stage 1 will support call intake, launch, microphone capture, and import, but not direct protected call-audio capture. After approval: implement the scoped MVP, run verification, then stop for review again. Next task candidate from `todo/tasks.md`: continue `IOS-11` for faster streaming transcription if call capture needs lower latency.
+
 # IOS-19: Remove DAT Pairing From iOS Audio Route UX
 
 Status: review
@@ -148,7 +213,7 @@ Created: 2026-05-14
 
 ## Goal
 
-Replace the temporary default-plus entitlement with a real StoreKit-backed plus subscription flow: unpaid users remain free, paid users get 600 recording minutes and Ask AI.
+Replace the temporary default-plus entitlement with a real StoreKit-backed plus subscription flow: unpaid users remain free, paid users get 1200 recording minutes and Ask AI.
 
 ## Context
 
@@ -201,6 +266,8 @@ Out of scope:
 - Follow-up country price-list fallback: parsed `/Users/ekenesbek/Downloads/Starting Subscription Price.csv` into `PlusSubscriptionPriceList`, verified 175 country-code prices with `plutil -lint her-ios/frontend/ConversationSummarizer/Resources/Info.plist` and a plist smoke check (`KZ KZT 9990`, `US USD 17.99`, `GB GBP 17.99`, `TR TRY 999.99`, `JP JPY 3000`), then ran `python3 -m compileall her-ios/backend/app`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`, `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`, `/usr/libexec/PlistBuddy -c 'Print :PlusSubscriptionProductID' -c 'Print :PlusSubscriptionPriceList' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`, `git diff --check`, and `xcrun devicectl list devices` showed `iPhone (Yerasyl)` still `unavailable`.
 - Follow-up StoreKit unavailable copy: `plutil -lint her-ios/frontend/ConversationSummarizer/Resources/Info.plist`, `python3 -m compileall her-ios/backend/app`, `git diff --check`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`, `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`, plist smoke for bundle/product/175 prices, `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`, and `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
 - First App Store Connect build upload: changed iOS marketing version to `1.0` to match the App Store Connect version page, ran `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Release -destination 'generic/platform=iOS' -archivePath her-ios/frontend/Build/Archives/Her.xcarchive -allowProvisioningUpdates archive`, then uploaded with `xcodebuild -exportArchive -archivePath her-ios/frontend/Build/Archives/Her.xcarchive -exportPath her-ios/frontend/Build/AppStoreExport -exportOptionsPlist /tmp/HerExportOptions.plist -allowProvisioningUpdates`. Upload succeeded and App Store Connect reported the package is processing. Warning: symbol upload failed for `MWDATCore.framework` because the archive did not include that framework's dSYM.
+- Follow-up StoreKit sandbox availability: enabled the iOS `In-App Purchase` target capability, then ran `git diff --check`, `python3 -m compileall her-ios/backend/app`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`, `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`, and `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`. Install succeeded on `iPhone (Yerasyl)`; launch was attempted but iOS rejected it because the device was locked.
+- Follow-up Plus 1200-minute limit: `git diff --check`, `python3 -m compileall her-ios/backend/app`, remote backend smoke on `51.195.200.207` verified `PAID_RECORDING_LIMIT_SECONDS == 72000` and `subscription_limit_seconds("plus") == 72000`, remote `GET /health` returned ok after restarting `meta-ios-backend.service`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`, `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`, `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`, and `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
 
 ## Result
 
@@ -208,7 +275,9 @@ Backend users now default to `free`, not plus. Plus entitlement is derived from 
 
 iOS now uses StoreKit 2 for plus: Settings loads the plus product from `PlusSubscriptionProductID`, shows a buy action, handles purchase success/cancel/pending states, sends StoreKit's signed transaction JWS from the `VerificationResult` to `/v1/subscription/apple-transaction`, and offers `Restore purchase` using `Transaction.currentEntitlements`. Ask AI's free paywall now starts the same purchase path instead of silently switching entitlement.
 
-iOS now opens a visible Billing sheet from both the Ask AI paywall and Settings. Settings shows one `Billing` row under subscription instead of separate buy/restore rows; the sheet shows the current Free plan, the Plus plan with 600 minutes/month and Ask AI, purchase/restore actions, and any StoreKit/backend error message.
+iOS now opens a visible Billing sheet from both the Ask AI paywall and Settings. Settings shows one `Billing` row under subscription instead of separate buy/restore rows; the sheet shows the current Free plan, the Plus plan with 1200 minutes/month and Ask AI, purchase/restore actions, and any StoreKit/backend error message.
+
+Follow-up Plus limit increase: Plus now includes 1200 recording minutes/month. The backend subscription limit, iOS billing/paywall copy, and backend README reflect the new allowance.
 
 Follow-up polish: Settings no longer surfaces background StoreKit product-preload failures as a transient red error banner; StoreKit availability errors remain visible when the user explicitly taps the Plus purchase action.
 
@@ -216,13 +285,15 @@ Follow-up pricing fallback: Billing now uses StoreKit's real `Product.displayPri
 
 Follow-up StoreKit unavailable copy: the app no longer tells the user to create the App Store Connect product after StoreKit returns no product. The purchase error now says StoreKit returned no product for the configured ID and points to first-version attachment or sandbox propagation.
 
+Follow-up StoreKit sandbox availability: the iOS target now explicitly enables the `In-App Purchase` capability in the Xcode project. StoreKit still depends on App Store Connect returning the product for `com.ekenesbek.her.plus.monthly`; if `Product.products(for:)` returns no products after this build is installed, the remaining blocker is App Store Connect product metadata/agreement/version attachment or sandbox propagation.
+
 The first App Store Connect build upload for iOS version `1.0` succeeded. The build is processing in App Store Connect and should be selectable on the version page once processing finishes.
 
 The deployed backend on `51.195.200.207` has the StoreKit endpoint, Apple root certificates, and the Apple App Store Server Library installed. Real purchases still require the matching App Store Connect auto-renewable subscription product `com.ekenesbek.her.plus.monthly` to exist for the app.
 
 ## Next
 
-Result is ready for human review on the installed iPhone app. Human review: open a recording's chat tab and tap `view billing`; confirm the Billing sheet opens. Then open Settings → subscription → `Billing`; confirm it shows Free as current, Plus with 600 min/mo and Ask AI, and purchase/restore actions. Tap the Plus purchase action and confirm StoreKit either shows the configured sandbox product or reports a visible error if App Store Connect has not propagated the product. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
+Result is ready for human review on the installed iPhone app. Human review: open a recording's chat tab and tap `view billing`; confirm the Billing sheet opens. Then open Settings → subscription → `Billing`; confirm it shows Free as current, Plus with 1200 min/mo and Ask AI, and purchase/restore actions. Tap the Plus purchase action and confirm StoreKit either shows the configured sandbox product or reports a visible error if App Store Connect has not propagated the product. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
 
 # IOS-16: Add Subscription Limits And Ask AI Entitlement
 
@@ -235,7 +306,7 @@ Created: 2026-05-14
 
 ## Goal
 
-Add subscription behavior for the iOS recorder: free users get 60 recording minutes, plus users get 600 recording minutes and Ask AI.
+Add subscription behavior for the iOS recorder: free users get 60 recording minutes, plus users get 1200 recording minutes and Ask AI.
 
 ## Context
 
@@ -246,7 +317,7 @@ The app already has authenticated users, saved meetings with durations, recordin
 In scope:
 - Add a backend subscription/entitlement model with `free` and `plus` plans.
 - Count monthly recording usage from saved meetings and expose remaining minutes.
-- Enforce the free 60-minute and plus 600-minute recording limits on backend recording ingestion.
+- Enforce the free 60-minute and plus 1200-minute recording limits on backend recording ingestion.
 - Gate meeting Ask AI/chat to plus users.
 - Show the plan and minutes in iOS settings.
 - Block the Ask AI UI on free with an upgrade prompt.
@@ -283,7 +354,7 @@ Out of scope:
 
 ## Result
 
-Added a local backend subscription contract for authenticated users. `GET /v1/subscription` returns plan, monthly recording limit, used/remaining seconds, Ask AI entitlement, and the active calendar-month window. `PATCH /v1/subscription` switches the local entitlement between `free` and `plus` until real StoreKit purchase/receipt validation is wired. Free is 60 recording minutes per month. Plus is 600 recording minutes per month and enables Ask AI. New users default to plus while the MVP is being tested.
+Added a local backend subscription contract for authenticated users. `GET /v1/subscription` returns plan, monthly recording limit, used/remaining seconds, Ask AI entitlement, and the active calendar-month window. `PATCH /v1/subscription` switches the local entitlement between `free` and `plus` until real StoreKit purchase/receipt validation is wired. Free is 60 recording minutes per month. Plus is 1200 recording minutes per month and enables Ask AI. New users default to plus while the MVP is being tested.
 
 Backend recording ingestion now checks remaining monthly minutes for `/v1/transcriptions`, `/v1/meetings/process`, `/v1/meetings/jobs`, and direct `/v1/meetings` saves. Ask AI meeting chat endpoints now require the plus entitlement. The backend README documents the temporary local entitlement switch and limits.
 
@@ -295,7 +366,7 @@ Known limitation: this does not implement StoreKit products, payment capture, re
 
 ## Next
 
-Result is ready for human review. Review gate: reopen Settings on the installed iPhone app and confirm the subscription banner is gone, the default plan is plus with 600 min/mo and Ask AI on, and the recorded-meeting usage is reflected in the remaining minutes. Record a short meeting and confirm usage increments from loaded meetings; force a free plan only for testing and confirm the chat tab shows the plus prompt. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
+Result is ready for human review. Review gate: reopen Settings on the installed iPhone app and confirm the subscription banner is gone, the default plan is plus with 1200 min/mo and Ask AI on, and the recorded-meeting usage is reflected in the remaining minutes. Record a short meeting and confirm usage increments from loaded meetings; force a free plan only for testing and confirm the chat tab shows the plus prompt. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
 
 # IOS-15: Make Recording Jobs Transcript-First And Add People Settings
 
@@ -788,6 +859,7 @@ Out of scope:
 - 2026-05-18 remote backend deploy to `51.195.200.207`: backed up previous files at `/home/ubuntu/meta-ios-deploy-backups/backend-20260518-142928-bug3-transcript-first.tgz`, copied `app/main.py` and `app/services/storage.py`, compiled remote backend, ran remote job-progress storage smoke, imported FastAPI routes for `/v1/meetings/jobs/{job_id}`, restarted `meta-ios-backend.service`, verified service `active`, and verified `GET /health` returns `200 OK` with `transcriptionProvider=external`, `summaryModel=gpt-oss`, and `openaiConfigured=true`.
 - 2026-05-18 latest iPhone install after reconnect: `xcrun devicectl list devices` showed `iPhone (Yerasyl)` as `connected`; `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
 - 2026-05-18 latest iPhone launch after unlock: `xcrun devicectl list devices` showed `iPhone (Yerasyl)` as `connected`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` launched `com.ekenesbek.her`.
+- 2026-05-18 43-minute recording follow-up: remote backend inspection found no meeting/job for the reported long recording; subscription inspection for the authenticated Apple account showed free plan with 2523.51 seconds used this period, leaving roughly 17.94 minutes; `git diff --check`; `python3 -m compileall her-ios/backend/app`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`; `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
 
 Not run:
 - 2026-05-17 device install and real >8-minute recording smoke; `xcrun devicectl list devices` reported `iPhone (Yerasyl)` as `unavailable`.
@@ -795,6 +867,7 @@ Not run:
 - 2026-05-18 reinstall after independent background-processing UX follow-up; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app` failed because CoreDevice could not locate `iPhone (Yerasyl)`, and `xcrun devicectl list devices` showed it as `unavailable`.
 - 2026-05-18 reinstall after the transcript-first detail/background follow-up; the signed app artifact is valid, but `xcrun devicectl list devices` still shows `iPhone (Yerasyl)` as `unavailable`, and install fails with CoreDevice error 1011.
 - 2026-05-18 latest launch after successful install; iOS rejected the `devicectl` launch because `iPhone (Yerasyl)` was locked.
+- 2026-05-18 launch after the 43-minute recording follow-up install; install later succeeded, but `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` was rejected because `iPhone (Yerasyl)` was locked.
 
 ## Result
 
@@ -813,6 +886,8 @@ Transcript-first detail follow-up: backend meeting jobs now publish progress in 
 The recording detail screen now handles all processing states in-place: Contents shows `Transcribing...` until transcript exists; Summary shows `Waiting for transcript` and then `Summarizing...`; Ask AI shows a disabled waiting card until the transcript-backed meeting exists. Once transcript arrives, Contents and Ask AI become available while Summary keeps loading. When AI summary/title/action items/follow-ups are ready, the same detail screen refreshes to the generated title and summary.
 
 The backend side of this transcript-first job flow is deployed on `51.195.200.207`, which is the BackendAPIURL baked into the signed iOS build.
+
+2026-05-18 43-minute recording follow-up: the reported long recording did not create a backend job or meeting. The authenticated Apple account is still on the free plan, and the backend shows roughly 42.06 of 60 monthly minutes already used, so a 43-minute upload would be rejected by quota before backend processing starts. The iOS uploader now builds multipart upload bodies on disk and uses `URLSession.upload(fromFile:)` with a longer timeout, avoiding a full in-memory copy of long audio. Pending recordings that hit HTTP 402 are preserved locally, shown as `LIMIT`/`Recording saved locally` instead of an endless upload spinner, skipped during automatic retry loops, and retried only when the user taps them after upgrading/restoring Plus. Active recordings now hard-stop just before the current plan's remaining seconds are exhausted, save the captured in-quota audio, and open the normal background-processing detail flow so transcript/summary can complete. Stale pending rows whose local audio file is already gone are silently cleared during background recovery instead of showing a red missing-file banner on Home.
 
 The latest Debug iOS build was installed on `iPhone (Yerasyl)` after the device reconnected. The first app launch command was rejected because the phone was locked; after unlock, `com.ekenesbek.her` launched successfully through `devicectl`.
 

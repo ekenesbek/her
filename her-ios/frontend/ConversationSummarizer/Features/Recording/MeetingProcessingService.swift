@@ -76,12 +76,12 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: jobsEndpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 300
+        request.timeoutInterval = 900
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         if let token = TokenSource.shared.token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        request.httpBody = try makeMultipartBody(
+        let bodyFileURL = try makeMultipartBodyFile(
             fileURL: recordingURL,
             boundary: boundary,
             fields: [
@@ -92,8 +92,9 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
                 "generate_summary": "true"
             ]
         )
+        defer { try? FileManager.default.removeItem(at: bodyFileURL) }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.upload(for: request, fromFile: bodyFileURL)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MeetingProcessingError.invalidResponse
         }
@@ -159,14 +160,15 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 300
+        request.timeoutInterval = 900
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         if let token = TokenSource.shared.token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        request.httpBody = try makeMultipartBody(fileURL: recordingURL, boundary: boundary)
+        let bodyFileURL = try makeMultipartBodyFile(fileURL: recordingURL, boundary: boundary)
+        defer { try? FileManager.default.removeItem(at: bodyFileURL) }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.upload(for: request, fromFile: bodyFileURL)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MeetingProcessingError.invalidResponse
         }
@@ -189,28 +191,46 @@ struct BackendMeetingProcessingService: MeetingProcessingService {
         )
     }
 
-    private func makeMultipartBody(fileURL: URL, boundary: String, fields: [String: String?] = [:]) throws -> Data {
-        var body = Data()
-        let fileData = try Data(contentsOf: fileURL)
-        let filename = fileURL.lastPathComponent
+    private func makeMultipartBodyFile(fileURL: URL, boundary: String, fields: [String: String?] = [:]) throws -> URL {
+        let bodyFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("her-upload-\(UUID().uuidString).body")
+        FileManager.default.createFile(atPath: bodyFileURL.path, contents: nil)
 
-        for (name, value) in fields {
-            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                continue
+        do {
+            let output = try FileHandle(forWritingTo: bodyFileURL)
+            defer { output.closeFile() }
+
+            func writeString(_ value: String) {
+                output.write(Data(value.utf8))
             }
-            body.appendString("--\(boundary)\r\n")
-            body.appendString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
-            body.appendString(value)
-            body.appendString("\r\n")
-        }
 
-        body.appendString("--\(boundary)\r\n")
-        body.appendString("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n")
-        body.appendString("Content-Type: \(contentType(for: fileURL))\r\n\r\n")
-        body.append(fileData)
-        body.appendString("\r\n")
-        body.appendString("--\(boundary)--\r\n")
-        return body
+            for (name, value) in fields {
+                guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    continue
+                }
+                writeString("--\(boundary)\r\n")
+                writeString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
+                writeString(value)
+                writeString("\r\n")
+            }
+
+            writeString("--\(boundary)\r\n")
+            writeString("Content-Disposition: form-data; name=\"audio\"; filename=\"\(fileURL.lastPathComponent)\"\r\n")
+            writeString("Content-Type: \(contentType(for: fileURL))\r\n\r\n")
+
+            let input = try FileHandle(forReadingFrom: fileURL)
+            defer { input.closeFile() }
+            while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                output.write(chunk)
+            }
+
+            writeString("\r\n")
+            writeString("--\(boundary)--\r\n")
+            return bodyFileURL
+        } catch {
+            try? FileManager.default.removeItem(at: bodyFileURL)
+            throw error
+        }
     }
 
     private func contentType(for fileURL: URL) -> String {
@@ -373,12 +393,6 @@ enum MeetingProcessingError: LocalizedError {
         case .timedOut:
             return "Meeting backend did not finish processing in time."
         }
-    }
-}
-
-private extension Data {
-    mutating func appendString(_ value: String) {
-        append(Data(value.utf8))
     }
 }
 

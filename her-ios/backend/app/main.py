@@ -74,7 +74,7 @@ meeting_job_executor = ThreadPoolExecutor(
 )
 
 FREE_RECORDING_LIMIT_SECONDS = 60 * 60
-PAID_RECORDING_LIMIT_SECONDS = 600 * 60
+PAID_RECORDING_LIMIT_SECONDS = 1200 * 60
 
 
 def current_user(authorization: str | None = Header(default=None)) -> UserResponse:

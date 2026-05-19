@@ -331,6 +331,8 @@ struct ContentView: View {
     @State private var selectedMeeting: StoredMeeting?
     @State private var selectedProcessingRecording: BackgroundProcessingRecording?
     @State private var showingBilling = false
+    @State private var activeRecordingQuotaStopSeconds: Int?
+    @State private var quotaStopInFlight = false
 
     init(wearablesBridge: WearablesBridge, settings: AppSettingsStore, authStore: AuthStore) {
         self.wearablesBridge = wearablesBridge
@@ -528,6 +530,10 @@ struct ContentView: View {
             if shouldKeepCurrentRecordingOpen(for: newPhase) {
                 route = .recording
             }
+            if newPhase != .recording && newPhase != .interrupted {
+                activeRecordingQuotaStopSeconds = nil
+                quotaStopInFlight = false
+            }
             if newPhase == .recording {
                 wakeCommands.pauseForRecording()
             } else if newPhase == .interrupted {
@@ -540,6 +546,9 @@ struct ContentView: View {
                     await openCurrentProcessedMeeting()
                 }
             }
+        }
+        .onChange(of: viewModel.elapsedSeconds) { _ in
+            enforceRecordingQuotaStopIfNeeded()
         }
         .onChange(of: viewModel.backgroundProcessingUpdateCounter) { _ in
             Task { @MainActor in
@@ -607,15 +616,23 @@ struct ContentView: View {
         }
 
         Task { @MainActor in
+            await subscriptionStore.refresh(meetings: meetingsStore.meetings)
+            guard subscriptionStore.canStartRecording else {
+                viewModel.showMessage(subscriptionStore.limitReachedMessage)
+                return
+            }
             wakeCommands.pauseForRecording()
             wearablesBridge.refreshAudioRoute()
             liveContext.prepareForRecording()
             let didStart = await viewModel.startRecording()
             guard didStart else {
                 wakeCommands.resumeAfterRecordingIfNeeded()
+                activeRecordingQuotaStopSeconds = nil
                 return
             }
 
+            activeRecordingQuotaStopSeconds = quotaStopSecondsForNewRecording()
+            quotaStopInFlight = false
             recordingMuted = false
             route = .recording
         }
@@ -711,6 +728,8 @@ struct ContentView: View {
             } else {
                 route = .home
             }
+            activeRecordingQuotaStopSeconds = nil
+            quotaStopInFlight = false
         }
     }
 
@@ -722,7 +741,11 @@ struct ContentView: View {
         Task { @MainActor in
             liveContext.prepareForRecording()
             _ = await viewModel.continueRecording()
+            if activeRecordingQuotaStopSeconds == nil {
+                activeRecordingQuotaStopSeconds = quotaStopSecondsForNewRecording()
+            }
             recordingMuted = false
+            enforceRecordingQuotaStopIfNeeded()
         }
     }
 
@@ -738,6 +761,37 @@ struct ContentView: View {
             } else {
                 route = .home
             }
+            activeRecordingQuotaStopSeconds = nil
+            quotaStopInFlight = false
+        }
+    }
+
+    private func quotaStopSecondsForNewRecording() -> Int? {
+        let remainingSeconds = subscriptionStore.state.recordingRemainingSeconds
+        guard remainingSeconds > 0 else {
+            return nil
+        }
+        return max(1, remainingSeconds - 2)
+    }
+
+    private func enforceRecordingQuotaStopIfNeeded() {
+        guard viewModel.phase == .recording,
+              let stopSeconds = activeRecordingQuotaStopSeconds,
+              viewModel.elapsedSeconds >= stopSeconds,
+              !quotaStopInFlight else {
+            return
+        }
+        quotaStopInFlight = true
+        Task { @MainActor in
+            wakeCommands.pauseForRecording()
+            viewModel.showMessage("Recording minutes reached. Saving the captured audio and processing it now.")
+            if let recording = await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName) {
+                openProcessingRecording(recording)
+            } else {
+                route = .home
+            }
+            activeRecordingQuotaStopSeconds = nil
+            quotaStopInFlight = false
         }
     }
 
@@ -1718,7 +1772,7 @@ private struct BackgroundProcessingRow: View {
                 Text(item.title)
                     .font(.system(size: 15, weight: .medium, design: .serif))
                     .foregroundColor(AppTheme.fg)
-                Text("\(item.displayLocation) · backend processing")
+                Text(item.detailLine)
                     .font(.system(size: 12, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.dim)
@@ -1729,7 +1783,7 @@ private struct BackgroundProcessingRow: View {
                         .padding(.horizontal, 9)
                         .frame(height: 20)
                         .overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1))
-                    Text(item.meetingId != nil ? "SUMMARY" : (item.jobId == nil ? "UPLOAD" : "TRANSCRIPT"))
+                    Text(item.processingTag)
                         .font(.system(size: 9, weight: .regular, design: .monospaced))
                         .foregroundColor(AppTheme.fg)
                         .padding(.horizontal, 9)
@@ -1738,11 +1792,18 @@ private struct BackgroundProcessingRow: View {
                 }
             }
             Spacer()
-            ProgressView()
-                .progressViewStyle(.circular)
-                .tint(AppTheme.fg)
-                .scaleEffect(0.72)
-                .padding(.top, 6)
+            if item.lastErrorMessage == nil {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(AppTheme.fg)
+                    .scaleEffect(0.72)
+                    .padding(.top, 6)
+            } else {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundColor(AppTheme.fg)
+                    .padding(.top, 6)
+            }
         }
         .padding(.vertical, 14)
         .overlay(alignment: .bottom) { DividerLine() }
@@ -1850,7 +1911,7 @@ private struct ExactConversationDetailScreen: View {
                         }
                     } else {
                         ScrollView(showsIndicators: false) {
-                            TranscriptWaitingPanel(location: processingRecording?.displayLocation)
+                            TranscriptWaitingPanel(recording: processingRecording)
                                 .padding(.horizontal, 22)
                                 .padding(.bottom, 14)
                         }
@@ -2034,16 +2095,22 @@ private struct ExactSegmentedTabs: View {
 }
 
 private struct TranscriptWaitingPanel: View {
-    let location: String?
+    let recording: BackgroundProcessingRecording?
 
     var body: some View {
         AppCard {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 9) {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(AppTheme.fg)
-                    SectionTitle(label: "TRANSCRIPT", title: "Transcribing...", icon: "text.quote")
+                    if hasError {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 16, weight: .regular))
+                            .foregroundColor(AppTheme.fg)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(AppTheme.fg)
+                    }
+                    SectionTitle(label: "TRANSCRIPT", title: hasError ? "Waiting to upload" : "Transcribing...", icon: "text.quote")
                 }
 
                 Text(detail)
@@ -2056,7 +2123,19 @@ private struct TranscriptWaitingPanel: View {
         }
     }
 
+    private var hasError: Bool {
+        guard let message = recording?.lastErrorMessage else {
+            return false
+        }
+        return !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private var detail: String {
+        if let message = recording?.lastErrorMessage,
+           !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return message
+        }
+        let location = recording?.displayLocation
         if let location, !location.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "The recording from \(location) is uploading and being transcribed. The transcript will appear here first."
         }
@@ -2622,7 +2701,7 @@ private struct AskAIPaywallCard: View {
                     MonoLabel("ask ai")
                 }
 
-                Text("Plus includes Ask AI and 600 min/mo. Free keeps 60 min/mo for recording.")
+                Text("Plus includes Ask AI and 1200 min/mo. Free keeps 60 min/mo for recording.")
                     .font(.system(size: 15, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.muted)
@@ -3710,7 +3789,7 @@ private struct ExactSettingsHerScreen: View {
         if subscriptionStore.state.plan == .free {
             return "free · 60 min/mo · Ask AI locked"
         }
-        return "plus · 600 min/mo · Ask AI"
+        return "plus · 1200 min/mo · Ask AI"
     }
 
     private var appVersion: String {
@@ -4234,7 +4313,7 @@ private struct BillingSheet: View {
                         isCurrent: subscriptionStore.state.plan != .free,
                         emphasized: true,
                         features: [
-                            "600 recording minutes per month",
+                            "1200 recording minutes per month",
                             "Ask AI for every conversation",
                             "App Store subscription billing"
                         ]
@@ -4283,7 +4362,7 @@ private struct BillingSheet: View {
         if let price = subscriptionStore.plusDisplayPrice {
             return "\(price) · monthly"
         }
-        return "600 min/mo · Ask AI"
+        return "1200 min/mo · Ask AI"
     }
 
     private var restoreTitle: String {

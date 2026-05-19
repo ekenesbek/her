@@ -10,8 +10,20 @@ struct BackgroundProcessingRecording: Identifiable, Equatable {
     let meetingId: String?
     let locationName: String?
     let submittedAt: Date
+    let lastErrorCode: Int?
+    let lastErrorMessage: String?
+
+    var isQuotaBlocked: Bool {
+        lastErrorCode == 402
+    }
 
     var title: String {
+        if isQuotaBlocked {
+            return "Recording saved locally"
+        }
+        if lastErrorMessage != nil {
+            return "Upload needs retry"
+        }
         if meetingId != nil {
             return "Summarizing recording"
         }
@@ -19,10 +31,39 @@ struct BackgroundProcessingRecording: Identifiable, Equatable {
     }
 
     var statusLabel: String {
+        if isQuotaBlocked {
+            return "limit"
+        }
+        if lastErrorMessage != nil {
+            return "retry"
+        }
         if meetingId != nil {
             return "summarizing"
         }
         return jobId == nil ? "uploading" : "transcribing"
+    }
+
+    var detailLine: String {
+        if isQuotaBlocked {
+            return "\(displayLocation) · saved locally, upgrade or restore Plus to upload"
+        }
+        if lastErrorMessage != nil {
+            return "\(displayLocation) · saved locally, tap to retry"
+        }
+        return "\(displayLocation) · backend processing"
+    }
+
+    var processingTag: String {
+        if isQuotaBlocked {
+            return "LIMIT"
+        }
+        if lastErrorMessage != nil {
+            return "RETRY"
+        }
+        if meetingId != nil {
+            return "SUMMARY"
+        }
+        return jobId == nil ? "UPLOAD" : "TRANSCRIPT"
     }
 
     var displayLocation: String {
@@ -478,10 +519,14 @@ final class ConversationSessionViewModel: ObservableObject {
         }
     }
 
-    private func resumePendingProcessingsInBackground(_ pendingJobs: [PendingMeetingProcessingJob]) {
+    private func resumePendingProcessingsInBackground(_ pendingJobs: [PendingMeetingProcessingJob], force: Bool = false) {
         refreshBackgroundProcessingRecordings()
-        let jobsToResume = pendingJobs.filter { !backgroundProcessingPaths.contains($0.recordingPath) }
+        let inactiveJobs = pendingJobs.filter { !backgroundProcessingPaths.contains($0.recordingPath) }
+        let jobsToResume = inactiveJobs.filter { force || $0.lastErrorCode != 402 }
         guard !jobsToResume.isEmpty else {
+            if inactiveJobs.contains(where: { $0.lastErrorCode == 402 }) {
+                errorMessage = "A saved recording is waiting locally because the monthly recording limit was reached. Upgrade or restore Plus, then tap the recording to retry upload."
+            }
             return
         }
 
@@ -513,7 +558,12 @@ final class ConversationSessionViewModel: ObservableObject {
         let recordingURL = URL(fileURLWithPath: pending.recordingPath)
         guard FileManager.default.fileExists(atPath: recordingURL.path) else {
             PendingMeetingProcessingJobStore.clear(matching: pending)
-            errorMessage = "A pending recording could not be resumed because the local audio file is missing."
+            refreshBackgroundProcessingRecordings()
+            if foreground {
+                errorMessage = "This local recording audio is no longer available."
+            } else if PendingMeetingProcessingJobStore.loadAll().isEmpty {
+                errorMessage = nil
+            }
             return
         }
 
@@ -555,9 +605,13 @@ final class ConversationSessionViewModel: ObservableObject {
                 phase = .failed
             }
             errorMessage = "Backend processing is still pending. Reopen Her to refresh the result."
+        } catch let error as MeetingProcessingError {
+            savePendingFailure(from: error, pending: pending, foreground: foreground)
         } catch {
+            let failed = pending.withFailure(statusCode: nil, message: error.localizedDescription)
+            PendingMeetingProcessingJobStore.save(failed)
             refreshBackgroundProcessingRecordings()
-            errorMessage = "Pending recording could not be processed: \(error.localizedDescription)"
+            errorMessage = "Pending recording could not be processed. The local audio is still saved; tap the recording to retry. \(error.localizedDescription)"
             if foreground {
                 phase = .failed
             }
@@ -658,7 +712,7 @@ final class ConversationSessionViewModel: ObservableObject {
             errorMessage = "That recording is already processing in the background."
             return
         }
-        resumePendingProcessingsInBackground(jobs)
+        resumePendingProcessingsInBackground(jobs, force: true)
     }
 
     private func clearCurrentSessionForBackgroundProcessing() {
@@ -690,8 +744,45 @@ final class ConversationSessionViewModel: ObservableObject {
             jobId: pending.jobId,
             meetingId: pending.meetingId,
             locationName: pending.locationName,
-            submittedAt: pending.submittedAt
+            submittedAt: pending.submittedAt,
+            lastErrorCode: pending.lastErrorCode,
+            lastErrorMessage: pending.lastErrorMessage
         )
+    }
+
+    private func savePendingFailure(
+        from error: MeetingProcessingError,
+        pending: PendingMeetingProcessingJob,
+        foreground: Bool
+    ) {
+        let statusCode: Int?
+        let message: String
+        switch error {
+        case let .backendFailed(code, detail):
+            statusCode = code
+            message = pendingFailureMessage(statusCode: code, detail: detail)
+        default:
+            statusCode = nil
+            message = error.localizedDescription
+        }
+        PendingMeetingProcessingJobStore.save(
+            pending.withFailure(statusCode: statusCode, message: message)
+        )
+        refreshBackgroundProcessingRecordings()
+        errorMessage = message
+        if foreground {
+            phase = .failed
+        }
+    }
+
+    private func pendingFailureMessage(statusCode: Int, detail: String?) -> String {
+        if statusCode == 402 {
+            return "Recording is saved locally, but upload is blocked by the monthly recording limit. Upgrade or restore Plus, then tap this recording to retry."
+        }
+        if let detail, !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Pending recording could not be processed. The local audio is still saved; tap the recording to retry. \(detail)"
+        }
+        return "Pending recording could not be processed. The local audio is still saved; tap the recording to retry. Backend returned HTTP \(statusCode)."
     }
 
     private func refreshElapsedFromRecorder() {
@@ -785,6 +876,8 @@ private struct PendingMeetingProcessingJob: Codable, Equatable {
     let deviceName: String?
     let locationName: String?
     let submittedAt: Date
+    var lastErrorCode: Int? = nil
+    var lastErrorMessage: String? = nil
 
     func withJobId(_ jobId: String) -> PendingMeetingProcessingJob {
         PendingMeetingProcessingJob(
@@ -794,7 +887,9 @@ private struct PendingMeetingProcessingJob: Codable, Equatable {
             source: source,
             deviceName: deviceName,
             locationName: locationName,
-            submittedAt: submittedAt
+            submittedAt: submittedAt,
+            lastErrorCode: nil,
+            lastErrorMessage: nil
         )
     }
 
@@ -806,7 +901,23 @@ private struct PendingMeetingProcessingJob: Codable, Equatable {
             source: source,
             deviceName: deviceName,
             locationName: locationName,
-            submittedAt: submittedAt
+            submittedAt: submittedAt,
+            lastErrorCode: nil,
+            lastErrorMessage: nil
+        )
+    }
+
+    func withFailure(statusCode: Int?, message: String) -> PendingMeetingProcessingJob {
+        PendingMeetingProcessingJob(
+            jobId: jobId,
+            meetingId: meetingId,
+            recordingPath: recordingPath,
+            source: source,
+            deviceName: deviceName,
+            locationName: locationName,
+            submittedAt: submittedAt,
+            lastErrorCode: statusCode,
+            lastErrorMessage: message
         )
     }
 }

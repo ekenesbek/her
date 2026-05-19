@@ -31,6 +31,7 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-17 | review | P1 | ios | current worktree | Add StoreKit Plus subscription purchase flow | `todo/ios.md` |
 | IOS-18 | review | P1 | ios | current worktree | Clean settings and add recording management actions | `todo/ios.md` |
 | IOS-19 | review | P1 | ios | current worktree | Remove DAT pairing from iOS audio route UX | `todo/ios.md` |
+| IOS-20 | planned | P1 | ios | current worktree | Add call-source intake for phone and meeting apps | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 

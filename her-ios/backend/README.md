@@ -21,7 +21,7 @@ http://Yerasyls-MacBook-Pro.local:8787
 
 The default summary/chat model is `gpt-oss`. Set `ALEM_OSS_API_KEY` for the platform-managed Alem OSS provider, or set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_SUMMARY_MODEL` in `.env` to use another OpenAI-compatible provider.
 
-Subscription enforcement is backend-owned. The free plan allows 60 recording minutes per authenticated user per calendar month. The plus plan allows 600 recording minutes and enables the meeting Ask AI chat endpoints. Users default to free until the backend validates an active Apple StoreKit subscription transaction for `APPLE_SUBSCRIPTION_PRODUCT_ID`. The old `PATCH /v1/subscription` local entitlement switch is disabled unless `LOCAL_SUBSCRIPTION_OVERRIDES_ENABLED=true`.
+Subscription enforcement is backend-owned. The free plan allows 60 recording minutes per authenticated user per calendar month. The plus plan allows 1200 recording minutes and enables the meeting Ask AI chat endpoints. Users default to free until the backend validates an active Apple StoreKit subscription transaction for `APPLE_SUBSCRIPTION_PRODUCT_ID`. The old `PATCH /v1/subscription` local entitlement switch is disabled unless `LOCAL_SUBSCRIPTION_OVERRIDES_ENABLED=true`.
 
 For StoreKit validation, install `app-store-server-library`, create the auto-renewable subscription product in App Store Connect, set the same product id in the iOS `PlusSubscriptionProductID`, and configure the backend with Apple root certificate files from the Apple PKI site:
 
