@@ -1,7 +1,20 @@
 import AVFoundation
 import Combine
 import Foundation
+import Network
 import UIKit
+
+private let connectivityPendingMessage = "Recording is saved locally. Upload will start automatically when internet is back."
+private let connectivityRetryErrorCodes: Set<Int> = [
+    URLError.Code.notConnectedToInternet.rawValue,
+    URLError.Code.networkConnectionLost.rawValue,
+    URLError.Code.timedOut.rawValue,
+    URLError.Code.cannotFindHost.rawValue,
+    URLError.Code.cannotConnectToHost.rawValue,
+    URLError.Code.dnsLookupFailed.rawValue,
+    URLError.Code.dataNotAllowed.rawValue,
+    URLError.Code.internationalRoamingOff.rawValue
+]
 
 struct BackgroundProcessingRecording: Identifiable, Equatable {
     let id: String
@@ -17,12 +30,22 @@ struct BackgroundProcessingRecording: Identifiable, Equatable {
         lastErrorCode == 402
     }
 
+    var isWaitingForConnectivity: Bool {
+        guard let lastErrorCode else {
+            return false
+        }
+        return connectivityRetryErrorCodes.contains(lastErrorCode)
+    }
+
     var title: String {
         if isQuotaBlocked {
             return "Recording saved locally"
         }
+        if isWaitingForConnectivity {
+            return "Waiting for internet"
+        }
         if lastErrorMessage != nil {
-            return "Upload needs retry"
+            return "Upload will retry"
         }
         if meetingId != nil {
             return "Summarizing recording"
@@ -33,6 +56,9 @@ struct BackgroundProcessingRecording: Identifiable, Equatable {
     var statusLabel: String {
         if isQuotaBlocked {
             return "limit"
+        }
+        if isWaitingForConnectivity {
+            return "offline"
         }
         if lastErrorMessage != nil {
             return "retry"
@@ -47,8 +73,11 @@ struct BackgroundProcessingRecording: Identifiable, Equatable {
         if isQuotaBlocked {
             return "\(displayLocation) · saved locally, upgrade or restore Plus to upload"
         }
+        if isWaitingForConnectivity {
+            return "\(displayLocation) · saved locally, upload starts when online"
+        }
         if lastErrorMessage != nil {
-            return "\(displayLocation) · saved locally, tap to retry"
+            return "\(displayLocation) · saved locally, retrying automatically"
         }
         return "\(displayLocation) · backend processing"
     }
@@ -56,6 +85,9 @@ struct BackgroundProcessingRecording: Identifiable, Equatable {
     var processingTag: String {
         if isQuotaBlocked {
             return "LIMIT"
+        }
+        if isWaitingForConnectivity {
+            return "OFFLINE"
         }
         if lastErrorMessage != nil {
             return "RETRY"
@@ -83,6 +115,13 @@ struct BackgroundProcessingRecording: Identifiable, Equatable {
     }()
 }
 
+enum RecordingNoticeStyle: Equatable {
+    case info
+    case success
+    case warning
+    case error
+}
+
 @MainActor
 final class ConversationSessionViewModel: ObservableObject {
     @Published private(set) var phase: RecordingPhase = .idle
@@ -92,6 +131,7 @@ final class ConversationSessionViewModel: ObservableObject {
     @Published private(set) var transcriptSegments: [MeetingTranscriptSegment] = []
     @Published private(set) var summary: MeetingSummary?
     @Published private(set) var errorMessage: String?
+    @Published private(set) var noticeStyle: RecordingNoticeStyle = .error
     @Published private(set) var transcriptLanguage: String?
     @Published private(set) var transcriptDurationSeconds: Double?
     @Published private(set) var audioLevel: Double = 0
@@ -112,6 +152,10 @@ final class ConversationSessionViewModel: ObservableObject {
     private var intentObservers: [NSObjectProtocol] = []
     private var audioSessionObservers: [NSObjectProtocol] = []
     private var backgroundProcessingPaths: Set<String> = []
+    private var scheduledRetryPaths: Set<String> = []
+    private let networkMonitor = NWPathMonitor()
+    private let networkMonitorQueue = DispatchQueue(label: "her.meeting-processing.network")
+    private var networkIsSatisfied: Bool?
 
     init(
         recorder: MeetingRecorder,
@@ -126,11 +170,13 @@ final class ConversationSessionViewModel: ObservableObject {
         refreshBackgroundProcessingRecordings()
         registerIntentObservers()
         registerAudioSessionObservers()
+        startNetworkMonitor()
     }
 
     deinit {
         intentObservers.forEach { NotificationCenter.default.removeObserver($0) }
         audioSessionObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        networkMonitor.cancel()
     }
 
     private func registerIntentObservers() {
@@ -194,6 +240,34 @@ final class ConversationSessionViewModel: ObservableObject {
             }
         }
         audioSessionObservers = [interruption]
+    }
+
+    private func startNetworkMonitor() {
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            let isSatisfied = path.status == .satisfied
+            Task { @MainActor in
+                self?.handleNetworkPathUpdate(isSatisfied: isSatisfied)
+            }
+        }
+        networkMonitor.start(queue: networkMonitorQueue)
+    }
+
+    private func handleNetworkPathUpdate(isSatisfied: Bool) {
+        let previous = networkIsSatisfied
+        networkIsSatisfied = isSatisfied
+        guard isSatisfied else {
+            return
+        }
+
+        let pendingJobs = PendingMeetingProcessingJobStore.loadAll().filter { $0.lastErrorCode != 402 }
+        guard !pendingJobs.isEmpty else {
+            return
+        }
+
+        if previous == false {
+            setNotice("Internet is back. Uploading saved recording now.", style: .info)
+        }
+        resumePendingProcessingsInBackground(pendingJobs)
     }
 
     private func playFeedback(_ phrase: String, success: Bool) {
@@ -260,13 +334,13 @@ final class ConversationSessionViewModel: ObservableObject {
         }
     }
 
-    func showMessage(_ message: String) {
-        errorMessage = message
+    func showMessage(_ message: String, style: RecordingNoticeStyle = .error) {
+        setNotice(message, style: style)
     }
 
     @discardableResult
     func startRecording() async -> Bool {
-        errorMessage = nil
+        setNotice(nil)
         summary = nil
         transcript = ""
         transcriptSegments = []
@@ -304,7 +378,7 @@ final class ConversationSessionViewModel: ObservableObject {
 
     @discardableResult
     func continueRecording() async -> Bool {
-        errorMessage = nil
+        setNotice(nil)
 
         let micAllowed = await recorder.requestPermission()
         guard micAllowed else {
@@ -353,7 +427,7 @@ final class ConversationSessionViewModel: ObservableObject {
             return
         }
         guard meetingProcessor != nil else {
-            errorMessage = "Found an unfinished recording but the backend is not configured."
+            setNotice("Found an unfinished recording but the backend is not configured.", style: .error)
             return
         }
 
@@ -369,7 +443,7 @@ final class ConversationSessionViewModel: ObservableObject {
         PendingMeetingProcessingJobStore.save(pending)
         MeetingRecorder.clearActiveRecording()
         refreshBackgroundProcessingRecordings()
-        errorMessage = "Recovered an unfinished recording. Backend processing will continue in the background."
+        setNotice("Recovered an unfinished recording. Backend processing will continue in the background.", style: .info)
         resumePendingProcessingsInBackground([pending])
     }
 
@@ -410,14 +484,15 @@ final class ConversationSessionViewModel: ObservableObject {
             refreshBackgroundProcessingRecordings()
             clearCurrentSessionForBackgroundProcessing()
             playFeedback("Saved. Processing in background.", success: true)
-            errorMessage = "Recording saved. Backend is uploading, transcribing, and generating the summary in the background."
+            setNotice("Recording saved. Backend is uploading, transcribing, and generating the summary in the background.", style: .info)
             resumePendingProcessingsInBackground([pending])
             return backgroundRecording(for: pending)
         } catch is CancellationError {
             phase = .failed
-            errorMessage = PendingMeetingProcessingJobStore.load() == nil
+            let message = PendingMeetingProcessingJobStore.load() == nil
                 ? "Recording processing was interrupted before the backend accepted it. Reopen Her to retry from the saved local audio."
                 : "Recording upload was accepted or is pending. Backend processing will continue; reopen Her to refresh the result."
+            setNotice(message, style: .warning)
         } catch {
             fail(error.localizedDescription)
         }
@@ -504,7 +579,7 @@ final class ConversationSessionViewModel: ObservableObject {
     private func fail(_ message: String) {
         stopTimer()
         phase = .failed
-        errorMessage = message
+        setNotice(message, style: .error)
     }
 
     private func applyProcessingResult(_ result: MeetingProcessingResult) {
@@ -525,17 +600,24 @@ final class ConversationSessionViewModel: ObservableObject {
         let jobsToResume = inactiveJobs.filter { force || $0.lastErrorCode != 402 }
         guard !jobsToResume.isEmpty else {
             if inactiveJobs.contains(where: { $0.lastErrorCode == 402 }) {
-                errorMessage = "A saved recording is waiting locally because the monthly recording limit was reached. Upgrade or restore Plus, then tap the recording to retry upload."
+                setNotice("A saved recording is waiting locally because the monthly recording limit was reached. Upgrade or restore Plus, then tap the recording to retry upload.", style: .warning)
             }
             return
         }
 
+        if networkIsSatisfied == false {
+            markPendingJobsWaitingForConnectivity(jobsToResume)
+            setNotice(connectivityPendingMessage, style: .info)
+            return
+        }
+
         if jobsToResume.count == 1, let pending = jobsToResume.first {
-            errorMessage = pending.jobId == nil
+            let message = pending.jobId == nil
                 ? "Retrying previous recording upload so backend processing can continue."
                 : "Checking backend processing for the previous recording."
+            setNotice(message, style: .info)
         } else {
-            errorMessage = "Retrying \(jobsToResume.count) previous recordings so backend processing can continue."
+            setNotice("Retrying \(jobsToResume.count) previous recordings so backend processing can continue.", style: .info)
         }
 
         for pending in jobsToResume {
@@ -552,7 +634,7 @@ final class ConversationSessionViewModel: ObservableObject {
         }
 
         guard let meetingProcessor else {
-            errorMessage = "Found a pending recording but the backend is not configured."
+            setNotice("Found a pending recording but the backend is not configured.", style: .error)
             return
         }
         let recordingURL = URL(fileURLWithPath: pending.recordingPath)
@@ -560,9 +642,9 @@ final class ConversationSessionViewModel: ObservableObject {
             PendingMeetingProcessingJobStore.clear(matching: pending)
             refreshBackgroundProcessingRecordings()
             if foreground {
-                errorMessage = "This local recording audio is no longer available."
+                setNotice("This local recording audio is no longer available.", style: .error)
             } else if PendingMeetingProcessingJobStore.loadAll().isEmpty {
-                errorMessage = nil
+                setNotice(nil)
             }
             return
         }
@@ -572,9 +654,10 @@ final class ConversationSessionViewModel: ObservableObject {
             lastProcessedLocationName = pending.locationName
             activeInputName = pending.deviceName ?? "Backend processing"
             phase = .transcribing
-            errorMessage = pending.jobId == nil
+            let message = pending.jobId == nil
                 ? "Retrying recording upload so backend processing can continue."
                 : "Checking backend processing for the last recording."
+            setNotice(message, style: .info)
         }
 
         do {
@@ -592,30 +675,64 @@ final class ConversationSessionViewModel: ObservableObject {
                 }
                 phase = summary == nil ? .transcriptReady : .completed
             } else if result.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                errorMessage = "Previous recording finished, but no speech was detected."
+                setNotice("Previous recording finished, but no speech was detected.", style: .warning)
             } else {
                 notifyBackgroundProcessingUpdated(meetingId: result.meetingId)
-                errorMessage = result.summary == nil
+                let message = result.summary == nil
                     ? "Previous recording transcript is saved. Generate a summary from the conversation detail."
                     : "Previous recording transcript and summary are saved."
+                setNotice(message, style: .success)
             }
         } catch is CancellationError {
             refreshBackgroundProcessingRecordings()
             if foreground {
                 phase = .failed
             }
-            errorMessage = "Backend processing is still pending. Reopen Her to refresh the result."
+            setNotice("Backend processing is still pending. Reopen Her to refresh the result.", style: .info)
         } catch let error as MeetingProcessingError {
             savePendingFailure(from: error, pending: pending, foreground: foreground)
         } catch {
+            if let errorCode = connectivityErrorCode(from: error) {
+                let failed = pending.withFailure(statusCode: errorCode, message: connectivityPendingMessage)
+                PendingMeetingProcessingJobStore.save(failed)
+                refreshBackgroundProcessingRecordings()
+                schedulePendingRetry(for: failed)
+                setNotice(connectivityPendingMessage, style: .info)
+                if foreground {
+                    phase = .failed
+                }
+                return
+            }
             let failed = pending.withFailure(statusCode: nil, message: error.localizedDescription)
             PendingMeetingProcessingJobStore.save(failed)
             refreshBackgroundProcessingRecordings()
-            errorMessage = "Pending recording could not be processed. The local audio is still saved; tap the recording to retry. \(error.localizedDescription)"
+            schedulePendingRetry(for: failed)
+            setNotice("Pending recording could not be processed. The local audio is still saved and Her will retry automatically. \(error.localizedDescription)", style: .warning)
             if foreground {
                 phase = .failed
             }
         }
+    }
+
+    private func markPendingJobsWaitingForConnectivity(_ jobs: [PendingMeetingProcessingJob]) {
+        for pending in jobs where pending.lastErrorCode != 402 {
+            PendingMeetingProcessingJobStore.save(
+                pending.withFailure(
+                    statusCode: URLError.Code.notConnectedToInternet.rawValue,
+                    message: connectivityPendingMessage
+                )
+            )
+        }
+        refreshBackgroundProcessingRecordings()
+    }
+
+    private func connectivityErrorCode(from error: Error) -> Int? {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain,
+              connectivityRetryErrorCodes.contains(nsError.code) else {
+            return nil
+        }
+        return nsError.code
     }
 
     private func processPendingRecording(
@@ -705,11 +822,11 @@ final class ConversationSessionViewModel: ObservableObject {
         let jobs = PendingMeetingProcessingJobStore.loadAll().filter { $0.recordingPath == recording.recordingPath }
         guard !jobs.isEmpty else {
             refreshBackgroundProcessingRecordings()
-            errorMessage = "That recording has already finished or is no longer pending."
+            setNotice("That recording has already finished or is no longer pending.", style: .success)
             return
         }
         if backgroundProcessingPaths.contains(recording.recordingPath) {
-            errorMessage = "That recording is already processing in the background."
+            setNotice("That recording is already processing in the background.", style: .info)
             return
         }
         resumePendingProcessingsInBackground(jobs, force: true)
@@ -769,7 +886,15 @@ final class ConversationSessionViewModel: ObservableObject {
             pending.withFailure(statusCode: statusCode, message: message)
         )
         refreshBackgroundProcessingRecordings()
-        errorMessage = message
+        if statusCode == 402 {
+            setNotice(message, style: .warning)
+        } else {
+            schedulePendingRetry(for: pending.withFailure(statusCode: statusCode, message: message))
+            setNotice(message.replacingOccurrences(
+                of: "tap the recording to retry",
+                with: "Her will retry automatically"
+            ), style: .warning)
+        }
         if foreground {
             phase = .failed
         }
@@ -811,7 +936,7 @@ final class ConversationSessionViewModel: ObservableObject {
             guard phase == .interrupted else {
                 return
             }
-            errorMessage = "Recording is paused. Continue recording or finish with \(elapsedText) of captured audio."
+            setNotice("Recording is paused. Continue recording or finish with \(elapsedText) of captured audio.", style: .info)
         @unknown default:
             break
         }
@@ -824,7 +949,31 @@ final class ConversationSessionViewModel: ObservableObject {
         activeInputName = "Recording interrupted"
         audioLevel = 0
         phase = .interrupted
-        errorMessage = "\(reason) Captured \(elapsedText). Continue recording or finish with the saved audio."
+        setNotice("\(reason) Captured \(elapsedText). Continue recording or finish with the saved audio.", style: .warning)
+    }
+
+    private func setNotice(_ message: String?, style: RecordingNoticeStyle = .error) {
+        noticeStyle = style
+        errorMessage = message
+    }
+
+    private func schedulePendingRetry(for pending: PendingMeetingProcessingJob) {
+        guard pending.lastErrorCode != 402,
+              !scheduledRetryPaths.contains(pending.recordingPath) else {
+            return
+        }
+        scheduledRetryPaths.insert(pending.recordingPath)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            self.scheduledRetryPaths.remove(pending.recordingPath)
+            let jobs = PendingMeetingProcessingJobStore.loadAll().filter { $0.recordingPath == pending.recordingPath }
+            guard let latest = jobs.first,
+                  latest.lastErrorCode != 402,
+                  !self.backgroundProcessingPaths.contains(latest.recordingPath) else {
+                return
+            }
+            self.resumePendingProcessingsInBackground([latest], force: true)
+        }
     }
 
     private func cleanLocationName(_ value: String?) -> String? {

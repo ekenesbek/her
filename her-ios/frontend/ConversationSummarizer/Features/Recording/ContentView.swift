@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreLocation
 import SwiftUI
+import UIKit
 import UserNotifications
 
 struct RootView: View {
@@ -611,14 +612,14 @@ struct ContentView: View {
             return
         }
         guard subscriptionStore.canStartRecording else {
-            viewModel.showMessage(subscriptionStore.limitReachedMessage)
+            viewModel.showMessage(subscriptionStore.limitReachedMessage, style: .warning)
             return
         }
 
         Task { @MainActor in
             await subscriptionStore.refresh(meetings: meetingsStore.meetings)
             guard subscriptionStore.canStartRecording else {
-                viewModel.showMessage(subscriptionStore.limitReachedMessage)
+                viewModel.showMessage(subscriptionStore.limitReachedMessage, style: .warning)
                 return
             }
             wakeCommands.pauseForRecording()
@@ -784,7 +785,7 @@ struct ContentView: View {
         quotaStopInFlight = true
         Task { @MainActor in
             wakeCommands.pauseForRecording()
-            viewModel.showMessage("Recording minutes reached. Saving the captured audio and processing it now.")
+            viewModel.showMessage("Recording minutes reached. Saving the captured audio and processing it now.", style: .info)
             if let recording = await viewModel.stopAndTranscribe(locationName: liveContext.recordingLocationName) {
                 openProcessingRecording(recording)
             } else {
@@ -902,7 +903,7 @@ private struct ExactHomeScreen: View {
                         .padding(.top, 8)
 
                     if let errorMessage = viewModel.errorMessage {
-                        ErrorBanner(message: errorMessage)
+                        RecordingNoticeBanner(message: errorMessage, style: viewModel.noticeStyle)
                             .padding(.top, 18)
                     }
 
@@ -1799,7 +1800,7 @@ private struct BackgroundProcessingRow: View {
                     .scaleEffect(0.72)
                     .padding(.top, 6)
             } else {
-                Image(systemName: "exclamationmark.triangle")
+                Image(systemName: statusIconName)
                     .font(.system(size: 13, weight: .regular))
                     .foregroundColor(AppTheme.fg)
                     .padding(.top, 6)
@@ -1807,6 +1808,16 @@ private struct BackgroundProcessingRow: View {
         }
         .padding(.vertical, 14)
         .overlay(alignment: .bottom) { DividerLine() }
+    }
+
+    private var statusIconName: String {
+        if item.isQuotaBlocked {
+            return "exclamationmark.triangle"
+        }
+        if item.isWaitingForConnectivity {
+            return "wifi.exclamationmark"
+        }
+        return "arrow.triangle.2.circlepath"
     }
 }
 
@@ -2102,7 +2113,7 @@ private struct TranscriptWaitingPanel: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 9) {
                     if hasError {
-                        Image(systemName: "exclamationmark.triangle")
+                        Image(systemName: statusIconName)
                             .font(.system(size: 16, weight: .regular))
                             .foregroundColor(AppTheme.fg)
                     } else {
@@ -2110,7 +2121,7 @@ private struct TranscriptWaitingPanel: View {
                             .progressViewStyle(.circular)
                             .tint(AppTheme.fg)
                     }
-                    SectionTitle(label: "TRANSCRIPT", title: hasError ? "Waiting to upload" : "Transcribing...", icon: "text.quote")
+                    SectionTitle(label: "TRANSCRIPT", title: waitingTitle, icon: "text.quote")
                 }
 
                 Text(detail)
@@ -2130,10 +2141,44 @@ private struct TranscriptWaitingPanel: View {
         return !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var isQuotaBlocked: Bool {
+        recording?.isQuotaBlocked == true
+    }
+
+    private var isWaitingForConnectivity: Bool {
+        recording?.isWaitingForConnectivity == true
+    }
+
+    private var statusIconName: String {
+        if isQuotaBlocked {
+            return "exclamationmark.triangle"
+        }
+        if isWaitingForConnectivity {
+            return "wifi.exclamationmark"
+        }
+        return "arrow.triangle.2.circlepath"
+    }
+
+    private var waitingTitle: String {
+        if isQuotaBlocked {
+            return "Waiting for Plus"
+        }
+        if isWaitingForConnectivity {
+            return "Waiting for internet"
+        }
+        return hasError ? "Upload will retry" : "Transcribing..."
+    }
+
     private var detail: String {
         if let message = recording?.lastErrorMessage,
            !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return message
+            if isQuotaBlocked {
+                return message
+            }
+            if isWaitingForConnectivity {
+                return message
+            }
+            return "\(message) Her will keep retrying automatically."
         }
         let location = recording?.displayLocation
         if let location, !location.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2196,6 +2241,7 @@ private struct ConversationChatPanel: View {
     @State private var draft = ""
     @State private var messages: [ConversationChatMessage] = []
     @State private var isSending = false
+    @State private var selectedTextMessage: ConversationChatMessage?
     private let chatService = MeetingChatServiceFactory.make()
 
     var body: some View {
@@ -2208,7 +2254,12 @@ private struct ConversationChatPanel: View {
                                 ChatEmptyState()
                             } else {
                                 ForEach(messages) { message in
-                                    ConversationChatBubble(message: message)
+                                    ConversationChatBubble(
+                                        message: message,
+                                        onSelectText: {
+                                            selectedTextMessage = message
+                                        }
+                                    )
                                 }
                             }
                         }
@@ -2244,6 +2295,9 @@ private struct ConversationChatPanel: View {
                 }
                 .task(id: meeting.id) {
                     await loadMessages()
+                }
+                .sheet(item: $selectedTextMessage) { message in
+                    ChatTextSelectionSheet(message: message)
                 }
             } else {
                 AskAIPaywallCard(subscription: subscription, onUpgrade: onUpgradeSubscription)
@@ -2352,6 +2406,7 @@ private struct ConversationChatMessage: Identifiable, Equatable {
 
 private struct ConversationChatBubble: View {
     let message: ConversationChatMessage
+    let onSelectText: () -> Void
 
     var body: some View {
         HStack {
@@ -2369,6 +2424,17 @@ private struct ConversationChatBubble: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(message.role == .user ? Color.clear : AppTheme.borderStrong, lineWidth: 1)
                 )
+                .contextMenu {
+                    Button {
+                        UIPasteboard.general.string = copyText
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+
+                    Button(action: onSelectText) {
+                        Label("Select text", systemImage: "text.cursor")
+                    }
+                }
             if message.role == .assistant {
                 Spacer(minLength: 36)
             }
@@ -2390,6 +2456,89 @@ private struct ConversationChatBubble: View {
 
     private var displayText: String {
         message.text.isEmpty ? "..." : message.text
+    }
+
+    private var copyText: String {
+        switch message.role {
+        case .user:
+            return displayText
+        case .assistant:
+            return ChatMessageFormatter.selectableText(from: displayText)
+        }
+    }
+}
+
+private struct ChatTextSelectionSheet: View {
+    let message: ConversationChatMessage
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            SelectableChatSheetTextView(text: selectableText)
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .navigationTitle(message.role == .user ? "Your message" : "AI answer")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button("Done") {
+                            dismiss()
+                        }
+                    }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Copy") {
+                            UIPasteboard.general.string = selectableText
+                        }
+                    }
+                }
+        }
+    }
+
+    private var selectableText: String {
+        if message.role == .assistant {
+            return ChatMessageFormatter.selectableText(from: message.text)
+        }
+        return message.text
+    }
+}
+
+private struct SelectableChatSheetTextView: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.backgroundColor = .clear
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = true
+        textView.showsVerticalScrollIndicator = false
+        textView.showsHorizontalScrollIndicator = false
+        textView.textContainerInset = UIEdgeInsets(top: 0, left: 0, bottom: 24, right: 0)
+        textView.textContainer.lineFragmentPadding = 0
+        textView.textContainer.widthTracksTextView = true
+        textView.adjustsFontForContentSizeCategory = false
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        textView.attributedText = attributedString()
+        textView.tintColor = UIColor(hex: 0x0f0f0f)
+        textView.isSelectable = true
+    }
+
+    private func attributedString() -> NSAttributedString {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = 4
+        paragraphStyle.paragraphSpacing = 0
+
+        return NSAttributedString(
+            string: text,
+            attributes: [
+                .font: UIFont.herChatSerif(size: 18),
+                .foregroundColor: UIColor(hex: 0x0f0f0f),
+                .paragraphStyle: paragraphStyle
+            ]
+        )
     }
 }
 
@@ -2589,6 +2738,24 @@ private enum ChatMessageFormatter {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func selectableText(from text: String) -> String {
+        let rendered = blocks(from: text)
+            .map { block -> String in
+                switch block {
+                case .text(let value):
+                    return displayLines(from: value)
+                        .map(plainText)
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "\n")
+                case .table(let table):
+                    return selectableText(from: table)
+                }
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        return rendered.isEmpty ? text : rendered
+    }
+
     static func displayLines(from text: String) -> [String] {
         let lines = normalizedMarkdown(from: text)
             .components(separatedBy: "\n")
@@ -2670,6 +2837,30 @@ private enum ChatMessageFormatter {
             return Array(row.prefix(row.count))
         }
         return row + Array(repeating: "", count: count - row.count)
+    }
+
+    private static func selectableText(from table: ChatMarkdownTable) -> String {
+        table.rows
+            .map { row in
+                var lines: [String] = []
+                if let rowLabel = table.rowLabel(for: row) {
+                    lines.append(rowLabel)
+                }
+                for columnIndex in row.indices {
+                    let cell = row[columnIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !cell.isEmpty, !table.shouldHideColumn(columnIndex, in: row) else {
+                        continue
+                    }
+                    if let header = table.header(at: columnIndex), table.rows.count > 1 {
+                        lines.append("\(header): \(cell)")
+                    } else {
+                        lines.append(cell)
+                    }
+                }
+                return lines.joined(separator: "\n")
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
     }
 }
 
@@ -2759,6 +2950,7 @@ private struct ExactMemoryScreen: View {
                         }
                         .padding(.top, 18)
                     }
+                    .padding(.top, 12)
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 4)
@@ -3710,12 +3902,6 @@ private struct ExactSettingsHerScreen: View {
                         VStack(spacing: 0) {
                             SettingsValueRow(icon: "globe", label: "Language", value: "auto")
                             DividerLine()
-                            SettingsValueRow(icon: "mic", label: "Wake word", subtitle: "assistant name, Hey optional", value: settings.aiDisplayName.lowercased())
-                            DividerLine()
-                            SettingsToggleRow(icon: "waveform", label: "Listen for \(settings.aiDisplayName)", subtitle: wakeCommandSubtitle, isOn: wakeCommandBinding)
-                            DividerLine()
-                            SettingsValueRow(icon: "sparkles", label: "Command status", subtitle: wakeCommands.statusText, value: wakeCommands.shortStatus)
-                            DividerLine()
                             SettingsToggleRow(icon: "waveform", label: "Silence trim", isOn: $silenceTrim)
                         }
                     }
@@ -3796,17 +3982,6 @@ private struct ExactSettingsHerScreen: View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
         return "\(version) (\(build))"
-    }
-
-    private var wakeCommandBinding: Binding<Bool> {
-        Binding(
-            get: { wakeCommands.isEnabled },
-            set: { wakeCommands.setEnabled($0) }
-        )
-    }
-
-    private var wakeCommandSubtitle: String {
-        "Say \"Hey \(settings.aiDisplayName)\" or \"\(settings.aiDisplayName)\", then \"start recording\". Use the on-screen Stop button while recording."
     }
 
     private var currentUserDisplayName: String {
@@ -5783,6 +5958,111 @@ private struct SummaryPanel: View {
     }
 }
 
+private struct ConversationContentsCache {
+    let segments: [MeetingTranscriptSegment]
+    let outlineItems: [MeetingOutlineItem]
+    let chunks: [TranscriptDisplayChunk]
+    let speakerOrder: [String]
+
+    static func build(for meeting: StoredMeeting) -> ConversationContentsCache {
+        let segments = displaySegments(for: meeting)
+        let outlineItems = meeting.summary.outline.isEmpty
+            ? MeetingContentsBuilder.outline(from: segments, transcript: meeting.transcript)
+            : meeting.summary.outline
+        let chunks = TranscriptDisplayChunk.group(segments: segments, speakerKey: speakerKey(for:))
+        var speakerOrder: [String] = []
+        for chunk in chunks {
+            guard !speakerOrder.contains(chunk.speakerKey) else {
+                continue
+            }
+            speakerOrder.append(chunk.speakerKey)
+        }
+
+        return ConversationContentsCache(
+            segments: segments,
+            outlineItems: outlineItems,
+            chunks: chunks,
+            speakerOrder: speakerOrder
+        )
+    }
+
+    private static func displaySegments(for meeting: StoredMeeting) -> [MeetingTranscriptSegment] {
+        if !meeting.segments.isEmpty {
+            return meeting.segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+
+        let trimmed = meeting.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return []
+        }
+        return [
+            MeetingTranscriptSegment(
+                start: 0,
+                end: meeting.durationSeconds ?? 0,
+                text: trimmed,
+                speaker: "Speaker"
+            )
+        ]
+    }
+
+    private static func speakerKey(for segment: MeetingTranscriptSegment) -> String {
+        let trimmed = segment.speaker?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Speaker" : trimmed
+    }
+}
+
+private struct PlaybackProgressObserver: View {
+    @ObservedObject var playback: MeetingAudioPlaybackController
+    @ObservedObject var progress: MeetingAudioPlaybackProgress
+    let chunks: [TranscriptDisplayChunk]
+    let onActiveChunkChange: (String?) -> Void
+    let onPlayingChange: (Bool) -> Void
+    @State private var lastActiveChunkID: String?
+    @State private var lastIsPlaying = false
+
+    var body: some View {
+        Color.clear
+            .onAppear {
+                publishState(force: true)
+            }
+            .onChange(of: progress.currentTime) { _ in
+                publishState(force: false)
+            }
+            .onChange(of: playback.isPlaying) { _ in
+                publishState(force: true)
+            }
+            .onChange(of: playback.hasPlaybackPosition) { _ in
+                publishState(force: true)
+            }
+            .onChange(of: chunks) { _ in
+                publishState(force: true)
+            }
+    }
+
+    private func publishState(force: Bool) {
+        let nextActiveChunkID = activeChunkID()
+        if force || nextActiveChunkID != lastActiveChunkID {
+            lastActiveChunkID = nextActiveChunkID
+            onActiveChunkChange(nextActiveChunkID)
+        }
+
+        if force || playback.isPlaying != lastIsPlaying {
+            lastIsPlaying = playback.isPlaying
+            onPlayingChange(playback.isPlaying)
+        }
+    }
+
+    private func activeChunkID() -> String? {
+        guard playback.isPlaying || playback.hasPlaybackPosition else {
+            return nil
+        }
+        let time = progress.currentTime
+        return chunks.first { chunk in
+            time + 0.05 >= chunk.start && time <= chunk.end + 0.25
+        }?.id
+    }
+}
+
 private struct ConversationContentsPanel: View {
     let meeting: StoredMeeting
     let scrollProxy: ScrollViewProxy
@@ -5793,8 +6073,26 @@ private struct ConversationContentsPanel: View {
     @State private var speakerNames: [String: String] = [:]
     @State private var voiceProfiles: [VoiceProfile] = []
     @State private var voiceProfilesLoading = false
+    @State private var contentCache: ConversationContentsCache
+    @State private var activeChunkID: String?
+    @State private var playbackIsPlaying = false
     @State private var lastScrolledChunkID: String?
     @StateObject private var playback = MeetingAudioPlaybackController()
+
+    init(
+        meeting: StoredMeeting,
+        scrollProxy: ScrollViewProxy,
+        currentUserName: String,
+        onUpdateTranscript: @escaping (String, [MeetingTranscriptSegment]) async throws -> StoredMeeting,
+        onAssignSpeaker: @escaping (String, String?, String) async throws -> SpeakerAssignmentResult
+    ) {
+        self.meeting = meeting
+        self.scrollProxy = scrollProxy
+        self.currentUserName = currentUserName
+        self.onUpdateTranscript = onUpdateTranscript
+        self.onAssignSpeaker = onAssignSpeaker
+        _contentCache = State(initialValue: ConversationContentsCache.build(for: meeting))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
@@ -5802,7 +6100,7 @@ private struct ConversationContentsPanel: View {
 
             ConversationOutlineSection(items: outlineItems)
 
-            VStack(alignment: .leading, spacing: 18) {
+            LazyVStack(alignment: .leading, spacing: 18) {
                 ContentsSectionTitle(title: "Transcript")
 
                 if displaySegments.isEmpty {
@@ -5818,8 +6116,8 @@ private struct ConversationContentsPanel: View {
                             chunk: chunk,
                             speakerName: displayName(for: chunk),
                             isActive: activeChunkID == chunk.id,
-                            isPlaying: playback.isPlaying && activeChunkID == chunk.id,
-                            playbackTime: playback.currentTime,
+                            isPlaying: playbackIsPlaying && activeChunkID == chunk.id,
+                            playbackProgress: playback.progress,
                             voiceProfiles: voiceProfiles,
                             currentUserName: currentUserName,
                             onTogglePlay: {
@@ -5842,19 +6140,39 @@ private struct ConversationContentsPanel: View {
                     }
                 }
             }
+
         }
+        .background(
+            PlaybackProgressObserver(
+                playback: playback,
+                progress: playback.progress,
+                chunks: displayChunks,
+                onActiveChunkChange: { chunkID in
+                    activeChunkID = chunkID
+                },
+                onPlayingChange: { isPlaying in
+                    playbackIsPlaying = isPlaying
+                }
+            )
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+        )
         .padding(.top, 4)
         .onAppear {
+            refreshContentCache(for: meeting)
+            activeChunkID = chunkID(at: playback.currentTime)
+            playbackIsPlaying = playback.isPlaying
             speakerNames = SpeakerNamePreferences.load(meetingId: meeting.id)
             Task { await loadVoiceProfiles() }
         }
-        .onChange(of: playback.currentTime) { _ in
-            scrollToActiveChunkIfNeeded()
+        .onChange(of: meeting) { newMeeting in
+            refreshContentCache(for: newMeeting)
+            activeChunkID = chunkID(at: playback.currentTime)
         }
         .onChange(of: activeChunkID) { _ in
             scrollToActiveChunkIfNeeded(force: true)
         }
-        .onChange(of: playback.isPlaying) { isPlaying in
+        .onChange(of: playbackIsPlaying) { isPlaying in
             if isPlaying {
                 scrollToActiveChunkIfNeeded(force: true)
             } else {
@@ -5873,42 +6191,15 @@ private struct ConversationContentsPanel: View {
     }
 
     private var displaySegments: [MeetingTranscriptSegment] {
-        if !meeting.segments.isEmpty {
-            return meeting.segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        }
-
-        let trimmed = meeting.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return []
-        }
-        return [
-            MeetingTranscriptSegment(
-                start: 0,
-                end: meeting.durationSeconds ?? 0,
-                text: trimmed,
-                speaker: "Speaker"
-            )
-        ]
+        return contentCache.segments
     }
 
     private var outlineItems: [MeetingOutlineItem] {
-        if !meeting.summary.outline.isEmpty {
-            return meeting.summary.outline
-        }
-        return MeetingContentsBuilder.outline(from: displaySegments, transcript: meeting.transcript)
+        contentCache.outlineItems
     }
 
     private var displayChunks: [TranscriptDisplayChunk] {
-        TranscriptDisplayChunk.group(segments: displaySegments, speakerKey: speakerKey(for:))
-    }
-
-    private var activeChunkID: String? {
-        guard playback.isPlaying || playback.hasPlaybackPosition else {
-            return nil
-        }
-        return displayChunks.first { chunk in
-            playback.currentTime + 0.05 >= chunk.start && playback.currentTime <= chunk.end + 0.25
-        }?.id
+        contentCache.chunks
     }
 
     private func speakerKey(for segment: MeetingTranscriptSegment) -> String {
@@ -5933,22 +6224,11 @@ private struct ConversationContentsPanel: View {
             return SpeakerDisplayNames.decorated(speakerKey, currentUserName: currentUserName)
         }
 
-        let orderedKeys = speakerOrder
+        let orderedKeys = contentCache.speakerOrder
         if let index = orderedKeys.firstIndex(of: speakerKey) {
             return "Speaker \(index + 1)"
         }
         return "Speaker"
-    }
-
-    private var speakerOrder: [String] {
-        var keys: [String] = []
-        for chunk in displayChunks {
-            let key = chunk.speakerKey
-            if !keys.contains(key) {
-                keys.append(key)
-            }
-        }
-        return keys
     }
 
     private func saveSpeakerName(
@@ -5988,6 +6268,9 @@ private struct ConversationContentsPanel: View {
         if activeChunkID == chunk.id {
             if playback.isPlaying {
                 playback.pausePlayback()
+            } else if playback.currentTime >= max(chunk.start, chunk.end - 0.15) {
+                scrollToChunk(chunk.id, force: true)
+                playback.playFrom(chunk.start, meeting: meeting)
             } else {
                 scrollToChunk(chunk.id, force: true)
                 playback.resumePlayback(for: meeting)
@@ -6077,22 +6360,42 @@ private struct ConversationContentsPanel: View {
             voiceProfiles.insert(profile, at: 0)
         }
     }
+
+    private func refreshContentCache(for meeting: StoredMeeting) {
+        contentCache = ConversationContentsCache.build(for: meeting)
+    }
+
+    private func chunkID(at time: Double) -> String? {
+        guard playback.isPlaying || playback.hasPlaybackPosition else {
+            return nil
+        }
+        return displayChunks.first { chunk in
+            time + 0.05 >= chunk.start && time <= chunk.end + 0.25
+        }?.id
+    }
 }
 
 private struct ConversationAudioRow: View {
     let meeting: StoredMeeting
     @ObservedObject var playback: MeetingAudioPlaybackController
+    @ObservedObject private var progress: MeetingAudioPlaybackProgress
     @State private var scrubberValue: Double = 0
     @State private var isScrubbing = false
     @State private var wasPlayingBeforeScrub = false
     @State private var controlsExpanded = true
+
+    init(meeting: StoredMeeting, playback: MeetingAudioPlaybackController) {
+        self.meeting = meeting
+        self.playback = playback
+        _progress = ObservedObject(wrappedValue: playback.progress)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             DividerLine()
             VStack(spacing: controlsExpanded ? 14 : 0) {
                 HStack(alignment: .center, spacing: 12) {
-                    Text("\(MeetingTimeFormatter.fullTimestamp(isScrubbing ? scrubberValue : playback.currentTime)) / \(MeetingTimeFormatter.fullTimestamp(playbackDuration))")
+                    Text("\(MeetingTimeFormatter.fullTimestamp(isScrubbing ? scrubberValue : progress.currentTime)) / \(MeetingTimeFormatter.fullTimestamp(playbackDuration))")
                         .font(.system(size: 16, weight: .regular, design: .monospaced))
                         .foregroundColor(AppTheme.muted)
                         .lineLimit(1)
@@ -6114,7 +6417,7 @@ private struct ConversationAudioRow: View {
                 if controlsExpanded {
                     VStack(spacing: 12) {
                         AudioWaveformScrubber(
-                            value: isScrubbing ? scrubberValue : playback.currentTime,
+                            value: isScrubbing ? scrubberValue : progress.currentTime,
                             duration: sliderUpperBound,
                             samples: playback.waveformSamples,
                             isEnabled: canPlay && !playback.isLoading,
@@ -6177,6 +6480,14 @@ private struct ConversationAudioRow: View {
 
                             Spacer(minLength: 0)
                         }
+
+                        if let errorMessage = playback.errorMessage {
+                            Text(errorMessage)
+                                .font(.system(size: 12, weight: .regular))
+                                .foregroundColor(AppTheme.danger)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
@@ -6185,11 +6496,11 @@ private struct ConversationAudioRow: View {
             DividerLine()
         }
         .onAppear {
-            scrubberValue = playback.currentTime
+            scrubberValue = progress.currentTime
             playback.preloadLocalAudioIfAvailable(for: meeting)
             playback.loadLocalWaveformIfAvailable(for: meeting)
         }
-        .onChange(of: playback.currentTime) { newValue in
+        .onChange(of: progress.currentTime) { newValue in
             if !isScrubbing {
                 scrubberValue = newValue
             }
@@ -6501,15 +6812,29 @@ private struct TranscriptDisplayChunkTimelineItem: Equatable {
 }
 
 @MainActor
+private final class MeetingAudioPlaybackProgress: ObservableObject {
+    @Published private(set) var currentTime: Double = 0
+
+    func update(_ time: Double) {
+        let normalized = time.isFinite ? max(0, time) : 0
+        guard abs(normalized - currentTime) >= 0.03 || normalized == 0 else {
+            return
+        }
+        currentTime = normalized
+    }
+}
+
+@MainActor
 private final class MeetingAudioPlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published private(set) var isLoading = false
     @Published private(set) var isPlaying = false
-    @Published private(set) var currentTime: Double = 0
+    private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var waveformSamples: [CGFloat] = []
     @Published private(set) var playbackRate: Double = 1
     @Published private(set) var errorMessage: String?
     @Published private(set) var hasPlaybackPosition = false
+    let progress = MeetingAudioPlaybackProgress()
 
     private var player: AVAudioPlayer?
     private var loadedMeetingID: String?
@@ -6525,7 +6850,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
     }
 
     func canPlay(_ meeting: StoredMeeting) -> Bool {
-        MeetingAudioFileStore.load(meetingId: meeting.id) != nil || (meeting.hasAudio && downloader != nil)
+        MeetingAudioFileStore.load(meetingId: meeting.id) != nil || downloader != nil
     }
 
     func durationSeconds(for meeting: StoredMeeting) -> Double {
@@ -6581,7 +6906,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
             loadedMeetingID = meeting.id
             duration = newPlayer.duration
             if !hasPlaybackPosition {
-                currentTime = newPlayer.currentTime
+                updateCurrentTime(newPlayer.currentTime)
             }
             loadWaveform(from: localURL, meetingID: meeting.id)
         } catch {
@@ -6590,12 +6915,12 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
     }
 
     func previewSeek(to seconds: Double) {
-        currentTime = clampedTime(seconds)
+        updateCurrentTime(clampedTime(seconds))
     }
 
     func toggleFullPlayback(for meeting: StoredMeeting) {
         Task { @MainActor in
-            guard canPlay(meeting) else {
+            guard requirePlayable(meeting) else {
                 return
             }
             let requestSerial = beginPlaybackRequest()
@@ -6608,8 +6933,12 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                     return
                 }
                 stopAt = nil
+                if isAtEnd(player) {
+                    player.currentTime = 0
+                    updateCurrentTime(0)
+                }
                 hasPlaybackPosition = true
-                play(player)
+                try play(player)
                 isPlaying = true
                 startTimer()
             } catch {
@@ -6620,7 +6949,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
 
     func playChunk(_ chunk: TranscriptDisplayChunk, meeting: StoredMeeting) {
         Task { @MainActor in
-            guard canPlay(meeting) else {
+            guard requirePlayable(meeting) else {
                 return
             }
             let requestSerial = beginPlaybackRequest()
@@ -6629,10 +6958,10 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                     return
                 }
                 player.currentTime = max(0, chunk.start)
-                currentTime = player.currentTime
+                updateCurrentTime(player.currentTime)
                 hasPlaybackPosition = true
                 stopAt = max(chunk.start, chunk.end)
-                play(player)
+                try play(player)
                 isPlaying = true
                 startTimer()
             } catch {
@@ -6643,7 +6972,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
 
     func playFrom(_ seconds: Double, meeting: StoredMeeting) {
         Task { @MainActor in
-            guard canPlay(meeting) else {
+            guard requirePlayable(meeting) else {
                 return
             }
             let requestSerial = beginPlaybackRequest()
@@ -6653,9 +6982,9 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                 }
                 stopAt = nil
                 player.currentTime = clampedTime(seconds)
-                currentTime = player.currentTime
+                updateCurrentTime(player.currentTime)
                 hasPlaybackPosition = true
-                play(player)
+                try play(player)
                 isPlaying = true
                 startTimer()
             } catch {
@@ -6666,7 +6995,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
 
     func resumePlayback(for meeting: StoredMeeting) {
         Task { @MainActor in
-            guard canPlay(meeting), hasPlaybackPosition else {
+            guard requirePlayable(meeting), hasPlaybackPosition else {
                 return
             }
             let requestSerial = beginPlaybackRequest()
@@ -6676,10 +7005,10 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                     return
                 }
                 stopAt = nil
-                player.currentTime = clampedTime(resumeTime)
-                currentTime = player.currentTime
+                player.currentTime = isAtEnd(player, time: resumeTime) ? 0 : clampedTime(resumeTime)
+                updateCurrentTime(player.currentTime)
                 hasPlaybackPosition = true
-                play(player)
+                try play(player)
                 isPlaying = true
                 startTimer()
             } catch {
@@ -6690,7 +7019,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
 
     func seek(to seconds: Double, meeting: StoredMeeting, resumePlayback: Bool) {
         Task { @MainActor in
-            guard canPlay(meeting) else {
+            guard requirePlayable(meeting) else {
                 return
             }
             let requestSerial = beginPlaybackRequest()
@@ -6699,10 +7028,10 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                     return
                 }
                 player.currentTime = clampedTime(seconds)
-                currentTime = player.currentTime
+                updateCurrentTime(player.currentTime)
                 hasPlaybackPosition = true
                 if resumePlayback {
-                    play(player)
+                    try play(player)
                     isPlaying = true
                     startTimer()
                 } else {
@@ -6716,7 +7045,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
 
     func skip(by seconds: Double, meeting: StoredMeeting) {
         Task { @MainActor in
-            guard canPlay(meeting) else {
+            guard requirePlayable(meeting) else {
                 return
             }
             let requestSerial = beginPlaybackRequest()
@@ -6726,10 +7055,10 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
                 }
                 stopAt = nil
                 player.currentTime = clampedTime(player.currentTime + seconds)
-                currentTime = player.currentTime
+                updateCurrentTime(player.currentTime)
                 hasPlaybackPosition = true
                 if isPlaying {
-                    play(player)
+                    try play(player)
                     startTimer()
                 }
             } catch {
@@ -6763,7 +7092,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         stopAt = nil
         isLoading = false
         hasPlaybackPosition = false
-        currentTime = 0
+        updateCurrentTime(0)
         duration = 0
         isPlaying = false
     }
@@ -6787,29 +7116,46 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         let audioURL: URL
         if let localURL = MeetingAudioFileStore.load(meetingId: meeting.id) {
             audioURL = localURL
-        } else if meeting.hasAudio, let downloader {
+        } else if let downloader {
             audioURL = try await downloader.downloadAudio(meetingId: meeting.id, locationName: meeting.locationName)
         } else {
-            throw MeetingsServiceError.backendFailed
+            throw MeetingAudioPlaybackError.audioUnavailable
         }
 
         guard isCurrentPlaybackRequest(requestSerial) else {
             return nil
         }
-        let newPlayer = try AVAudioPlayer(contentsOf: audioURL)
+        let newPlayer: AVAudioPlayer
+        do {
+            newPlayer = try AVAudioPlayer(contentsOf: audioURL)
+        } catch {
+            if let downloader, MeetingAudioFileStore.load(meetingId: meeting.id) != nil {
+                let downloadedURL = try await downloader.downloadAudio(meetingId: meeting.id, locationName: meeting.locationName)
+                newPlayer = try AVAudioPlayer(contentsOf: downloadedURL)
+            } else {
+                throw error
+            }
+        }
         newPlayer.delegate = self
         applyPlaybackRate(to: newPlayer)
         newPlayer.prepareToPlay()
         player = newPlayer
         loadedMeetingID = meeting.id
         duration = newPlayer.duration
-        currentTime = newPlayer.currentTime
+        updateCurrentTime(newPlayer.currentTime)
         loadWaveform(from: audioURL, meetingID: meeting.id)
         return newPlayer
     }
 
+    private func updateCurrentTime(_ time: Double) {
+        let normalized = time.isFinite ? max(0, time) : 0
+        currentTime = normalized
+        progress.update(normalized)
+    }
+
     private func beginPlaybackRequest() -> Int {
         playbackRequestSerial += 1
+        errorMessage = nil
         return playbackRequestSerial
     }
 
@@ -6842,10 +7188,13 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         player.rate = Float(playbackRate)
     }
 
-    private func play(_ player: AVAudioPlayer) {
-        try? Self.configurePlaybackAudioSession()
+    private func play(_ player: AVAudioPlayer) throws {
+        try Self.configurePlaybackAudioSession()
         applyPlaybackRate(to: player)
-        player.play()
+        player.volume = 1
+        guard player.play() else {
+            throw MeetingAudioPlaybackError.playbackDidNotStart
+        }
         player.rate = Float(playbackRate)
     }
 
@@ -6862,7 +7211,7 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
     private func pause() {
         player?.pause()
         if let player {
-            currentTime = player.currentTime
+            updateCurrentTime(player.currentTime)
             hasPlaybackPosition = true
         }
         timer?.invalidate()
@@ -6884,20 +7233,29 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
             stop()
             return
         }
-        currentTime = player.currentTime
-        hasPlaybackPosition = true
+        updateCurrentTime(player.currentTime)
+        if !hasPlaybackPosition {
+            hasPlaybackPosition = true
+        }
         if let stopAt, player.currentTime >= stopAt {
             player.pause()
             player.currentTime = stopAt
-            currentTime = stopAt
-            hasPlaybackPosition = true
+            updateCurrentTime(stopAt)
+            if !hasPlaybackPosition {
+                hasPlaybackPosition = true
+            }
             self.stopAt = nil
             timer?.invalidate()
             timer = nil
-            isPlaying = false
+            if isPlaying {
+                isPlaying = false
+            }
             try? Self.deactivatePlaybackAudioSession()
         } else {
-            isPlaying = player.isPlaying
+            let playerIsPlaying = player.isPlaying
+            if isPlaying != playerIsPlaying {
+                isPlaying = playerIsPlaying
+            }
         }
     }
 
@@ -6906,15 +7264,46 @@ private final class MeetingAudioPlaybackController: NSObject, ObservableObject, 
         return min(max(0, seconds), upperBound)
     }
 
+    private func requirePlayable(_ meeting: StoredMeeting) -> Bool {
+        guard canPlay(meeting) else {
+            errorMessage = MeetingAudioPlaybackError.audioUnavailable.localizedDescription
+            return false
+        }
+        return true
+    }
+
+    private func isAtEnd(_ player: AVAudioPlayer, time: Double? = nil) -> Bool {
+        let duration = player.duration
+        guard duration.isFinite, duration > 0 else {
+            return false
+        }
+        return (time ?? player.currentTime) >= duration - 0.15
+    }
+
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in
             self.timer?.invalidate()
             self.timer = nil
             self.stopAt = nil
             self.isPlaying = false
-            self.currentTime = player.currentTime
+            player.currentTime = 0
+            self.updateCurrentTime(0)
             self.hasPlaybackPosition = false
             try? Self.deactivatePlaybackAudioSession()
+        }
+    }
+}
+
+private enum MeetingAudioPlaybackError: LocalizedError {
+    case audioUnavailable
+    case playbackDidNotStart
+
+    var errorDescription: String? {
+        switch self {
+        case .audioUnavailable:
+            return "Audio is not available for this recording yet."
+        case .playbackDidNotStart:
+            return "Audio playback did not start. Check the iPhone audio output and try again."
         }
     }
 }
@@ -7022,7 +7411,7 @@ private struct ConversationTranscriptSegmentRow: View {
     let speakerName: String
     let isActive: Bool
     let isPlaying: Bool
-    let playbackTime: Double
+    let playbackProgress: MeetingAudioPlaybackProgress
     let voiceProfiles: [VoiceProfile]
     let currentUserName: String
     let onTogglePlay: () -> Void
@@ -7046,7 +7435,7 @@ private struct ConversationTranscriptSegmentRow: View {
         speakerName: String,
         isActive: Bool,
         isPlaying: Bool,
-        playbackTime: Double,
+        playbackProgress: MeetingAudioPlaybackProgress,
         voiceProfiles: [VoiceProfile],
         currentUserName: String,
         onTogglePlay: @escaping () -> Void,
@@ -7059,7 +7448,7 @@ private struct ConversationTranscriptSegmentRow: View {
         self.speakerName = speakerName
         self.isActive = isActive
         self.isPlaying = isPlaying
-        self.playbackTime = playbackTime
+        self.playbackProgress = playbackProgress
         self.voiceProfiles = voiceProfiles
         self.currentUserName = currentUserName
         self.onTogglePlay = onTogglePlay
@@ -7090,12 +7479,21 @@ private struct ConversationTranscriptSegmentRow: View {
                 }
                 .buttonStyle(PlainButtonStyle())
 
-                Button(action: beginSpeakerRenaming) {
+                Button(action: onTogglePlay) {
                     Text(speakerName)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundColor(AppTheme.fg)
                 }
                 .buttonStyle(PlainButtonStyle())
+
+                Button(action: beginSpeakerRenaming) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(AppTheme.dim)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .accessibilityLabel("Rename speaker")
 
                 Spacer(minLength: 0)
             }
@@ -7134,16 +7532,31 @@ private struct ConversationTranscriptSegmentRow: View {
                     }
                 }
             } else {
-                playbackHighlightedText
-                    .font(.system(size: 18, weight: .regular))
-                    .lineSpacing(6)
-                    .fixedSize(horizontal: false, vertical: true)
+                if isActive {
+                    TranscriptPlaybackHighlightedText(
+                        chunk: chunk,
+                        progress: playbackProgress,
+                        isPlaying: isPlaying
+                    )
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onPlayFromText)
                     .simultaneousGesture(
                         TapGesture(count: 2)
                             .onEnded { beginTextEditing() }
                     )
+                } else {
+                    Text(chunk.text)
+                        .foregroundColor(AppTheme.fg)
+                        .font(.system(size: 18, weight: .regular))
+                        .lineSpacing(6)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: onPlayFromText)
+                        .simultaneousGesture(
+                            TapGesture(count: 2)
+                                .onEnded { beginTextEditing() }
+                        )
+                }
             }
         }
         .padding(.vertical, 8)
@@ -7179,64 +7592,6 @@ private struct ConversationTranscriptSegmentRow: View {
     private var textEditorHeight: CGFloat {
         let lineCount = max(3, textDraft.components(separatedBy: .newlines).count + textDraft.count / 42)
         return min(220, CGFloat(lineCount * 25 + 24))
-    }
-
-    private var playbackHighlightedText: Text {
-        guard isActive else {
-            return Text(chunk.text).foregroundColor(AppTheme.fg)
-        }
-
-        let highlightedCount = highlightedPlaybackWordCount
-        var rendered = Text("")
-        var wordIndex = 0
-
-        for token in TranscriptPlaybackTextToken.tokenize(chunk.text) {
-            if token.isWord {
-                let color = wordIndex < highlightedCount ? AppTheme.playbackBlue : AppTheme.fg
-                rendered = rendered + Text(token.value).foregroundColor(color)
-                wordIndex += 1
-            } else {
-                rendered = rendered + Text(token.value).foregroundColor(AppTheme.fg)
-            }
-        }
-
-        return rendered
-    }
-
-    private var highlightedPlaybackWordCount: Int {
-        guard isActive else {
-            return 0
-        }
-
-        let wordCount = TranscriptPlaybackTextToken.wordCount(in: chunk.text)
-        guard wordCount > 0 else {
-            return 0
-        }
-
-        let readableLeadSeconds = isPlaying ? 0.7 : 0
-        let targetTime = playbackTime + readableLeadSeconds
-        var completedWords = 0
-
-        for item in chunk.timeline {
-            let itemWordCount = item.wordCount
-            guard itemWordCount > 0 else {
-                continue
-            }
-            if targetTime >= item.end {
-                completedWords += itemWordCount
-                continue
-            }
-            if targetTime <= item.start {
-                break
-            }
-
-            let duration = max(0.1, item.end - item.start)
-            let progress = min(max((targetTime - item.start) / duration, 0), 1)
-            completedWords += min(itemWordCount, max(1, Int(ceil(progress * Double(itemWordCount)))))
-            break
-        }
-
-        return min(wordCount, completedWords)
     }
 
     private func beginSpeakerRenaming() {
@@ -7311,6 +7666,69 @@ private struct ConversationTranscriptSegmentRow: View {
         textErrorMessage = nil
         isEditingText = false
         focusedField = nil
+    }
+}
+
+private struct TranscriptPlaybackHighlightedText: View {
+    let chunk: TranscriptDisplayChunk
+    @ObservedObject var progress: MeetingAudioPlaybackProgress
+    let isPlaying: Bool
+
+    var body: some View {
+        highlightedText
+            .font(.system(size: 18, weight: .regular))
+            .lineSpacing(6)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var highlightedText: Text {
+        let highlightedCount = highlightedPlaybackWordCount
+        var rendered = Text("")
+        var wordIndex = 0
+
+        for token in TranscriptPlaybackTextToken.tokenize(chunk.text) {
+            if token.isWord {
+                let color = wordIndex < highlightedCount ? AppTheme.playbackBlue : AppTheme.fg
+                rendered = rendered + Text(token.value).foregroundColor(color)
+                wordIndex += 1
+            } else {
+                rendered = rendered + Text(token.value).foregroundColor(AppTheme.fg)
+            }
+        }
+
+        return rendered
+    }
+
+    private var highlightedPlaybackWordCount: Int {
+        let wordCount = TranscriptPlaybackTextToken.wordCount(in: chunk.text)
+        guard wordCount > 0 else {
+            return 0
+        }
+
+        let readableLeadSeconds = isPlaying ? 0.7 : 0
+        let targetTime = progress.currentTime + readableLeadSeconds
+        var completedWords = 0
+
+        for item in chunk.timeline {
+            let itemWordCount = item.wordCount
+            guard itemWordCount > 0 else {
+                continue
+            }
+            if targetTime >= item.end {
+                completedWords += itemWordCount
+                continue
+            }
+            if targetTime <= item.start {
+                break
+            }
+
+            let duration = max(0.1, item.end - item.start)
+            let progress = min(max((targetTime - item.start) / duration, 0), 1)
+            completedWords += min(itemWordCount, max(1, Int(ceil(progress * Double(itemWordCount)))))
+            break
+        }
+
+        return min(wordCount, completedWords)
     }
 }
 
@@ -7939,6 +8357,63 @@ private struct SummaryList: View {
                 }
             }
         }
+    }
+}
+
+private struct RecordingNoticeBanner: View {
+    let message: String
+    let style: RecordingNoticeStyle
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: iconName)
+                .font(.system(size: 15, weight: .semibold))
+            Text(message)
+                .font(.system(size: 14, weight: .medium))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundColor(color)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(color.opacity(backgroundOpacity)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(color.opacity(borderOpacity), lineWidth: 1)
+        )
+    }
+
+    private var iconName: String {
+        switch style {
+        case .info:
+            return "arrow.triangle.2.circlepath"
+        case .success:
+            return "checkmark.circle.fill"
+        case .warning:
+            return "exclamationmark.triangle.fill"
+        case .error:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var color: Color {
+        switch style {
+        case .info:
+            return AppTheme.fg
+        case .success:
+            return AppTheme.success
+        case .warning:
+            return AppTheme.warn
+        case .error:
+            return AppTheme.danger
+        }
+    }
+
+    private var backgroundOpacity: Double {
+        style == .info ? 0.05 : 0.08
+    }
+
+    private var borderOpacity: Double {
+        style == .info ? 0.14 : 0.22
     }
 }
 
@@ -8819,7 +9294,7 @@ private struct SetupAgentNamePage: View {
         VStack(spacing: 0) {
             OnboardingBackBar(onBack: onBack)
             WwSteps(step: 2, total: 4, label: "agent")
-            WwHeader(pre: "wake word", title: "What should wake me?", italic: true)
+            WwHeader(pre: "agent", title: "What should I call myself?", italic: true)
 
             VStack(alignment: .leading, spacing: 16) {
                 WwCard(padding: 28) {
@@ -8842,11 +9317,11 @@ private struct SetupAgentNamePage: View {
                 }
 
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "waveform")
+                    Image(systemName: "sparkles")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(AppTheme.muted)
                         .padding(.top, 2)
-                    Text("This name is the wake word. Say \"Hey \(displayName)\" or \"\(displayName)\", then \"start recording\". Use the on-screen Stop button while recording so the recorder owns the microphone.")
+                    Text("This name appears in the app, summaries, and personal settings.")
                         .font(.system(size: 12.5, weight: .regular, design: .serif))
                         .foregroundColor(AppTheme.muted)
                         .lineSpacing(4)
@@ -8869,13 +9344,13 @@ private struct SetupAgentNamePage: View {
 
                 Spacer()
 
-                Text("\"Hey \(displayName), start recording.\"")
+                Text("Meet \(displayName).")
                     .font(.system(size: 14, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.muted)
                     .frame(maxWidth: .infinity, alignment: .center)
 
-                WwPrimaryButton("nice to meet you →", disabled: !wakeWordIsUsable, action: onContinue)
+                WwPrimaryButton("nice to meet you →", disabled: !agentNameIsUsable, action: onContinue)
             }
             .padding(.horizontal, 22)
             .padding(.top, 18)
@@ -8887,11 +9362,11 @@ private struct SetupAgentNamePage: View {
         aiName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Her" : aiName
     }
 
-    private var wakeWordIsUsable: Bool {
+    private var agentNameIsUsable: Bool {
         displayName
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .filter { $0.isLetter || $0.isNumber }
-            .count >= 4
+            .count >= 2
     }
 }
 
@@ -9797,6 +10272,27 @@ private extension Color {
             blue: Double(hex & 0xff) / 255,
             opacity: alpha
         )
+    }
+}
+
+private extension UIColor {
+    convenience init(hex: UInt, alpha: CGFloat = 1) {
+        self.init(
+            red: CGFloat((hex >> 16) & 0xff) / 255,
+            green: CGFloat((hex >> 8) & 0xff) / 255,
+            blue: CGFloat(hex & 0xff) / 255,
+            alpha: alpha
+        )
+    }
+}
+
+private extension UIFont {
+    static func herChatSerif(size: CGFloat) -> UIFont {
+        let baseDescriptor = UIFont.systemFont(ofSize: size, weight: .regular).fontDescriptor
+        guard let serifDescriptor = baseDescriptor.withDesign(.serif) else {
+            return UIFont.systemFont(ofSize: size, weight: .regular)
+        }
+        return UIFont(descriptor: serifDescriptor, size: size)
     }
 }
 

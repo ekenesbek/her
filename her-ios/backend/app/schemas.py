@@ -26,6 +26,36 @@ class MeetingOutlineItem(BaseModel):
     title: str
 
 
+MemoryCandidateKind = Literal[
+    "preference",
+    "person",
+    "place",
+    "project",
+    "decision",
+    "action",
+    "follow_up",
+    "topic",
+    "correction",
+    "inbox",
+]
+
+MemoryCandidateStatus = Literal["candidate", "promoted", "rejected"]
+
+MemoryCandidateSensitivity = Literal["normal", "review", "sensitive"]
+
+
+class MemoryCandidateResponse(BaseModel):
+    id: str
+    meetingId: str
+    kind: MemoryCandidateKind
+    text: str
+    confidence: float = 0.5
+    sensitivity: MemoryCandidateSensitivity = "normal"
+    status: MemoryCandidateStatus = "candidate"
+    source: str = "meeting_summary"
+    createdAt: datetime
+
+
 class TranscriptResponse(BaseModel):
     transcript: str
     language: str | None = None
@@ -115,6 +145,7 @@ class MeetingResponse(SummaryResponse):
     id: str
     transcript: str
     segments: list[TranscriptSegment] = Field(default_factory=list)
+    memoryCandidates: list[MemoryCandidateResponse] = Field(default_factory=list)
     language: str | None = None
     durationSeconds: float | None = None
     source: str | None = None

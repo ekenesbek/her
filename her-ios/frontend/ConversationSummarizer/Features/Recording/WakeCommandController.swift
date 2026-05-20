@@ -16,6 +16,8 @@ private enum WakeListeningMode {
 
 @MainActor
 final class WakeCommandController: ObservableObject {
+    private static let featureEnabled = false
+
     @Published private(set) var state: WakeCommandState = .off
     @Published private(set) var lastHeard = ""
     @Published private(set) var lastAction = ""
@@ -44,7 +46,13 @@ final class WakeCommandController: ObservableObject {
     private var ownsAudioSession = false
 
     init() {
-        isEnabled = defaults.bool(forKey: defaultsKey)
+        if Self.featureEnabled {
+            isEnabled = defaults.bool(forKey: defaultsKey)
+        } else {
+            isEnabled = false
+            isAvailable = false
+            defaults.set(false, forKey: defaultsKey)
+        }
     }
 
     var shortStatus: String {
@@ -101,6 +109,14 @@ final class WakeCommandController: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        guard Self.featureEnabled else {
+            if isEnabled {
+                isEnabled = false
+            }
+            isAvailable = false
+            stopListening(nextState: .off)
+            return
+        }
         guard isEnabled != enabled else {
             refresh()
             return

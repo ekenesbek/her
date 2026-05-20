@@ -670,7 +670,8 @@ async def process_meeting(
         audio_stored = True
         content_type = mimetypes.guess_type(stored_audio_path.name)[0] or audio.content_type
         store.attach_meeting_audio(meeting.id, user.id, stored_audio_path, content_type)
-        return meeting.model_copy(update={"hasAudio": True})
+        stored_meeting = store.get(meeting.id, user_id=user.id)
+        return stored_meeting or meeting.model_copy(update={"hasAudio": True})
     finally:
         if not audio_stored:
             path.unlink(missing_ok=True)
@@ -729,7 +730,7 @@ def save_meeting(
         **payload.model_dump(),
     )
     store.save(meeting, user_id=user.id)
-    return meeting
+    return store.get(meeting.id, user_id=user.id) or meeting
 
 
 @app.get("/v1/meetings", response_model=MeetingListResponse)

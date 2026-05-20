@@ -15,10 +15,12 @@ from app.schemas import (
     MeetingJobResponse,
     MeetingOutlineItem,
     MeetingResponse,
+    MemoryCandidateResponse,
     TranscriptSegment,
     UserResponse,
     VoiceProfileResponse,
 )
+from app.services.meeting_memory import build_meeting_memory_candidates
 
 
 SUMMARY_ITEM_KINDS = ("decision", "action", "follow_up")
@@ -162,7 +164,7 @@ class MeetingStore:
             summaryMode=summary.summaryMode,
         )
         self.save(updated, user_id=user_id)
-        return updated
+        return self.get(meeting_id, user_id=user_id)
 
     def update_meeting_transcript(
         self,
@@ -748,6 +750,7 @@ class MeetingStore:
             self._ensure_meeting_summary_status_column(connection)
             self._ensure_meeting_summary_mode_column(connection)
             self._ensure_meeting_audio_columns(connection)
+            self._ensure_meeting_memory_candidates_table(connection)
             self._ensure_voice_profiles_table(connection)
             self._ensure_voice_profile_samples_table(connection)
             self._ensure_meeting_jobs_table(connection)
@@ -848,6 +851,39 @@ class MeetingStore:
             connection.execute("ALTER TABLE meetings ADD COLUMN audio_path TEXT")
         if "audio_content_type" not in columns:
             connection.execute("ALTER TABLE meetings ADD COLUMN audio_content_type TEXT")
+
+    def _ensure_meeting_memory_candidates_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meeting_memory_candidates (
+                id TEXT PRIMARY KEY,
+                meeting_id TEXT NOT NULL,
+                user_id TEXT,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                sensitivity TEXT NOT NULL DEFAULT 'normal',
+                status TEXT NOT NULL DEFAULT 'candidate'
+                    CHECK (status IN ('candidate', 'promoted', 'rejected')),
+                source TEXT NOT NULL DEFAULT 'meeting_summary',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_meeting_memory_candidates_meeting
+            ON meeting_memory_candidates (meeting_id, status, kind)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_meeting_memory_candidates_user
+            ON meeting_memory_candidates (user_id, created_at DESC)
+            """
+        )
 
     def _ensure_voice_profiles_table(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -1286,6 +1322,7 @@ class MeetingStore:
             ON summary_items (meeting_id, kind, position)
             """
         )
+        self._ensure_meeting_memory_candidates_table(connection)
         self._ensure_meeting_chat_messages_table(connection)
 
     def _migrate_json_blob_store(self, connection: sqlite3.Connection) -> None:
@@ -1406,6 +1443,7 @@ class MeetingStore:
             "follow_up",
             meeting.followUps,
         )
+        self._replace_meeting_memory_candidates(connection, meeting, user_id)
 
     def _meeting_from_row(
         self,
@@ -1424,6 +1462,7 @@ class MeetingStore:
             decisions=items["decision"],
             actionItems=items["action"],
             followUps=items["follow_up"],
+            memoryCandidates=self._memory_candidates_for(connection, row["id"]),
             outline=self._decode_outline(row["outline_json"]),
             transcript=row["transcript"],
             segments=self._decode_segments(row["segments_json"]),
@@ -1434,6 +1473,98 @@ class MeetingStore:
             locationName=row["location_name"],
             hasAudio=bool(row["audio_path"]),
         )
+
+    def _replace_meeting_memory_candidates(
+        self,
+        connection: sqlite3.Connection,
+        meeting: MeetingResponse,
+        user_id: str | None,
+    ) -> None:
+        candidates = [
+            candidate
+            for candidate in build_meeting_memory_candidates(meeting)
+            if candidate.text
+        ]
+        if not candidates:
+            connection.execute(
+                """
+                DELETE FROM meeting_memory_candidates
+                WHERE meeting_id = ? AND source IN ('meeting_summary', 'call_summary')
+                """,
+                (meeting.id,),
+            )
+            return
+
+        now = datetime.now(UTC).isoformat()
+        connection.executemany(
+            """
+            INSERT INTO meeting_memory_candidates (
+                id, meeting_id, user_id, kind, text, confidence,
+                sensitivity, status, source, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                user_id = excluded.user_id,
+                kind = excluded.kind,
+                text = excluded.text,
+                confidence = excluded.confidence,
+                sensitivity = excluded.sensitivity,
+                source = excluded.source
+            """,
+            (
+                (
+                    candidate.stable_key,
+                    meeting.id,
+                    user_id,
+                    candidate.kind,
+                    candidate.text,
+                    candidate.confidence,
+                    candidate.sensitivity,
+                    candidate.source,
+                    now,
+                )
+                for candidate in candidates
+            ),
+        )
+        placeholders = ", ".join("?" for _ in candidates)
+        connection.execute(
+            f"""
+            DELETE FROM meeting_memory_candidates
+            WHERE meeting_id = ?
+              AND source IN ('meeting_summary', 'call_summary')
+              AND id NOT IN ({placeholders})
+            """,
+            (meeting.id, *(candidate.stable_key for candidate in candidates)),
+        )
+
+    def _memory_candidates_for(
+        self,
+        connection: sqlite3.Connection,
+        meeting_id: str,
+    ) -> list[MemoryCandidateResponse]:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM meeting_memory_candidates
+            WHERE meeting_id = ?
+            ORDER BY created_at ASC, kind ASC, id ASC
+            """,
+            (meeting_id,),
+        ).fetchall()
+        return [
+            MemoryCandidateResponse(
+                id=row["id"],
+                meetingId=row["meeting_id"],
+                kind=row["kind"],
+                text=row["text"],
+                confidence=float(row["confidence"] or 0.5),
+                sensitivity=row["sensitivity"],
+                status=row["status"],
+                source=row["source"],
+                createdAt=row["created_at"],
+            )
+            for row in rows
+        ]
 
     def _decode_outline(self, raw_value: str | None) -> list[MeetingOutlineItem]:
         return self._decode_json_items(raw_value, MeetingOutlineItem)

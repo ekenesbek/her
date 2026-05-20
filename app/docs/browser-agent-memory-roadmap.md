@@ -8,6 +8,7 @@ This plan connects existing notes:
 - [Credential Broker](./credential-broker.md)
 - [Her Sessions](./her-sessions.md)
 - [Memory Landscape](./memory-landscape.md)
+- [User Memory Wiki](./user-memory-wiki.md)
 
 ## Thesis
 
@@ -137,6 +138,17 @@ Examples:
 - recurring account/service choices
 
 This should be separate from Web MCP site memory. Web MCP can mirror durable cross-site facts into user memory, but site-specific details stay under the site.
+
+The first local implementation follows the LLM-wiki pattern instead of provider-first memory:
+
+- raw sources remain task traces, chat turns, browser observations, and meeting outputs
+- compiled memory lives under `.data/identity/users/<user_id>/wiki/`
+- `index.md` catalogs memory pages
+- `schema.md` defines what may be written and what must never be written
+- `log.md` records memory maintenance events
+- candidate notes are weak context until corroborated or confirmed
+
+This is a bridge toward Stage 3, not the full memory graph. The next production version should add structured `memory_entries` rows and regenerate wiki pages from structured state instead of appending markdown forever.
 
 ### 5. Session Search Layer
 

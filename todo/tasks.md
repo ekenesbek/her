@@ -9,6 +9,13 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | DOC-1 | review | P2 | repo | docs/DOC-1/task-workflow | Set up task-first agent workflow | `todo/tasks.md` |
 | WEB-1 | approved | P1 | web | web/WEB-1/rename-her | Rename project to Her | `todo/web.md` |
 | WEB-2 | review | P2 | web | web/WEB-2/terms-privacy | Add Terms and Privacy pages | `todo/web.md` |
+| WEB-3 | review | P1 | web | current worktree | Add local wiki-style user memory | `todo/web.md` |
+| WEB-4 | planned | P1 | web | current worktree | Add structured memory entries store | `todo/web.md` |
+| WEB-5 | planned | P1 | web | current worktree | Add post-task memory curator pipeline | `todo/web.md` |
+| WEB-6 | planned | P1 | web | current worktree | Compile memory wiki from structured entries | `todo/web.md` |
+| WEB-7 | planned | P1 | web | current worktree | Add memory review API and web UI | `todo/web.md` |
+| WEB-8 | planned | P1 | web | current worktree | Add relevant memory retrieval selector | `todo/web.md` |
+| WEB-9 | planned | P2 | web | current worktree | Add memory evals and optional provider adapters | `todo/web.md` |
 | IOS-2 | review | P1 | ios | ios/IOS-2/skip-setup-existing-account | Skip iOS setup for existing accounts | `todo/ios.md` |
 | IOS-3 | planned | P2 | ios | ios/IOS-3/server-setup-state | Store iOS setup state on backend | `todo/ios.md` |
 | IOS-1 | review | P1 | ios | ios/IOS-1/her-ios-smoke-test | Her iOS smoke test | `todo/ios.md` |
@@ -31,7 +38,9 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-17 | review | P1 | ios | current worktree | Add StoreKit Plus subscription purchase flow | `todo/ios.md` |
 | IOS-18 | review | P1 | ios | current worktree | Clean settings and add recording management actions | `todo/ios.md` |
 | IOS-19 | review | P1 | ios | current worktree | Remove DAT pairing from iOS audio route UX | `todo/ios.md` |
-| IOS-20 | planned | P1 | ios | current worktree | Add call-source intake for phone and meeting apps | `todo/ios.md` |
+| IOS-20 | review | P1 | ios | current worktree | Add call-source intake for phone and meeting apps | `todo/ios.md` |
+| IOS-21 | planned | P1 | ios | current worktree | Bridge call memory candidates into structured memory | `todo/ios.md` |
+| IOS-22 | planned | P1 | ios | current worktree | Add iOS call memory review UI | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 

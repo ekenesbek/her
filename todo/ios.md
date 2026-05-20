@@ -4,7 +4,7 @@ Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
 # IOS-20: Add Call-Source Intake For Phone And Meeting Apps
 
-Status: planned
+Status: review
 Priority: P1
 Owner: mixed
 Stream: ios
@@ -30,6 +30,7 @@ In scope:
 - Keep Her recording through the currently available microphone route only, with clear copy that app-call/system-call internal audio may not be captured.
 - Add import support for user-shared audio/transcript files from Apple Notes, Files, or provider exports, then feed them into the existing meeting processing flow.
 - Preserve consent language and source metadata on the saved meeting.
+- Add backend `memoryCandidates` for processed calls/meetings so durable facts, decisions, tasks, and follow-ups can later be reviewed and promoted into the shared user memory wiki.
 
 Out of scope:
 - Directly recording protected Phone, FaceTime, WhatsApp, Telegram, or Google Meet app audio streams.
@@ -37,11 +38,13 @@ Out of scope:
 - Bypassing iOS user confirmation for dialing or app switching.
 - WhatsApp/Telegram private or unofficial APIs.
 - Stage 2 scheduled/autonomous joins or credential-vault behavior.
+- Directly promoting call content into global user memory without review.
 - Commit, push, PR, archive, or marking done before human review.
 
 ## Implementation Plan
 
 - [ ] Inspect the existing recording entrypoint, meeting source metadata, import/share extension support, and processing job flow.
+- [x] Add backend meeting/call memory candidates without breaking existing saved meetings.
 - [ ] Add source metadata types and storage fields without breaking existing saved meetings.
 - [ ] Add a call-intake screen with source-specific launch/import actions and consent copy.
 - [ ] Wire phone/FaceTime, Meet, Telegram, and WhatsApp link launch helpers through public URL handling.
@@ -52,6 +55,7 @@ Out of scope:
 ## Verification
 
 - `python3 -m compileall her-ios/backend/app`
+- `PYTHONPATH=her-ios/backend DATA_DIR=/tmp/her-ios-memory-candidates-smoke python3 - <<'PY' ...` verifies saved call notes persist `memoryCandidates`, redact secret values, and mark sensitive/review candidates.
 - `git diff --check`
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
 - Physical iPhone smoke: open a `tel:` call action and confirm iOS asks before dialing.
@@ -61,11 +65,126 @@ Out of scope:
 
 ## Result
 
+Backend memory-candidate slice implemented. The iOS backend now exposes `MeetingResponse.memoryCandidates` and persists `meeting_memory_candidates` for processed calls/meetings. Candidates are generated from summary decisions, action items, follow-ups, topics, and call-note overview; obvious secret values are redacted before prompt-readable persistence, and address/contact/payment-like content is remembered with `sensitivity=review` instead of being auto-promoted into global user memory.
+
+Verification passed with backend compile, SQLite memory-candidate smoke, and whitespace diff check. The smoke command emitted local pyenv `hashlib` blake2 warnings but exited successfully and verified `memory_candidates=6`, including redacted secret values plus `sensitive` and `review` candidates.
+
+Call-source UI, public launch helpers, import flow, and physical-device verification remain not started.
+
+## Next
+
+Needs human review of the backend memory-candidate slice. After approval: keep this slice, then continue the remaining call-source intake MVP; commit/push/PR only if requested. Next task candidate from `todo/tasks.md`: continue `IOS-11` for faster streaming transcription if call capture needs lower latency.
+
+# IOS-21: Bridge Call Memory Candidates Into Structured Memory
+
+Status: planned
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-19
+
+## Goal
+
+Make iOS call/meeting memory candidates compatible with the shared structured memory contract.
+
+## Context
+
+`IOS-20` added `MeetingResponse.memoryCandidates` and `meeting_memory_candidates`. The next step is to align those candidates with the shared `memory_entries` shape planned in `WEB-4`, without directly promoting call content into global memory.
+
+## Scope
+
+In scope:
+- Align iOS backend memory candidate fields with the shared memory contract.
+- Preserve `meetingId`, source type, source span or summary field, confidence, sensitivity, and status.
+- Add endpoints or storage helpers needed to list/update meeting-scoped candidates.
+- Add transcript+summary curator hooks for people, places, projects, preferences, commitments, and corrections.
+- Keep all call-derived memory as `candidate` or `review` until confirmed.
+
+Out of scope:
+- Direct global promotion without review.
+- iOS Memory review UI, tracked in `IOS-22`.
+- Web memory review UI, tracked in `WEB-7`.
+- Cloud sync.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [ ] Reconcile `meeting_memory_candidates` with the shared `memory_entries` fields.
+- [ ] Add source/provenance fields for transcript span, summary field, and meeting id.
+- [ ] Expand extraction beyond summary arrays when safe.
+- [ ] Add backend smoke tests for candidate update/list/promote-ready states.
+- [ ] Document the bridge contract.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- SQLite smoke for candidate source refs, status transitions, redaction, and sensitivity.
+- `git diff --check`
+
+## Result
+
 Not started.
 
 ## Next
 
-Needs human review of scope before implementation, especially the product decision that Stage 1 will support call intake, launch, microphone capture, and import, but not direct protected call-audio capture. After approval: implement the scoped MVP, run verification, then stop for review again. Next task candidate from `todo/tasks.md`: continue `IOS-11` for faster streaming transcription if call capture needs lower latency.
+After review/approval: continue `IOS-22` call memory review UI.
+
+# IOS-22: Add iOS Call Memory Review UI
+
+Status: planned
+Priority: P1
+Owner: mixed
+Stream: ios
+Branch: current worktree
+Created: 2026-05-19
+
+## Goal
+
+Let the user review, edit, confirm, reject, or forget memory candidates extracted from a call or meeting.
+
+## Context
+
+Calls are high-signal and high-risk. The user needs a visible review path before call-derived candidates become durable global memory.
+
+## Scope
+
+In scope:
+- Add a "Memory from this call" section in the recording detail or summary surface.
+- Show candidate kind, text, confidence/sensitivity, and source context.
+- Add confirm, edit, reject, and forget actions.
+- Keep sensitive/review candidates visually distinct and require explicit confirmation before global promotion.
+- Wire actions to backend candidate endpoints from `IOS-21`.
+
+Out of scope:
+- Direct protected call-audio capture.
+- Cloud memory sync.
+- Web memory review UI.
+- Full graph visualization.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [ ] Inspect current recording detail and summary UI.
+- [ ] Add candidate models to the iOS API client/store.
+- [ ] Build the review section and actions.
+- [ ] Wire backend updates.
+- [ ] Run backend compile and iOS build/smoke checks.
+
+## Verification
+
+- `python3 -m compileall her-ios/backend/app`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Physical iPhone smoke: process or open a call/meeting and review extracted memory candidates.
+- `git diff --check`
+
+## Result
+
+Not started.
+
+## Next
+
+After review/approval: promote confirmed call memory into the shared user memory wiki through the structured memory pipeline.
 
 # IOS-19: Remove DAT Pairing From iOS Audio Route UX
 
@@ -572,7 +691,9 @@ Out of scope:
 - `PYTHONPATH=her-ios/stt-service python3 - <<'PY' ...` verified `/health` shape exposes diarization min/max and retry status. The ambient pyenv printed its existing `hashlib` blake2 warnings, but assertions passed.
 - `PYTHONPATH=her-ios/backend python3 - <<'PY' ...` verified the new retry settings load from `Settings()`.
 - `git diff --check`
-- Not deployed: SSH to `82.200.144.228` was denied for available local keys and from the main backend host, so the live GPU STT service still needs this code copied/restarted before new device recordings use it.
+- 2026-05-20 H200 inspection: `82.200.144.228:8000` was already running `her-stt.service` on an NVIDIA H200 with `large-v3`, CUDA, diarization enabled, Hugging Face configured, and enough free VRAM; the live code was older and `/health` did not expose adaptive retry fields.
+- 2026-05-20 H200 deploy: backed up `/opt/her-stt-service/backend/app/settings.py`, `/opt/her-stt-service/backend/app/services/diarizer.py`, and `/opt/her-stt-service/stt-service/stt_service/main.py` under `/opt/her-stt-service/backups/20260520-091913`, copied the updated files, ran `stt-service/.venv/bin/python -m compileall backend/app stt-service/stt_service`, restarted `her-stt.service`, and verified public `GET http://82.200.144.228:8000/health` now returns `diarizationMinSpeakers=0`, `diarizationMaxSpeakers=0`, and `singleSpeakerRetryEnabled=true`.
+- 2026-05-20 H200 transcription smoke: posted `/Users/ekenesbek/Downloads/Кошек батыра улица 10.m4a` to `POST http://82.200.144.228:8000/v1/transcribe`; it returned in 17.94 seconds with `language=ru`, `durationSeconds=17.4293125`, `segmentCount=2`, and `speakers=["SPEAKER_00"]`.
 
 ## Result
 
@@ -590,9 +711,11 @@ Docs and env examples now describe local, Deepgram, and external GPU modes. `htt
 
 Deployed the GPU STT service to `82.200.144.228:8000` and switched the main iOS backend on `51.195.200.207` to use it through `TRANSCRIPTION_PROVIDER=external`. The SSH host key fingerprint `SHA256:WwT06DiGy0GLlKpGP0qeNZOiIhKsleyylDWZe1nqlKQ` was confirmed by the human before updating `known_hosts`.
 
+2026-05-20 follow-up: inspected the live H200 host, deployed the local adaptive diarization retry code to `/opt/her-stt-service`, restarted `her-stt.service`, and verified both `/health` and a real short audio transcription request through the public GPU endpoint. For Stage 1 accuracy, the source-of-truth path remains completed-audio upload to the H200 batch service; streaming remains `IOS-11` as a lower-latency preview/future optimization, not the authoritative transcript path.
+
 ## Next
 
-Result is ready for human review. Review gate: deploy the updated shared backend code to the GPU STT host, restart `her-stt.service`, then record or upload a new multi-speaker meeting through the iOS app and confirm the saved transcript alternates speakers and finishes much faster than the old CPU path. After approval: commit, push/PR only if requested, then archive/update task state.
+Result is ready for human review. Review gate: record or upload a new multi-speaker meeting through the iOS app and confirm the saved transcript alternates speakers and finishes through the H200-backed path. Also review whether port `8000` should be firewalled or protected before wider use; logs show unsolicited internet probes against the public service. After approval: commit, push/PR only if requested, then archive/update task state.
 
 # IOS-11: Add Streaming Audio Processing For Faster Transcription
 
@@ -649,7 +772,7 @@ Out of scope:
 
 ## Result
 
-Not started.
+Not started. 2026-05-20 decision note: do not use streaming as the Stage 1 source of truth yet. The current best path is full completed-audio upload to the H200 batch service for final transcript quality, with any future streaming work scoped to faster preview/time-to-first-text and later reconciliation against the final batch transcript.
 
 ## Next
 
@@ -860,6 +983,7 @@ Out of scope:
 - 2026-05-18 latest iPhone install after reconnect: `xcrun devicectl list devices` showed `iPhone (Yerasyl)` as `connected`; `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
 - 2026-05-18 latest iPhone launch after unlock: `xcrun devicectl list devices` showed `iPhone (Yerasyl)` as `connected`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her` launched `com.ekenesbek.her`.
 - 2026-05-18 43-minute recording follow-up: remote backend inspection found no meeting/job for the reported long recording; subscription inspection for the authenticated Apple account showed free plan with 2523.51 seconds used this period, leaving roughly 17.94 minutes; `git diff --check`; `python3 -m compileall her-ios/backend/app`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`; `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
+- 2026-05-19 background notice/retry polish: `git diff --check`; `python3 -m compileall her-ios/backend/app`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`; `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`; `xcrun devicectl list devices`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
 
 Not run:
 - 2026-05-17 device install and real >8-minute recording smoke; `xcrun devicectl list devices` reported `iPhone (Yerasyl)` as `unavailable`.
@@ -889,11 +1013,13 @@ The backend side of this transcript-first job flow is deployed on `51.195.200.20
 
 2026-05-18 43-minute recording follow-up: the reported long recording did not create a backend job or meeting. The authenticated Apple account is still on the free plan, and the backend shows roughly 42.06 of 60 monthly minutes already used, so a 43-minute upload would be rejected by quota before backend processing starts. The iOS uploader now builds multipart upload bodies on disk and uses `URLSession.upload(fromFile:)` with a longer timeout, avoiding a full in-memory copy of long audio. Pending recordings that hit HTTP 402 are preserved locally, shown as `LIMIT`/`Recording saved locally` instead of an endless upload spinner, skipped during automatic retry loops, and retried only when the user taps them after upgrading/restoring Plus. Active recordings now hard-stop just before the current plan's remaining seconds are exhausted, save the captured in-quota audio, and open the normal background-processing detail flow so transcript/summary can complete. Stale pending rows whose local audio file is already gone are silently cleared during background recovery instead of showing a red missing-file banner on Home.
 
-The latest Debug iOS build was installed on `iPhone (Yerasyl)` after the device reconnected. The first app launch command was rejected because the phone was locked; after unlock, `com.ekenesbek.her` launched successfully through `devicectl`.
+2026-05-19 follow-up: Home recording notices now carry severity separately from the message text. Successful background completion such as `Previous recording transcript and summary are saved.` renders as a success notice instead of the red error banner; retry/checking/uploading states render as neutral info, and quota blocks render as warning. Non-quota upload/transcription failures are kept as pending local recordings and schedule an automatic retry after a short delay while the app is active, in addition to retrying on reopen or tap. Pending upload rows/detail now say `Upload will retry` and show a retry icon instead of an error triangle for transient upload failures.
+
+The latest Debug iOS build was installed and launched on `iPhone (Yerasyl)` through `devicectl`; the installed bundle is `com.ekenesbek.her` and points to `http://51.195.200.207:8787`.
 
 ## Next
 
-Result is ready for human review once the latest signed artifact is installed. Reconnect/unlock `iPhone (Yerasyl)`, install the current build, start a recording, stop it, and verify the app opens the recording detail screen with in-place loading states while the main mic flow can start a second recording. Confirm the first recording shows transcript/Ask AI before summary, then refreshes to the backend-generated title, summary, action items, and follow-ups when AI finishes. Also trigger a real call/audio interruption and verify the screen shows `Recording paused` with `Continue recording` / `Finish and transcribe`. After approval: commit, push/PR if requested, then archive/update task state.
+Result is ready for human review on the installed iPhone app. Start a recording, stop it, and verify the app opens the recording detail screen with in-place loading states while another recording can start. Confirm a completed previous background recording shows a non-red success notice on Home, and a transient network failure says `Upload will retry` instead of presenting as a hard failure. Also trigger a real call/audio interruption and verify the screen shows `Recording paused` with `Continue recording` / `Finish and transcribe`. After approval: commit, push/PR if requested, then archive/update task state.
 
 # IOS-10: Persist Meeting Audio And Improve Transcript Playback
 
@@ -971,6 +1097,8 @@ Out of scope:
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
 - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- 2026-05-19 playback regression follow-up: `git diff --check`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`; `python3 -m compileall her-ios/backend/app`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`; `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`; `xcrun devicectl list devices`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
+- 2026-05-19 contents performance follow-up: `git diff --check`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`; `python3 -m compileall her-ios/backend/app`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`; `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`; `xcrun devicectl list devices`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
 
 Not run:
 - Real multi-speaker recording review after deployment.
@@ -985,6 +1113,10 @@ WhisperX no longer runs external chunk-level diarization when diarization is ena
 
 iOS contents now groups transcript display rows into speaker-prioritized chunks instead of rendering every raw sentence. A speaker change always starts a new chunk; same-speaker text is grouped into shorter chunks at sentence, pause, or duration boundaries. Tapping a chunk starts playback from that chunk; tapping the same active chunk pauses at the current audio time and keeps the blue progress visible; tapping it again resumes from the paused time. The tap path now preloads local audio and avoids waiting for the double-tap edit recognizer before starting playback. Blue word progress is now calculated against each transcript segment timestamp inside the chunk instead of linearly across the whole chunk. While audio is playing, the active chunk is highlighted and the scroll view follows it. Contents playback now stops when iOS moves Her to inactive/background, including while a playback request is still loading. If the local recording file is missing but the backend has audio, iOS downloads the meeting audio through the authenticated backend endpoint, saves it locally, and then plays it.
 
+2026-05-19 playback regression follow-up: the playback controller now treats any backend-backed meeting as playable and attempts the authenticated audio download even when the list payload does not advertise `hasAudio`. Playback requests no longer fail silently: missing audio, failed downloads, audio-session failures, and `AVAudioPlayer.play()` returning false are surfaced in the audio controls. Full playback resets to the beginning when the previous run ended at the end of the file, and tapping the same active transcript chunk after its end replays from the chunk start instead of trying to resume from the end. Speaker-name taps now trigger playback like the timestamp/text taps, with a separate pencil button for renaming the speaker. The signed Debug build with this fix was installed and launched on `iPhone (Yerasyl)`.
+
+2026-05-19 contents performance follow-up: the contents screen now caches display segments, grouped transcript chunks, outline fallback, and speaker ordering per meeting instead of recomputing them during every SwiftUI body pass. Transcript rows render in a `LazyVStack`, and playback progress is split into a separate lightweight observable so `currentTime` updates only refresh the audio controls and the active highlighted transcript row. The full contents screen now updates only when the active chunk or play/pause state changes. The signed Debug build with this fix was installed and launched on `iPhone (Yerasyl)`.
+
 Recording start now asks for real iOS location access when authorization has not been decided yet, then refreshes the current city-level location while recording. The recording screen shows pending/unavailable location states instead of silently using no location. Local audio is moved into `Documents/MeetingAudio/{location-bucket}/{meetingId}.*` when a meeting id is known, and downloaded backend audio uses the same location bucket. The deployed backend now stores new uploaded meeting audio under `DATA_DIR/meeting-audio/{user_id}/{location-bucket}/{meeting_id}.*`, while the SQLite `audio_path` keeps old flat-path meetings playable.
 
 The updated Debug iOS app was rebuilt, code-sign verified, and installed on `iPhone (Yerasyl)`. The earlier build launched through `devicectl`; the latest same-chunk pause/resume build installed successfully, but CoreDevice lost the device before launch.
@@ -995,7 +1127,7 @@ Known limitations: older meetings whose audio was deleted by previous backend ve
 
 ## Next
 
-Result is ready for human review. Review gate: unlock/connect the iPhone, install the latest signed build, then open contents and verify: first tap starts faster, same active chunk tap pauses/resumes from the current time, blue progress stays visible while paused, active text follows playback, and background/close stops audio. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue review of the IOS-7/8/9 meeting-processing stack after this real recording test.
+Result is ready for human review on the installed iPhone build. Open contents on a long recording and verify: scrolling stays responsive, top audio play starts without the previous UI stall, speaker-name/timestamp/text taps start playback, same active chunk tap pauses/resumes from the current time, and any missing-audio/download failure shows a visible message in the audio controls instead of doing nothing. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue review of the IOS-7/8/9 meeting-processing stack after this real recording test.
 
 # IOS-9: Wire Alem OSS Summaries And Meeting Chat
 
@@ -1047,6 +1179,7 @@ Out of scope:
 - [x] Add primary-dialogue-language detection to summary generation and force `outline`/summary fields to that language.
 - [x] Add a mobile-readable chat renderer for markdown emphasis and pipe-table answers.
 - [x] Move meeting chat persistence toward the ChatGPT/Claude backend pattern with a durable default thread, message items, and per-turn generation run records.
+- [x] Enable native text selection for iOS Ask AI chat bubbles.
 
 ## Verification
 
@@ -1083,6 +1216,35 @@ Out of scope:
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build` after the chat renderer update.
 - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
 - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+- 2026-05-19 Ask AI text-selection follow-up:
+  - `git diff --check`
+  - `python3 -m compileall her-ios/backend/app`
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+  - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+  - `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`
+  - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+  - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+- 2026-05-19 Ask AI UIKit selectable text fix:
+  - `git diff --check`
+  - `python3 -m compileall her-ios/backend/app`
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+  - First build attempt failed on ambiguous `.greatestFiniteMagnitude`; fixed by using `CGFloat.greatestFiniteMagnitude`.
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+  - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+  - `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`
+  - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+  - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
+- 2026-05-19 Ask AI UI regression fix after screenshots:
+  - `git diff --check`
+  - `python3 -m compileall her-ios/backend/app`
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build` failed because Xcode could not find the physical device destination.
+  - `xcrun devicectl list devices` showed `iPhone (Yerasyl)` as `unavailable`.
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+  - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+  - `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist`
+  - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app` failed because CoreDevice could not locate the unavailable iPhone.
 
 Not run:
 - FastAPI `TestClient` route smoke in the ambient `python3`; it failed before app import because `jwt` / PyJWT is not installed in that interpreter.
@@ -1103,9 +1265,15 @@ Backend meeting chat now has a more ChatGPT/Claude-style shape under the existin
 
 The updated Debug iOS app was rebuilt, installed, and launched on `iPhone (Yerasyl)` after the chat renderer update.
 
+2026-05-19 follow-up: Ask AI chat bubbles now enable native iOS text selection for both user questions and assistant answers, including formatted assistant responses. The updated Debug build was signed, installed, and launched on `iPhone (Yerasyl)`.
+
+2026-05-19 fix: the SwiftUI `.textSelection` approach was not sufficient in the Ask AI scroll/bubble layout, so chat bubbles now render message text through a read-only selectable `UITextView` bridge. User and assistant messages expose iOS native Select/Select All/Copy handles, while assistant markdown/table responses are flattened to readable selectable text. The updated Debug build was signed, installed, and launched on `iPhone (Yerasyl)`.
+
+2026-05-19 UI regression fix: screenshots showed the direct `UITextView` bridge broke chat bubble layout by creating oversized/offset assistant bubbles. The chat bubble renderer has been restored to the previous SwiftUI `Text`/`FormattedChatMessage` layout. Long-press on a bubble now offers immediate `Copy` and a `Select text` action that opens a separate selectable text sheet backed by `UITextView`, so the UIKit text selector no longer participates in bubble layout. The fixed signed Debug build is ready, but install was blocked because CoreDevice reported `iPhone (Yerasyl)` as unavailable.
+
 ## Next
 
-Ready for human review: record or reuse a few short conversations with different content types, confirm the backend chooses an appropriate mode, and confirm the generated summary shape matches the transcript. Also open a meeting, ask two chat questions including one that produces tasks/action items, leave and reopen it, and confirm the thread is still readable and still there. For the backend chat structure specifically, inspect local SQLite and confirm `meeting_chat_threads`, `meeting_chat_messages.thread_id/run_id`, and `meeting_chat_runs` are populated for new chat turns. After approval: commit, push/PR only if requested, then archive/update the task. Next task candidate from `todo/tasks.md`: review/approve the current `IOS-7` and `IOS-8` meeting-processing changes.
+Ready for human review after installing the fixed build: unlock/reconnect `iPhone (Yerasyl)`, install the current signed Debug build, then open an existing recording -> `chat` / Ask AI. Confirm the chat UI no longer has oversized/offset assistant bubbles. Long-press a user or assistant bubble and confirm `Copy` copies the full message; tap `Select text` and confirm the sheet allows native selection handles plus Copy/Select All. Also ask a new chat question, leave and reopen it, and confirm the thread is still readable and persisted. After approval: commit, push/PR only if requested, then archive/update the task. Next task candidate from `todo/tasks.md`: review/approve the current `IOS-7` and `IOS-8` meeting-processing changes.
 
 # IOS-8: Add Meeting Contents Outline And Speaker Transcript
 
@@ -1230,12 +1398,14 @@ Out of scope:
 - Remote multilingual deploy verification on `51.195.200.207`: settings smoke for `WHISPER_LANGUAGE=None`, 30-second chunk runtime config, ffmpeg/ffprobe chunk split smoke, `systemctl restart meta-ios-backend.service`, `GET /health`, protected job route returns `401`.
 - iPhone deploy: `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`; `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`; `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`.
 - 2026-05-17 processing recovery follow-up: `git diff --check`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`; `python3 -m compileall her-ios/backend/app`.
+- 2026-05-20 offline retry follow-up: `git diff --check`; `python3 -m compileall her-ios/backend/app`; `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`.
 
 Not run:
 - Full `app.main` import/route smoke in the ambient `python3`; it failed before app import because `jwt`/`pyjwt` is not installed in that interpreter.
 - Real audio transcription and on-device upload/polling smoke.
 - Real mixed English/Russian/Kazakh recording was not exercised; the deployed change was verified through settings, chunking, and merge smoke checks.
 - 2026-05-17 device install and real long-recording recovery smoke; `xcrun devicectl list devices` reported `iPhone (Yerasyl)` as `unavailable`.
+- 2026-05-20 real offline-to-online device smoke; this needs the physical iPhone and a controlled network toggle.
 
 ## Result
 
@@ -1249,6 +1419,8 @@ Updated iOS recording processing to submit the recording to the job endpoint and
 
 2026-05-17 follow-up: iOS now records pending processing state before upload, submits the backend job inside an iOS background task, persists the accepted backend job id, and resumes upload/polling from `recoverIfNeeded()` after the app is reopened. If the user stops a recording and leaves the app, the audio should either reach the backend before suspension or be retried from the saved local file on the next launch; once the job id is accepted, backend processing continues independently of the screen.
 
+2026-05-20 follow-up: iOS now treats offline uploads as a first-class pending state. The recording is saved to local storage and the pending queue before upload; if `URLSession` reports connectivity failures or `NWPathMonitor` says the network is unavailable, Her marks the row as `OFFLINE` / `Waiting for internet` with an info notice instead of a hard error. While the app is active, `NWPathMonitor` resumes non-quota pending uploads as soon as network reachability returns; scheduled retry and reopen recovery still cover transient failures and app relaunch.
+
 AI summary support was already present through OpenAI-compatible env vars; docs now call out the `gpt-oss` default, Alem-compatible `OPENAI_BASE_URL`, `MEETING_JOB_WORKERS`, `WHISPER_CPU_THREADS`, `WHISPER_NUM_WORKERS`, and `WHISPERX_BATCH_SIZE`. The provided secret was not written to tracked files. Current checked health responses for the running local/remote backends still report `openaiConfigured=false`, so runtime `.env` must be configured before real AI summaries are active.
 
 Known limitations: chunk-wise WhisperX diarization can make raw `SPEAKER_NN` labels less stable across chunk boundaries; disable chunking if full-file diarization quality matters more than throughput. Processing recovery depends on the stopped recording file remaining in local app storage; if iOS kills the app before the audio file is finalized, or the user deletes app data before reopening Her, the backend cannot recover that upload.
@@ -1257,7 +1429,7 @@ Deployed to `51.195.200.207` on 2026-05-10. Backups of previous backend files we
 
 ## Next
 
-Result is ready for human review. Review gate: install the current build, run a real recording from the iPhone, tap Stop, immediately leave Her or lock the phone, then reopen Her and verify the recording either resumes pending upload/processing or appears completed in Conversations. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
+Result is ready for human review. Review gate: install the current build, run a real recording from the iPhone while offline, tap Stop, confirm the row says `Waiting for internet` / `OFFLINE` and no hard error appears, then restore network and confirm upload/transcription starts automatically. Also verify the previous recovery path by leaving or locking Her after Stop, reopening it, and confirming the recording either resumes pending upload/processing or appears completed in Conversations. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or `IOS-4` if wake-word/voice enrollment remains the next stage-1 blocker.
 
 # IOS-6: Polish iOS Auth Screen
 
@@ -1547,6 +1719,14 @@ Out of scope:
   - `git diff --check`
   - `xcrun devicectl list devices` showed `iPhone (Yerasyl)` as `unavailable`.
   - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app` failed because CoreDevice could not locate the unavailable iPhone.
+- 2026-05-19 wake-command pause:
+  - `git diff --check`
+  - `python3 -m compileall her-ios/backend/app`
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+  - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+  - `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+  - `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+  - `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
 
 ## Result
 
@@ -1558,13 +1738,15 @@ The recording phase now switches the wake listener into a constrained stop-only 
 
 Follow-up Ray-Ban music fix: the normal foreground wake listener now checks `AVAudioSession.isOtherAudioPlaying` before configuring the `.playAndRecord` / `.voiceChat` / Bluetooth HFP session. If music or other audio is already playing, wake commands move to a paused state instead of taking the microphone route, so opening Her while wearing Ray-Ban glasses should not make music muffled or switch the glasses into the call profile. When the wake listener did own the audio session, stopping it now deactivates with `.notifyOthersOnDeactivation`; the stop-only listener during an active recording reuses the recorder's audio session instead of owning/deactivating it.
 
+2026-05-19 follow-up: wake commands are paused at runtime behind a code feature flag. A new launch resets any previously enabled wake-command preference to off and does not start the Speech/AVAudioEngine microphone listener. Settings no longer shows the Wake word, Listen for, or Command status rows, and onboarding now treats the assistant name as a display name instead of a wake word.
+
 Known limitations: this is a foreground iOS Speech prototype, not a trained always-on wake-word model. It needs physical-device validation with Ray-Ban selected as the active Bluetooth input. If iOS still refuses to run `AVAudioRecorder` and the stop listener at the same time on device, the next fix is a shared audio pipeline or real wake-word engine rather than another independent microphone consumer.
 
 The updated Debug iOS build was signed, installed, and launched on `iPhone (Yerasyl)`. The first CoreDevice install attempt failed with `Connection interrupted`, then the retry succeeded. Later builds that release the wake listener before starting recording, display `Yerasyl (you)` labels, and add the recording stop-only listener were also signed, installed, and launched on the same iPhone. The 2026-05-14 Ray-Ban music audio-route fix builds and verifies locally, but was not installed because `iPhone (Yerasyl)` is currently `unavailable` to CoreDevice.
 
 ## Next
 
-Result is ready for human review once the latest build is installed on the iPhone. Review gate: reconnect/unlock `iPhone (Yerasyl)`, install the current build, start music through the Ray-Ban glasses, open Her, and confirm the music stays normal while wake commands show paused because other audio is playing. Then stop music, open Her, set assistant name to `Friday`, enable `Listen for Friday` in Settings, accept Speech/Microphone permissions, and test `Hey Friday` as visible wake feedback, `Hey Friday start recording`, and while recording `Hey Friday stop recording` / `stop recording` through the active Ray-Ban/iPhone audio route. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or harden `IOS-4` with a real custom wake-word provider after device validation.
+Result is ready for human review on the installed iPhone build. Review gate: open Settings -> voice & capture and confirm only Language and Silence trim remain, with no wake-word/listen/status controls. Reopen onboarding if needed and confirm the agent-name step no longer presents the name as a wake word. Open Her while audio is playing and confirm it no longer asks for Speech recognition or switches the microphone route for wake listening. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-3` if setup state should move to the backend, or revisit `IOS-4` later with a deliberate real wake-word provider decision.
 
 # IOS-5: Put Agent Name Before Voice Enrollment
 
