@@ -57,6 +57,40 @@ Important areas:
 
 Layering rule inside `app/src/`: `ui` and `client` may import `shared`; `server` is backend-only and must not be imported from `ui`. UI calls API routes; API routes call `server`. See `app/src/README.md`.
 
+## Agent Knowledge Model
+
+This file is the repo-level schema for coding agents. Treat it as the
+instructions for how to navigate and maintain project knowledge, not as a
+scratchpad or task transcript.
+
+The useful adaptation of Karpathy's LLM-wiki pattern is:
+
+```text
+raw project sources -> maintained repo docs/task state -> concise context for the next agent
+```
+
+Reference: https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
+
+### Knowledge Layers
+
+| Layer | What it is | Agent rule |
+| --- | --- | --- |
+| Raw sources | Code, tests, schemas, migrations, local runtime behavior, browser/iOS observations, uploaded artifacts, and external references. | Inspect before editing. Do not summarize by memory when the file or runtime can be checked directly. |
+| Product docs | `README.md`, `TEST_PLAN_BROWSER_WORKFLOWS.md`, `app/docs/`, `her-ios/docs/`, and roadmaps. | Keep these current when behavior, architecture, or product scope changes. Prefer one clear source of truth over duplicated notes. |
+| Task state | `todo/tasks.md`, `todo/{ios,web,back}.md`, `todo/done/`, and `docs/runtime/agent_handoff.md`. | This is the work log and review gate. Update it after implementation, but do not treat task notes as product architecture unless linked docs/code agree. |
+| User memory wiki | `.data/identity/users/<user_id>/wiki/` as described in `app/docs/user-memory-wiki.md`. | This is runtime memory about the user, not repo documentation. Never copy secrets into it; use reviewable candidates for sensitive facts. |
+| Agent schemas | Root `AGENTS.md`, nested `AGENTS.md`, `app/src/README.md`, and runtime workflow docs. | These define how agents operate. Update them only when the agent workflow or repo conventions change. |
+
+### Operating The Knowledge Base
+
+Use the repo like a maintained wiki with code as the ultimate source of truth:
+
+1. **Orient**: read this file, `todo/tasks.md`, current branch/status, and the relevant area docs before changing behavior.
+2. **Ingest**: when a new source matters, extract the durable facts into the right maintained doc or task result. Link the source instead of pasting large raw material.
+3. **Query**: answer questions from current files and runtime checks. If the answer becomes durable architecture or workflow, file it in docs rather than leaving it only in chat.
+4. **Lint**: when touching docs, look for stale claims, orphan references, contradictions, and duplicated guidance. Fix the closest source of truth first.
+5. **Log**: record implementation results and verification in the task entry, then leave a concise handoff note only when it helps the next agent resume safely.
+
 ## Read Next
 
 Start here in this order:
@@ -65,7 +99,7 @@ Start here in this order:
 - **`TEST_PLAN_BROWSER_WORKFLOWS.md`** — the source of truth for what the web/browser agent must do end-to-end.
 - **`app/AGENTS.md`** — Next.js–specific rules (this is **not** the Next.js you trained on; check `node_modules/next/dist/docs/` before writing app code).
 - **`app/src/README.md`** — `src/` layering rules (`ui` ↔ `shared` ↔ `server`).
-- **`app/docs/browser-agent-memory-roadmap.md`**, **`app/docs/credential-broker.md`**, **`app/docs/her-sessions.md`**, **`app/docs/memory-landscape.md`**, **`app/docs/web-mcp-focus.md`** — design notes for the browser agent and memory layer.
+- **`app/docs/browser-agent-memory-roadmap.md`**, **`app/docs/user-memory-wiki.md`**, **`app/docs/credential-broker.md`**, **`app/docs/her-sessions.md`**, **`app/docs/memory-landscape.md`**, **`app/docs/web-mcp-focus.md`** — design notes for the browser agent and memory layer.
 - **`her-ios/README.md`** and **`her-ios/ROADMAP.md`** — iOS app and backend setup, Meta DAT wiring.
 - **`her-ios/docs/meta-wearables-dat.md`**, **`her-ios/docs/privacy-and-consent.md`** — DAT and consent reference for iOS work.
 - **`docs/runtime/commit.md`** — current commit and optional PR rules.

@@ -50,12 +50,15 @@ Create a repo-level task-first workflow that matches this repository's actual st
 
 The requested workflow guide included `research` and `dev` streams, but this repo uses iOS, web, and backend areas instead.
 
+2026-05-20 follow-up: adapt root `AGENTS.md` to Karpathy's LLM-wiki pattern so it explains the repo's knowledge layers, agent schema role, and ingest/query/lint workflow for future agents.
+
 ### Scope
 
 In scope:
 - Add a root `AGENTS.md` workflow guide.
 - Add canonical task and stream files under `todo/`.
 - Add a runtime handoff note file under `docs/runtime/`.
+- Clarify how agents should maintain repo knowledge using raw sources, maintained docs, task state, and runtime memory wiki layers.
 
 Out of scope:
 - Commit, push, PR, archival, or marking the task done before human review.
@@ -65,6 +68,7 @@ Out of scope:
 
 - [x] Inspect existing workflow docs and project layout.
 - [x] Create root workflow and task tracking files.
+- [x] Adapt root `AGENTS.md` to the LLM-wiki schema pattern.
 - [x] Record verification and stop for human review.
 
 ### Verification
@@ -72,10 +76,14 @@ Out of scope:
 - `rg --files -g 'AGENTS.md' -g 'todo/**' -g 'docs/runtime/agent_handoff.md'`
 - `sed -n '1,260p' AGENTS.md`
 - `sed -n '1,220p' todo/tasks.md`
+- `git diff --check`
+- `git diff -- AGENTS.md todo/tasks.md docs/runtime/agent_handoff.md`
 
 ### Result
 
 Created repo-level workflow docs and task tracking structure adapted to `ios`, `web`, and `back`. Existing unrelated `her-ios/*` worktree changes were left untouched.
+
+2026-05-20: Added an `Agent Knowledge Model` section to root `AGENTS.md`, mapping the repo to raw sources, product docs, task state, user memory wiki, and agent schema layers. Added an operating loop for orient/ingest/query/lint/log and linked `app/docs/user-memory-wiki.md` from the `Read Next` path.
 
 ### Next
 
