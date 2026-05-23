@@ -125,6 +125,22 @@ class VoiceEmbedder:
             logger.warning("Failed labeled speaker embedding extraction: %s", exc)
             return self._extract_labeled_segments_external(audio_path, transcript_segments)
 
+    def extract_sample_audio(
+        self,
+        audio_path: Path,
+        output_prefix: Path,
+        transcript_segments: list[Any],
+    ) -> Path | None:
+        segments: list[tuple[float, float]] = []
+        for transcript_segment in transcript_segments:
+            start = float(getattr(transcript_segment, "start", 0.0) or 0.0)
+            end = float(getattr(transcript_segment, "end", 0.0) or 0.0)
+            if end - start >= 0.5:
+                segments.append((max(0.0, start), end))
+        if not segments:
+            return None
+        return self._speaker_sample_audio(audio_path, output_prefix, segments)
+
     @staticmethod
     def average_embeddings(
         current: np.ndarray,

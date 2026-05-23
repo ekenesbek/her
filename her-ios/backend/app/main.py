@@ -1,6 +1,7 @@
 import json
 import logging
 import mimetypes
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +39,8 @@ from app.schemas import (
     UserResponse,
     VoiceProfileListResponse,
     VoiceProfileResponse,
+    VoiceProfileSampleListResponse,
+    VoiceProfileUpdateRequest,
 )
 from app.services.app_store import AppStoreTransactionValidator, AppStoreValidationError
 from app.services.auth import (
@@ -61,6 +64,7 @@ from app.services.voice_profiles import VoiceEmbedder
 from app.settings import get_settings
 
 logger = logging.getLogger(__name__)
+GENERATED_SPEAKER_LABEL_PREFIXES = ("SPEAKER_", "SPEAKER-", "SPEAKER ")
 
 settings = get_settings()
 transcriber = build_transcriber(settings)
@@ -360,6 +364,99 @@ def relabel_transcript(
     return result.model_copy(update={"segments": new_segments, "transcript": transcript_text})
 
 
+def persist_unknown_speaker_profiles(
+    meeting: MeetingResponse,
+    user_id: str,
+    audio_path: Path,
+) -> MeetingResponse:
+    """Create stable Speaker N voice profiles for unmatched generated diarization labels."""
+    if not meeting.segments:
+        return meeting
+
+    existing_names = {
+        profile.name.strip().casefold()
+        for profile in store.list_voice_profiles(user_id)
+        if profile.name.strip()
+    }
+    speakers: list[str] = []
+    for segment in meeting.segments:
+        speaker = (segment.speaker or "").strip()
+        if (
+            not speaker
+            or speaker.casefold() in existing_names
+            or not _is_generated_speaker_label(speaker)
+            or speaker in speakers
+        ):
+            continue
+        speakers.append(speaker)
+    if not speakers:
+        return meeting
+
+    speaker_set = set(speakers)
+    candidate_segments = [
+        segment
+        for segment in meeting.segments
+        if (segment.speaker or "").strip() in speaker_set
+    ]
+    embeddings = voice_embedder.extract_for_labeled_segments(audio_path, candidate_segments)
+    if not embeddings:
+        return meeting
+
+    speaker_to_name: dict[str, str] = {}
+    for speaker in speakers:
+        embedding = embeddings.get(speaker)
+        if embedding is None:
+            continue
+        matching_segments = [
+            segment for segment in meeting.segments if _same_speaker(segment.speaker, speaker)
+        ]
+        profile = store.save_voice_profile(
+            user_id=user_id,
+            name=store.next_speaker_profile_name(user_id),
+            duration_seconds=_segments_duration_seconds(matching_segments),
+            embedding=voice_embedder.serialize(embedding),
+            meeting_id=meeting.id,
+            speaker_label=speaker,
+        )
+        speaker_to_name[speaker] = profile.name
+
+    if not speaker_to_name:
+        return meeting
+
+    updated_segments = [
+        segment.model_copy(
+            update={
+                "speaker": speaker_to_name.get(
+                    (segment.speaker or "").strip(),
+                    segment.speaker,
+                )
+            }
+        )
+        for segment in meeting.segments
+    ]
+    updated_meeting = store.update_meeting_transcript(
+        meeting.id,
+        user_id,
+        _format_transcript(updated_segments),
+        updated_segments,
+    )
+    return updated_meeting or meeting
+
+
+def _is_generated_speaker_label(label: str) -> bool:
+    clean = label.strip()
+    if not clean:
+        return False
+    upper = clean.upper()
+    if upper.startswith(GENERATED_SPEAKER_LABEL_PREFIXES):
+        return True
+    if upper == "SPEAKER":
+        return True
+    if upper.startswith("PARTICIPANT "):
+        return True
+    return False
+
+
 def _speaker_profile_matches(
     per_speaker_embeddings,
     profile_vectors,
@@ -464,6 +561,79 @@ def delete_voice_profile(
     if not store.delete_voice_profile(user.id, profile_id):
         raise HTTPException(status_code=404, detail="Voice profile not found.")
     return {"deleted": profile_id}
+
+
+@app.patch("/v1/voice-profiles/{profile_id}", response_model=VoiceProfileResponse)
+def rename_voice_profile(
+    profile_id: str,
+    payload: VoiceProfileUpdateRequest,
+    user: UserResponse = Depends(current_user),
+) -> VoiceProfileResponse:
+    try:
+        updated = store.rename_voice_profile(user.id, profile_id, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Voice profile not found.")
+    return updated
+
+
+@app.get(
+    "/v1/voice-profiles/{profile_id}/samples",
+    response_model=VoiceProfileSampleListResponse,
+)
+def list_voice_profile_samples(
+    profile_id: str,
+    user: UserResponse = Depends(current_user),
+) -> VoiceProfileSampleListResponse:
+    return VoiceProfileSampleListResponse(
+        samples=store.list_voice_profile_samples(user.id, profile_id)
+    )
+
+
+@app.get("/v1/voice-profiles/{profile_id}/samples/{sample_id}/audio")
+def download_voice_profile_sample_audio(
+    profile_id: str,
+    sample_id: str,
+    user: UserResponse = Depends(current_user),
+) -> FileResponse:
+    sample = store.get_voice_profile_sample_payload(user.id, profile_id, sample_id)
+    if sample is None:
+        raise HTTPException(status_code=404, detail="Voice profile sample not found.")
+    if not sample.get("meeting_id") or not sample.get("audio_path"):
+        raise HTTPException(status_code=404, detail="Sample source audio is not available.")
+
+    audio_path = Path(sample["audio_path"])
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Sample source audio file is missing.")
+    if shutil.which("ffmpeg") is None:
+        raise HTTPException(status_code=503, detail="Audio sample extraction requires ffmpeg.")
+
+    meeting = store.get(sample["meeting_id"], user_id=user.id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Sample source meeting not found.")
+
+    matching_segments = _sample_source_segments(meeting, sample)
+    if not matching_segments:
+        raise HTTPException(status_code=404, detail="No transcript segments found for this sample.")
+
+    sample_dir = settings.data_dir / "voice-profile-sample-audio" / user.id / profile_id
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    cached_path = sample_dir / f"{sample_id}.wav"
+    if not cached_path.exists():
+        extracted_path = voice_embedder.extract_sample_audio(
+            audio_path,
+            sample_dir / sample_id,
+            matching_segments,
+        )
+        if extracted_path is None or not extracted_path.exists():
+            raise HTTPException(status_code=503, detail="Could not extract voice sample audio.")
+        if extracted_path.resolve() != cached_path.resolve():
+            cached_path.unlink(missing_ok=True)
+            extracted_path.replace(cached_path)
+
+    filename = f"{sample.get('profile_name') or 'speaker'} sample.wav"
+    return FileResponse(path=cached_path, media_type="audio/wav", filename=filename)
 
 
 @app.post(
@@ -579,6 +749,23 @@ def _segments_duration_seconds(segments: list) -> float | None:
     return total if total > 0 else None
 
 
+def _sample_source_segments(meeting: MeetingResponse, sample: dict) -> list:
+    speaker_label = sample.get("speaker_label")
+    profile_name = sample.get("profile_name")
+    matching = [
+        segment
+        for segment in meeting.segments
+        if _same_speaker(segment.speaker, speaker_label)
+    ]
+    if matching:
+        return matching
+    return [
+        segment
+        for segment in meeting.segments
+        if _same_speaker(segment.speaker, profile_name)
+    ]
+
+
 def _audio_duration_seconds(path: Path) -> float | None:
     probed_duration = probe_audio_duration_seconds(path)
     if probed_duration is not None:
@@ -671,7 +858,9 @@ async def process_meeting(
         content_type = mimetypes.guess_type(stored_audio_path.name)[0] or audio.content_type
         store.attach_meeting_audio(meeting.id, user.id, stored_audio_path, content_type)
         stored_meeting = store.get(meeting.id, user_id=user.id)
-        return stored_meeting or meeting.model_copy(update={"hasAudio": True})
+        if stored_meeting is not None:
+            return persist_unknown_speaker_profiles(stored_meeting, user.id, stored_audio_path)
+        return meeting.model_copy(update={"hasAudio": True})
     finally:
         if not audio_stored:
             path.unlink(missing_ok=True)
@@ -1043,6 +1232,7 @@ def run_meeting_job(job_id: str) -> None:
             audio_stored = True
             content_type = mimetypes.guess_type(stored_audio_path.name)[0]
             store.attach_meeting_audio(meeting.id, job["user_id"], stored_audio_path, content_type)
+            meeting = persist_unknown_speaker_profiles(meeting, job["user_id"], stored_audio_path)
             store.update_meeting_job(job_id, status="processing", meeting_id=meeting.id)
         else:
             audio_stored = True

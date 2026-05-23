@@ -132,7 +132,7 @@ After review/approval: continue `IOS-22` call memory review UI.
 
 # IOS-22: Add iOS Call Memory Review UI
 
-Status: planned
+Status: review
 Priority: P1
 Owner: mixed
 Stream: ios
@@ -155,6 +155,7 @@ In scope:
 - Add confirm, edit, reject, and forget actions.
 - Keep sensitive/review candidates visually distinct and require explicit confirmation before global promotion.
 - Wire actions to backend candidate endpoints from `IOS-21`.
+- 2026-05-21 slice: make backend candidates visible in the iOS Memory tab and per-call summary surface before action endpoints exist.
 
 Out of scope:
 - Direct protected call-audio capture.
@@ -165,11 +166,11 @@ Out of scope:
 
 ## Implementation Plan
 
-- [ ] Inspect current recording detail and summary UI.
-- [ ] Add candidate models to the iOS API client/store.
-- [ ] Build the review section and actions.
+- [x] Inspect current recording detail and summary UI.
+- [x] Add candidate models to the iOS API client/store.
+- [x] Build the first review section and aggregate Memory screen visibility.
 - [ ] Wire backend updates.
-- [ ] Run backend compile and iOS build/smoke checks.
+- [x] Run backend compile and iOS build checks.
 
 ## Verification
 
@@ -180,11 +181,133 @@ Out of scope:
 
 ## Result
 
+2026-05-21: First visibility slice implemented. The iOS client now decodes backend `memoryCandidates` into `StoredMeeting`, shows an aggregate Memory tab populated from saved call/meeting candidates, and adds a "memory from this call" section in the conversation summary surface. Sensitive/review candidates are visually flagged, but confirm/edit/reject/forget actions remain blocked on the candidate status endpoints from `IOS-21`.
+
+Verification:
+- `python3 -m compileall her-ios/backend/app`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `git diff --check`
+- Remote deploy to `51.195.200.207`: backed up previous backend at `/home/ubuntu/meta-ios-deploy-backups/backend-20260521-093231-memory-visible.tgz`, synced `her-ios/backend/app`, compiled remote backend, force-restarted the stuck `meta-ios-backend.service`, verified public `GET /health`, and verified `MeetingResponse` exposes `memoryCandidates`.
+- iPhone update: built a signed Debug app for `iPhone (Yerasyl)`, verified the bundle points to `http://51.195.200.207:8787`, installed it on physical device `00008140-00114D90227B001C`, and launched `com.ekenesbek.her`.
+- Existing-recording memory backfill for ekenesbek accounts: backed up production SQLite at `/home/ubuntu/meta-ios-deploy-backups/meetings-20260521-093826-memory-backfill.sqlite3`, regenerated candidates for `erasyl.kengesbek@gmail.com` and the Apple private-relay account, persisted 116 total `candidate` rows, and relaunched `com.ekenesbek.her` on `iPhone (Yerasyl)`.
+
+Not run:
+- Physical iPhone smoke with a new real processed call after launch.
+
+## Next
+
+Needs human review of the Memory visibility slice. After approval: continue `IOS-21` backend candidate update/list/promote-ready endpoints, then finish `IOS-22` confirm/edit/reject/forget actions.
+
+# IOS-23: Make Memory Home Action-First
+
+Status: planned
+Priority: P1
+Owner: mixed
+Stream: ios
+Branch: current worktree
+Created: 2026-05-21
+
+## Goal
+
+Make the iOS Memory tab useful at a glance by prioritizing concrete open actions, follow-ups, and decisions that need review, instead of showing a raw archive of all extracted facts.
+
+## Context
+
+The current Memory tab proves that backend candidates are visible, but it is not yet the right product surface. Most users do not need to browse every remembered fact. They need "what should I do?", "what needs review?", and "what changed?" Anything else should be reachable through memory chat/search.
+
+## Scope
+
+In scope:
+- Replace the raw recent-candidate list as the primary Memory tab surface with an action-first dashboard.
+- Show open action items, follow-ups, due-ish items, unresolved review candidates, and recently changed decisions.
+- Group items by project/topic/source meeting where possible.
+- Keep non-action facts available behind search/chat/detail, not as the main feed.
+- Show sensitivity/review markers and source links back to recordings.
+
+Out of scope:
+- Full graph visualization.
+- Agent memory sharing, tracked in `BACK-2`.
+- Memory chat, tracked in `IOS-24`.
+- Confirm/edit/reject backend actions until `IOS-21` provides endpoints.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [ ] Inspect current Memory tab data model and candidate kinds.
+- [ ] Add derived sections: To Do, Follow Up, Needs Review, Recent Decisions.
+- [ ] Add empty/loading/error states that make sense for saved recordings.
+- [ ] Link action rows back to source conversation detail.
+- [ ] Keep the full candidate list behind a secondary "all memory" view if needed.
+
+## Verification
+
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Physical iPhone smoke with existing backfilled candidates.
+- `git diff --check`
+
+## Result
+
 Not started.
 
 ## Next
 
-After review/approval: promote confirmed call memory into the shared user memory wiki through the structured memory pipeline.
+After review/approval: continue `IOS-24` memory chat.
+
+# IOS-24: Add AI Chat Over User Memory
+
+Status: planned
+Priority: P1
+Owner: mixed
+Stream: ios
+Branch: current worktree
+Created: 2026-05-21
+
+## Goal
+
+Add a chat surface where the user can ask questions over all confirmed/reviewable memory, meetings, actions, projects, and eventually the memory graph.
+
+## Context
+
+The Memory tab should show only the most useful action layer. Questions like "what do you know about Marina?", "what did we decide about drones?", or "connect this week's conversation to the one three weeks ago" belong in a memory chat backed by retrieval and graph queries.
+
+## Scope
+
+In scope:
+- Add an iOS Memory chat entry point from the Memory tab.
+- Send questions to a backend memory query/chat endpoint.
+- Return compact answers with source meeting links and uncertainty labels.
+- Support action-oriented prompts: open tasks, follow-ups, people/projects, recent changes.
+- Avoid treating candidate/review memory as confirmed truth unless labeled.
+
+Out of scope:
+- Building the backend graph API itself, tracked in `BACK-1`.
+- Local agent share/tool access, tracked in `BACK-2`.
+- Raw transcript dump in answers.
+- Using sensitive/review facts without explicit labels.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [ ] Wait for or stub the backend memory query API from `BACK-1`.
+- [ ] Add iOS Memory chat route and message UI.
+- [ ] Add suggested prompts for actions, projects, people, and recent decisions.
+- [ ] Render source links back to conversation detail.
+- [ ] Add loading/error states and subscription/entitlement behavior if needed.
+
+## Verification
+
+- Backend memory query smoke once `BACK-1` exists.
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Physical iPhone smoke asking about existing backfilled memory.
+- `git diff --check`
+
+## Result
+
+Not started.
+
+## Next
+
+After review/approval: wire local-agent sharing from `BACK-2` into the iOS Memory UI.
 
 # IOS-19: Remove DAT Pairing From iOS Audio Route UX
 
@@ -1870,11 +1993,15 @@ In scope:
 - Replace mocked speaker-name suggestions with real saved voice profiles from the backend.
 - Mark the current user's speaker label as `(you)` when it displays as `Yerasyl` or the signed-in user name.
 - Keep all profiles scoped to the authenticated `user_id`.
+- Automatically persist remaining generated diarization labels as stable user-scoped `Speaker N` voice profiles after meeting processing.
+- Keep the generated speaker counter monotonic per user so renaming or deleting `Speaker N` does not allow that number to be reused.
+- Let Settings -> People open a saved profile, play source samples, and rename the profile.
 
 Out of scope:
 - Cross-user/global speaker identity.
 - Automatic profile training from unconfirmed model guesses.
 - Full contact-management UI beyond choosing an existing profile or typing a new name from the transcript speaker sheet.
+- Merging duplicate people/contact records.
 - Commit, push, PR, archive, or mark done before human review.
 
 ## Implementation Plan
@@ -1884,6 +2011,9 @@ Out of scope:
 - [x] Update backend relabeling/enrollment to use expandable profiles and external embedding fallback where needed.
 - [x] Wire iOS speaker sheet to saved profiles and backend assignment.
 - [x] Decorate current-user speaker labels as `(you)` in live and saved transcript displays.
+- [x] Auto-create durable `Speaker N` profiles for unknown generated diarization labels.
+- [x] Add backend profile rename and sample playback endpoints.
+- [x] Add Settings -> People profile detail with rename and sample playback.
 - [x] Run backend and iOS verification.
 
 ## Verification
@@ -1906,9 +2036,14 @@ Out of scope:
 - `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
 - Remote deploy to `51.195.200.207`: backed up previous files at `/home/ubuntu/meta-ios-deploy-backups/backend-20260518-145318-ios13-voice-match.tgz`, copied `app/main.py` and `app/settings.py`, compiled remote backend, restarted `meta-ios-backend.service`, verified `GET /health`.
 - Remote DB update for the two latest Apple/private-relay meetings: backed up SQLite at `/home/ubuntu/meta-ios-deploy-backups/meetings-20260518-145526-before-voice-relabel.sqlite3`, relabeled meeting `2279c2aa-b302-415f-baee-d6317d5a8390` from `SPEAKER_00` to `Yerasyl` and meeting `cc9d6c19-4b76-4220-9845-c8a414437227` from `SPEAKER_01` to `Yerasyl`, then verified the persisted speaker counts.
+- 2026-05-21 unknown-speaker persistence follow-up: `python3 -m compileall her-ios/backend/app`
+- 2026-05-21 unknown-speaker persistence follow-up: backend smoke script verified a two-speaker meeting auto-created `Speaker 1` and `Speaker 2`, advanced the next counter, renamed `Speaker 1` to `Samole`, rewrote saved meeting segments, and created a later unknown speaker with the next available number. The ambient Python environment was missing PyJWT, so the smoke used a fake `jwt` module; the existing pyenv `hashlib` blake2 warnings still printed, but assertions completed.
+- 2026-05-21 unknown-speaker persistence follow-up: `git diff --check`
+- 2026-05-21 unknown-speaker persistence follow-up: `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
 
 Not run:
 - Manual UI smoke for assigning a real speaker on production meeting audio.
+- Manual iPhone smoke for Settings -> People profile drill-in, sample playback, and rename on real meeting audio.
 
 ## Result
 
@@ -1926,6 +2061,10 @@ Deployment note: the main backend server had a full root disk. Only Docker build
 
 2026-05-18 follow-up: the production account reached through Apple Sign In uses a private relay address, not the literal `ekenesbek@icloud.com` email. The two latest recordings had a saved `Yerasyl` profile, valid audio, and diarized speakers, but the best matching speakers scored `0.5616` and `0.5839`, below the previous strict `VOICE_PROFILE_MATCH_THRESHOLD=0.62`. Automatic relabeling now uses a safer single-profile path: when a user has exactly one saved voice profile, a clearly best diarized speaker can match at `VOICE_PROFILE_SINGLE_PROFILE_MATCH_THRESHOLD=0.55` if it beats the next speaker by `VOICE_PROFILE_SINGLE_PROFILE_MATCH_MARGIN=0.08`; only one speaker label can be assigned to that profile in a recording. The backend fix is deployed, and the two latest production meetings were relabeled in SQLite so `Yerasyl` appears in their saved segments.
 
+2026-05-21 follow-up: unknown diarization speakers are now persisted automatically as durable user-scoped voice profiles. After known-profile relabeling, the backend saves remaining generated labels such as `SPEAKER_00` as `Speaker 1`, `Speaker 2`, and so on, stores voice samples from the meeting audio, rewrites that meeting's transcript labels to the stable profile names, and advances a per-user counter that is not reused after rename or delete.
+
+Added profile management endpoints for People settings: `PATCH /v1/voice-profiles/{profile_id}` renames a saved person and rewrites that user's saved meeting segment labels, `GET /v1/voice-profiles/{profile_id}/samples` lists source samples, and `GET /v1/voice-profiles/{profile_id}/samples/{sample_id}/audio` returns an extracted WAV sample for playback. Settings -> People now opens saved profile detail, supports renaming `Speaker 1` to a real name such as `Samole`, and plays available voice samples.
+
 ## Next
 
-Result is ready for human review. Review gate: reopen Her, refresh/open the two latest recordings, and confirm the correct speaker rows now show `Yerasyl (you)` while the other speaker rows stay separate. Then record/process another short meeting and confirm the saved `Yerasyl` profile auto-labels when it is the clearly best speaker match. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment/wake-word setup remains the next blocker.
+Result is ready for human review. Review gate: record/process a new multi-speaker meeting, open Settings -> People, and confirm the unknown voices appear as saved `Speaker 1`, `Speaker 2`, etc. Open one profile, play a sample, rename it to a real name such as `Samole`, then reopen the meeting and confirm the transcript uses the renamed person while later unknown speakers continue with the next number. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment remains the next blocker, or `IOS-21` if the call-memory bridge is the next priority.

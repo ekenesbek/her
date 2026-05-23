@@ -90,6 +90,22 @@ struct MeetingTranscriptSegment: Codable, Equatable, Identifiable {
     }
 }
 
+struct MeetingMemoryCandidate: Codable, Equatable, Identifiable {
+    let id: String
+    let meetingId: String
+    let kind: String
+    let text: String
+    let confidence: Double
+    let sensitivity: String
+    let status: String
+    let source: String
+    let createdAt: Date
+
+    var confidencePercent: Int {
+        Int((confidence * 100).rounded())
+    }
+}
+
 struct MeetingSummary: Codable, Equatable, Identifiable {
     var id = UUID()
     let title: String

@@ -8,6 +8,16 @@ struct VoiceProfile: Codable, Identifiable, Equatable {
     let createdAt: Date
 }
 
+struct VoiceProfileSample: Codable, Identifiable, Equatable {
+    let id: String
+    let profileId: String
+    let meetingId: String?
+    let speakerLabel: String?
+    let durationSeconds: Double?
+    let hasAudio: Bool?
+    let createdAt: Date
+}
+
 enum VoiceProfilesError: LocalizedError {
     case backendUnavailable
     case backendFailed(statusCode: Int, detail: String?)
@@ -79,6 +89,48 @@ struct VoiceProfilesService {
         return try decoder().decode(VoiceProfile.self, from: data)
     }
 
+    func rename(id: String, name: String) async throws -> VoiceProfile {
+        var request = URLRequest(url: baseURL.appendingPathComponent("v1/voice-profiles/\(id)"))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(authHeader(), forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(VoiceProfileRenameBody(name: name))
+
+        let (data, response) = try await session.data(for: request)
+        try ensureOK(response: response, data: data)
+        return try decoder().decode(VoiceProfile.self, from: data)
+    }
+
+    func samples(profileId: String) async throws -> [VoiceProfileSample] {
+        var request = URLRequest(url: baseURL.appendingPathComponent("v1/voice-profiles/\(profileId)/samples"))
+        request.setValue(authHeader(), forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        try ensureOK(response: response, data: data)
+
+        let decoder = decoder()
+        struct Wrapper: Decodable { let samples: [VoiceProfileSample] }
+        return try decoder.decode(Wrapper.self, from: data).samples
+    }
+
+    func downloadSampleAudio(profileId: String, sampleId: String) async throws -> URL {
+        var request = URLRequest(
+            url: baseURL.appendingPathComponent("v1/voice-profiles/\(profileId)/samples/\(sampleId)/audio")
+        )
+        request.setValue(authHeader(), forHTTPHeaderField: "Authorization")
+        let (temporaryURL, response) = try await session.download(for: request)
+        try ensureOK(response: response, data: Data())
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerVoiceSamples", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent("\(profileId)-\(sampleId).wav")
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        return destination
+    }
+
     func delete(id: String) async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent("v1/voice-profiles/\(id)"))
         request.httpMethod = "DELETE"
@@ -128,6 +180,10 @@ struct VoiceProfilesService {
         default: return "application/octet-stream"
         }
     }
+}
+
+private struct VoiceProfileRenameBody: Encodable {
+    let name: String
 }
 
 private extension ISO8601DateFormatter {

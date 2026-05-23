@@ -104,6 +104,51 @@ Runtime context should stay small:
 
 This means memory helps with prompts like "закажи такси домой" only if "home" has been explicitly confirmed or is visible in the relevant logged-in service. It should not hallucinate a destination from an old tab or a weak inference.
 
+## Product Surfaces
+
+The user-facing Memory screen should not become a raw archive of everything Her has extracted. Most users need the action layer first:
+
+- open action items and follow-ups
+- decisions that recently changed
+- candidates that need review
+- important source conversations when an item is unclear
+
+Everything else should be reachable through memory search/chat. The main Memory tab should answer "what should I do or review now?" before it answers "what does the system know?"
+
+Memory chat is the broad recall surface. It should let the user ask questions such as:
+
+- "what do you know about Marina?"
+- "what did we decide about drones?"
+- "what follow-ups are open from my last calls?"
+- "connect today's conversation to the one from three weeks ago"
+
+Answers must include source links, uncertainty labels, and sensitivity labels. Candidate/review memory should be described as candidate evidence, not as confirmed truth.
+
+`Share to Agent` is a separate capability surface. It should not export raw memory by default. The right model is a scoped, revocable local tool or link that lets another local agent query Her memory through Her's policy layer. The share should define:
+
+- allowed scopes, such as actions, projects, people, preferences, or sources
+- expiry and revoke controls
+- sensitivity policy
+- read-only query access
+- audit logs
+
+The agent-facing surface should expose convenient endpoints, not require the agent to scrape a UI. Two primary share modes matter:
+
+- Call-scoped share: a local agent gets context for one concrete call/meeting, including summary, transcript or snippets when allowed, action items, decisions, follow-ups, speakers/participants, memory candidates, source timestamps, and graph links around that call.
+- Whole-memory share: a local agent gets scoped access to the user's broader memory: profile, projects, people, places, preferences, open actions, decisions, corrections, and source episodes.
+
+Endpoint shape should be simple enough for another agent to call directly:
+
+```http
+GET  /v1/agent-shares/{token}/manifest
+GET  /v1/agent-shares/{token}/calls/{meeting_id}/context
+GET  /v1/agent-shares/{token}/memory/context
+POST /v1/agent-shares/{token}/query
+GET  /v1/agent-shares/{token}/sources/{source_id}
+```
+
+The response should include full context within the granted scope, with source ids, timestamps/snippets, confidence, status, and sensitivity labels. It should not hand over Her credentials, raw SQLite, raw audio, or unrestricted user history. Whole-memory shares should not include full transcripts by default; call-scoped shares may include transcript access when the user shares that call.
+
 ## Relationship To Web MCP
 
 Keep two memory types separate:

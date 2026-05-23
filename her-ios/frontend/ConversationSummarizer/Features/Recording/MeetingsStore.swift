@@ -12,6 +12,7 @@ struct StoredMeeting: Identifiable, Equatable {
     let hasAudio: Bool
     let createdAt: Date
     let summary: MeetingSummary
+    let memoryCandidates: [MeetingMemoryCandidate]
 
     var title: String {
         summary.title
@@ -495,6 +496,7 @@ private struct BackendMeetingRecord: Decodable {
     let generatedAt: Date
     let summaryStatus: String?
     let summaryMode: MeetingSummaryMode?
+    let memoryCandidates: [MeetingMemoryCandidate]?
 
     var storedMeeting: StoredMeeting {
         StoredMeeting(
@@ -519,7 +521,8 @@ private struct BackendMeetingRecord: Decodable {
                 generatedAt: generatedAt,
                 summaryStatus: summaryStatus ?? "generated",
                 summaryMode: summaryMode ?? .reasoning
-            )
+            ),
+            memoryCandidates: memoryCandidates ?? []
         )
     }
 }

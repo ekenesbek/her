@@ -75,6 +75,24 @@ class VoiceProfileListResponse(BaseModel):
     profiles: list[VoiceProfileResponse]
 
 
+class VoiceProfileUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class VoiceProfileSampleResponse(BaseModel):
+    id: str
+    profileId: str
+    meetingId: str | None = None
+    speakerLabel: str | None = None
+    durationSeconds: float | None = None
+    hasAudio: bool = False
+    createdAt: datetime
+
+
+class VoiceProfileSampleListResponse(BaseModel):
+    samples: list[VoiceProfileSampleResponse]
+
+
 class SpeakerAssignmentRequest(BaseModel):
     speaker: str = Field(min_length=1)
     profileId: str | None = None

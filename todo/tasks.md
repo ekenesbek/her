@@ -16,6 +16,9 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | WEB-7 | planned | P1 | web | current worktree | Add memory review API and web UI | `todo/web.md` |
 | WEB-8 | planned | P1 | web | current worktree | Add relevant memory retrieval selector | `todo/web.md` |
 | WEB-9 | planned | P2 | web | current worktree | Add memory evals and optional provider adapters | `todo/web.md` |
+| BACK-1 | planned | P1 | back | current worktree | Add memory graph and query API | `todo/back.md` |
+| BACK-2 | planned | P1 | back | current worktree | Add local agent memory share tool | `todo/back.md` |
+| BACK-3 | review | P1 | back | current worktree | Add Telegram audio transcription bot | `todo/back.md` |
 | IOS-2 | review | P1 | ios | ios/IOS-2/skip-setup-existing-account | Skip iOS setup for existing accounts | `todo/ios.md` |
 | IOS-3 | planned | P2 | ios | ios/IOS-3/server-setup-state | Store iOS setup state on backend | `todo/ios.md` |
 | IOS-1 | review | P1 | ios | ios/IOS-1/her-ios-smoke-test | Her iOS smoke test | `todo/ios.md` |
@@ -40,7 +43,9 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-19 | review | P1 | ios | current worktree | Remove DAT pairing from iOS audio route UX | `todo/ios.md` |
 | IOS-20 | review | P1 | ios | current worktree | Add call-source intake for phone and meeting apps | `todo/ios.md` |
 | IOS-21 | planned | P1 | ios | current worktree | Bridge call memory candidates into structured memory | `todo/ios.md` |
-| IOS-22 | planned | P1 | ios | current worktree | Add iOS call memory review UI | `todo/ios.md` |
+| IOS-22 | review | P1 | ios | current worktree | Add iOS call memory review UI | `todo/ios.md` |
+| IOS-23 | planned | P1 | ios | current worktree | Make Memory home action-first | `todo/ios.md` |
+| IOS-24 | planned | P1 | ios | current worktree | Add AI chat over user memory | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 

@@ -457,6 +457,7 @@ struct ContentView: View {
                     )
                 case .memory:
                     ExactMemoryScreen(
+                        meetings: meetingsStore.meetings,
                         recording: viewModel.phase == .recording,
                         onHome: { route = .home },
                         onConversations: { route = .conversations },
@@ -1952,6 +1953,7 @@ private struct ExactConversationDetailScreen: View {
                                         }
                                     )
                                 }
+                                MeetingMemorySection(meeting: meeting)
                             } else {
                                 SummaryWaitingPanel(transcriptReady: false)
                             }
@@ -2904,12 +2906,69 @@ private struct AskAIPaywallCard: View {
     }
 }
 
+private struct MeetingMemorySection: View {
+    let meeting: StoredMeeting
+
+    private var items: [MeetingMemoryCandidateItem] {
+        meeting.memoryCandidates
+            .map { MeetingMemoryCandidateItem(candidate: $0, meeting: meeting) }
+            .sorted { lhs, rhs in
+                lhs.candidate.createdAt > rhs.candidate.createdAt
+            }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            MonoLabel("memory from this call")
+            if items.isEmpty {
+                WwCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("No memory candidates.")
+                            .font(.system(size: 15, weight: .medium, design: .serif))
+                            .foregroundColor(AppTheme.fg)
+                        Text("Generate or refresh the summary to extract reviewable facts from this conversation.")
+                            .font(.system(size: 13, weight: .regular, design: .serif))
+                            .italic()
+                            .foregroundColor(AppTheme.muted)
+                            .lineSpacing(4)
+                    }
+                }
+            } else {
+                ForEach(items) { item in
+                    MemoryCandidateCard(item: item, showsMeeting: false)
+                }
+            }
+        }
+    }
+}
+
 private struct ExactMemoryScreen: View {
+    let meetings: [StoredMeeting]
     let recording: Bool
     let onHome: () -> Void
     let onConversations: () -> Void
     let onRecord: () -> Void
     let onHer: () -> Void
+
+    private var items: [MeetingMemoryCandidateItem] {
+        meetings
+            .flatMap { meeting in
+                meeting.memoryCandidates.map { candidate in
+                    MeetingMemoryCandidateItem(candidate: candidate, meeting: meeting)
+                }
+            }
+            .sorted { lhs, rhs in
+                lhs.candidate.createdAt > rhs.candidate.createdAt
+            }
+    }
+
+    private var reviewCount: Int {
+        items.filter { $0.candidate.sensitivity != "normal" || $0.candidate.status == "candidate" }.count
+    }
+
+    private var sourceCount: Int {
+        Set(items.map(\.meeting.id)).count
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2926,7 +2985,7 @@ private struct ExactMemoryScreen: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 6)
 
-                    Text("Memory will show backend facts, people, places, and preferences when the database has saved entries.")
+                    Text(memorySubtitle)
                         .font(.system(size: 14, weight: .regular, design: .serif))
                         .italic()
                         .foregroundColor(AppTheme.muted)
@@ -2936,21 +2995,42 @@ private struct ExactMemoryScreen: View {
                     MemorySearchCapsule()
                         .padding(.top, 14)
 
-                    WwCard {
-                        VStack(alignment: .leading, spacing: 8) {
-                            MonoLabel("empty")
-                            Text("No memory entries loaded.")
-                                .font(.system(size: 16, weight: .medium, design: .serif))
-                                .foregroundColor(AppTheme.fg)
-                            Text("When backend memory endpoints are connected, this screen will render real facts and controls here.")
-                                .font(.system(size: 14, weight: .regular, design: .serif))
-                                .italic()
-                                .foregroundColor(AppTheme.muted)
-                                .lineSpacing(4)
+                    if items.isEmpty {
+                        WwCard {
+                            VStack(alignment: .leading, spacing: 8) {
+                                MonoLabel("empty")
+                                Text("No call memory candidates yet.")
+                                    .font(.system(size: 16, weight: .medium, design: .serif))
+                                    .foregroundColor(AppTheme.fg)
+                                Text("Save or summarize a call to review facts before they become durable memory.")
+                                    .font(.system(size: 14, weight: .regular, design: .serif))
+                                    .italic()
+                                    .foregroundColor(AppTheme.muted)
+                                    .lineSpacing(4)
+                            }
+                            .padding(.top, 18)
+                        }
+                        .padding(.top, 12)
+                    } else {
+                        WwCard {
+                            VStack(spacing: 0) {
+                                MemoryPinRow(label: "candidates", value: "\(items.count)")
+                                Divider().background(AppTheme.border)
+                                MemoryPinRow(label: "sources", value: "\(sourceCount) conversations")
+                                Divider().background(AppTheme.border)
+                                MemoryPinRow(label: "review", value: "\(reviewCount) pending")
+                            }
+                        }
+                        .padding(.top, 12)
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            MonoLabel("recent")
+                            ForEach(items.prefix(40)) { item in
+                                MemoryCandidateCard(item: item, showsMeeting: true)
+                            }
                         }
                         .padding(.top, 18)
                     }
-                    .padding(.top, 12)
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 4)
@@ -2959,6 +3039,13 @@ private struct ExactMemoryScreen: View {
 
             ExactTabBar(activeIndex: 2, recording: recording, onHome: onHome, onRecord: onRecord, onLog: onConversations, onMemory: {}, onHer: onHer)
         }
+    }
+
+    private var memorySubtitle: String {
+        if items.isEmpty {
+            return "Call and meeting facts appear here after the backend extracts reviewable candidates."
+        }
+        return "\(items.count) reviewable candidates from \(sourceCount) saved conversations."
     }
 }
 
@@ -2983,6 +3070,164 @@ private struct MemorySearchCapsule: View {
         .padding(.horizontal, 14)
         .frame(height: 46)
         .background(Capsule().fill(AppTheme.bgSoft).overlay(Capsule().stroke(AppTheme.borderStrong, lineWidth: 1)))
+    }
+}
+
+private struct MeetingMemoryCandidateItem: Identifiable {
+    let candidate: MeetingMemoryCandidate
+    let meeting: StoredMeeting
+
+    var id: String {
+        candidate.id
+    }
+}
+
+private struct MemoryCandidateCard: View {
+    let item: MeetingMemoryCandidateItem
+    let showsMeeting: Bool
+
+    var body: some View {
+        WwCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Label(item.candidate.kindLabel, systemImage: item.candidate.kindIcon)
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundColor(AppTheme.dim)
+                        .textCase(.uppercase)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    MemoryCandidateBadge(text: item.candidate.statusLabel, highlighted: item.candidate.status == "candidate")
+                    if item.candidate.sensitivity != "normal" {
+                        MemoryCandidateBadge(text: item.candidate.sensitivityLabel, highlighted: true)
+                    }
+                }
+
+                Text(item.candidate.text)
+                    .font(.system(size: 15, weight: .regular, design: .serif))
+                    .foregroundColor(AppTheme.fg)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if showsMeeting {
+                        Text(item.meeting.title)
+                            .font(.system(size: 12, weight: .regular, design: .serif))
+                            .italic()
+                            .foregroundColor(AppTheme.muted)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.78)
+                    }
+                    Spacer(minLength: 8)
+                    Text("\(item.candidate.createdAtShort) · \(item.candidate.confidencePercent)%")
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundColor(AppTheme.dim)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+}
+
+private struct MemoryCandidateBadge: View {
+    let text: String
+    let highlighted: Bool
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.system(size: 9, weight: .regular, design: .monospaced))
+            .foregroundColor(highlighted ? AppTheme.fg : AppTheme.dim)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .padding(.horizontal, 7)
+            .frame(height: 22)
+            .background(
+                Capsule()
+                    .fill(highlighted ? AppTheme.bgSoft : AppTheme.bgDeep)
+                    .overlay(Capsule().stroke(highlighted ? AppTheme.borderStrong : AppTheme.border, lineWidth: 1))
+            )
+    }
+}
+
+private extension MeetingMemoryCandidate {
+    var kindLabel: String {
+        switch kind {
+        case "preference":
+            return "preference"
+        case "person":
+            return "person"
+        case "place":
+            return "place"
+        case "project":
+            return "project"
+        case "decision":
+            return "decision"
+        case "action":
+            return "action"
+        case "follow_up":
+            return "follow up"
+        case "topic":
+            return "topic"
+        case "correction":
+            return "correction"
+        default:
+            return "memory"
+        }
+    }
+
+    var kindIcon: String {
+        switch kind {
+        case "preference":
+            return "slider.horizontal.3"
+        case "person":
+            return "person"
+        case "place":
+            return "mappin.and.ellipse"
+        case "project":
+            return "folder"
+        case "decision":
+            return "checkmark.seal"
+        case "action", "follow_up":
+            return "checklist"
+        case "topic":
+            return "number"
+        case "correction":
+            return "arrow.uturn.backward"
+        default:
+            return "brain.head.profile"
+        }
+    }
+
+    var statusLabel: String {
+        switch status {
+        case "promoted":
+            return "saved"
+        case "rejected":
+            return "rejected"
+        default:
+            return "candidate"
+        }
+    }
+
+    var sensitivityLabel: String {
+        switch sensitivity {
+        case "sensitive":
+            return "sensitive"
+        case "review":
+            return "review"
+        default:
+            return "normal"
+        }
+    }
+
+    var createdAtShort: String {
+        Self.memoryDateFormatter.string(from: createdAt)
+    }
+
+    private static var memoryDateFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MMM d"
+        return formatter
     }
 }
 
@@ -3806,6 +4051,12 @@ private struct ExactSettingsHerScreen: View {
                         guard let profile = person.voiceProfile else { return }
                         Task { await deleteVoiceProfile(profile) }
                     },
+                    onRename: { person, name in
+                        guard let profile = person.voiceProfile else {
+                            throw VoiceProfilesError.invalidResponse
+                        }
+                        return try await renameVoiceProfile(profile, name: name)
+                    },
                     onHome: onHome,
                     onRecord: onRecord,
                     onConversations: onConversations,
@@ -4189,6 +4440,21 @@ private struct ExactSettingsHerScreen: View {
             // Stay quiet; could surface error if needed.
         }
     }
+
+    @MainActor
+    private func renameVoiceProfile(_ profile: VoiceProfile, name: String) async throws -> VoiceProfile {
+        guard let service = VoiceProfilesService() else {
+            throw VoiceProfilesError.backendUnavailable
+        }
+        let updated = try await service.rename(id: profile.id, name: name)
+        if let index = voiceProfiles.firstIndex(where: { $0.id == updated.id }) {
+            voiceProfiles[index] = updated
+        } else {
+            voiceProfiles.insert(updated, at: 0)
+        }
+        await meetingsStore.refresh()
+        return updated
+    }
 }
 
 private struct RecognizedSpeakerProfile: Identifiable, Equatable {
@@ -4197,6 +4463,27 @@ private struct RecognizedSpeakerProfile: Identifiable, Equatable {
     let subtitle: String
     let badge: String
     let voiceProfile: VoiceProfile?
+
+    func replacingVoiceProfile(_ profile: VoiceProfile) -> RecognizedSpeakerProfile {
+        RecognizedSpeakerProfile(
+            id: "profile:\(profile.id)",
+            name: profile.name,
+            subtitle: Self.subtitle(for: profile),
+            badge: "voice",
+            voiceProfile: profile
+        )
+    }
+
+    static func subtitle(for profile: VoiceProfile) -> String {
+        var parts: [String] = []
+        if let sampleCount = profile.sampleCount, sampleCount > 0 {
+            parts.append(sampleCount == 1 ? "1 sample" : "\(sampleCount) samples")
+        }
+        if let duration = profile.durationSeconds, duration.isFinite, duration > 0 {
+            parts.append(String(format: "%.0fs voice", duration))
+        }
+        return parts.isEmpty ? "recognized speaker" : parts.joined(separator: " · ")
+    }
 }
 
 private struct TranscriptSpeakerStats {
@@ -4214,89 +4501,43 @@ private struct ExactSettingsPeopleScreen: View {
     let onBack: () -> Void
     let onRefresh: () -> Void
     let onDelete: (RecognizedSpeakerProfile) -> Void
+    let onRename: (RecognizedSpeakerProfile, String) async throws -> VoiceProfile
     let onHome: () -> Void
     let onRecord: () -> Void
     let onConversations: () -> Void
     let onMemory: () -> Void
+    @State private var selectedPerson: RecognizedSpeakerProfile?
 
     var body: some View {
+        Group {
+            if let selectedPerson {
+                ExactSettingsPersonDetailScreen(
+                    person: selectedPerson,
+                    onBack: { self.selectedPerson = nil },
+                    onRename: { person, name in
+                        let updated = try await onRename(person, name)
+                        await MainActor.run {
+                            self.selectedPerson = person.replacingVoiceProfile(updated)
+                        }
+                        return updated
+                    }
+                )
+            } else {
+                peopleList
+            }
+        }
+        .onAppear(perform: onRefresh)
+    }
+
+    private var peopleList: some View {
         VStack(spacing: 0) {
             ExactBrandBar(status: "PEOPLE")
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 10) {
-                        Button(action: onBack) {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 18, weight: .medium))
-                                .foregroundColor(AppTheme.fg)
-                                .frame(width: 38, height: 38)
-                                .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
-                        }
-                        .buttonStyle(PlainButtonStyle())
-
-                        MonoLabel("settings")
-                        Spacer()
-                        Button(action: onRefresh) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundColor(AppTheme.fg)
-                                .frame(width: 38, height: 38)
-                                .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-
-                    Text("People.")
-                        .font(.system(size: 28, weight: .medium, design: .serif))
-                        .italic()
-                        .foregroundColor(AppTheme.fg)
-                        .padding(.top, 14)
-
-                    SettingsSectionHeader(title: "you")
-                    WwCard(padding: 0) {
-                        PeopleProfileRow(
-                            icon: "person.crop.circle.fill",
-                            name: "\(currentUserName) (you)",
-                            subtitle: selfSubtitle,
-                            badge: "you",
-                            onDelete: nil
-                        )
-                    }
-
-                    SettingsSectionHeader(title: "recognized speakers", hint: speakersHint)
-                    WwCard(padding: 0) {
-                        VStack(spacing: 0) {
-                            if isLoading {
-                                SettingsValueRow(
-                                    icon: "person.2",
-                                    label: "Loading people",
-                                    subtitle: "Fetching saved voices and transcript speakers",
-                                    value: "..."
-                                )
-                            } else if recognizedSpeakers.isEmpty {
-                                SettingsValueRow(
-                                    icon: "person.2",
-                                    label: "No other speakers yet",
-                                    subtitle: "Name a transcript speaker to save them here",
-                                    value: "empty"
-                                )
-                            } else {
-                                ForEach(Array(recognizedSpeakers.enumerated()), id: \.element.id) { index, profile in
-                                    PeopleProfileRow(
-                                        icon: "person.wave.2",
-                                        name: profile.name,
-                                        subtitle: profile.subtitle,
-                                        badge: profile.badge,
-                                        onDelete: deleteAction(for: profile)
-                                    )
-                                    if index < recognizedSpeakers.count - 1 {
-                                        DividerLine()
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    peopleHeader
+                    peopleCurrentUserSection
+                    peopleRecognizedSection
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 4)
@@ -4313,7 +4554,93 @@ private struct ExactSettingsPeopleScreen: View {
                 onHer: {}
             )
         }
-        .onAppear(perform: onRefresh)
+    }
+
+    private var peopleHeader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(AppTheme.fg)
+                        .frame(width: 38, height: 38)
+                        .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                MonoLabel("settings")
+                Spacer()
+                Button(action: onRefresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(AppTheme.fg)
+                        .frame(width: 38, height: 38)
+                        .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+
+            Text("People.")
+                .font(.system(size: 28, weight: .medium, design: .serif))
+                .italic()
+                .foregroundColor(AppTheme.fg)
+                .padding(.top, 14)
+        }
+    }
+
+    private var peopleCurrentUserSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSectionHeader(title: "you")
+            WwCard(padding: 0) {
+                PeopleProfileRow(
+                    icon: "person.crop.circle.fill",
+                    name: "\(currentUserName) (you)",
+                    subtitle: selfSubtitle,
+                    badge: "you",
+                    onSelect: nil,
+                    onDelete: nil
+                )
+            }
+        }
+    }
+
+    private var peopleRecognizedSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSectionHeader(title: "recognized speakers", hint: speakersHint)
+            WwCard(padding: 0) {
+                VStack(spacing: 0) {
+                    if isLoading {
+                        SettingsValueRow(
+                            icon: "person.2",
+                            label: "Loading people",
+                            subtitle: "Fetching saved voices and transcript speakers",
+                            value: "..."
+                        )
+                    } else if recognizedSpeakers.isEmpty {
+                        SettingsValueRow(
+                            icon: "person.2",
+                            label: "No other speakers yet",
+                            subtitle: "New voices will appear here as Speaker 1, Speaker 2, and so on",
+                            value: "empty"
+                        )
+                    } else {
+                        ForEach(Array(recognizedSpeakers.enumerated()), id: \.element.id) { index, profile in
+                            PeopleProfileRow(
+                                icon: "person.wave.2",
+                                name: profile.name,
+                                subtitle: profile.subtitle,
+                                badge: profile.badge,
+                                onSelect: profile.voiceProfile == nil ? nil : { selectedPerson = profile },
+                                onDelete: deleteAction(for: profile)
+                            )
+                            if index < recognizedSpeakers.count - 1 {
+                                DividerLine()
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private var selfSubtitle: String {
@@ -4349,34 +4676,329 @@ private struct ExactSettingsPeopleScreen: View {
     }
 }
 
-private struct PeopleProfileRow: View {
-    let icon: String
-    let name: String
-    let subtitle: String
-    let badge: String
-    let onDelete: (() -> Void)?
+private struct ExactSettingsPersonDetailScreen: View {
+    @State private var person: RecognizedSpeakerProfile
+    @State private var draftName: String
+    @State private var samples: [VoiceProfileSample] = []
+    @State private var isLoadingSamples = false
+    @State private var isSavingName = false
+    @State private var errorMessage: String?
+    @StateObject private var playback = VoiceProfileSamplePlaybackController()
+
+    let onBack: () -> Void
+    let onRename: (RecognizedSpeakerProfile, String) async throws -> VoiceProfile
+
+    init(
+        person: RecognizedSpeakerProfile,
+        onBack: @escaping () -> Void,
+        onRename: @escaping (RecognizedSpeakerProfile, String) async throws -> VoiceProfile
+    ) {
+        _person = State(initialValue: person)
+        _draftName = State(initialValue: person.name)
+        self.onBack = onBack
+        self.onRename = onRename
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ExactBrandBar(status: "PERSON")
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 10) {
+                        Button(action: onBack) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(AppTheme.fg)
+                                .frame(width: 38, height: 38)
+                                .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+
+                        MonoLabel("people")
+                        Spacer()
+                    }
+
+                    Text(person.name)
+                        .font(.system(size: 28, weight: .medium, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.fg)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .padding(.top, 14)
+
+                    SettingsSectionHeader(title: "profile", hint: person.badge)
+                    WwCard(padding: 16) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            TextField(person.name, text: $draftName)
+                                .font(.system(size: 17, weight: .regular))
+                                .foregroundColor(AppTheme.fg)
+                                .textFieldStyle(.plain)
+                                .padding(.horizontal, 11)
+                                .frame(height: 46)
+                                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(AppTheme.bg))
+                                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(AppTheme.borderStrong, lineWidth: 1))
+
+                            HStack(spacing: 10) {
+                                Button(action: saveName) {
+                                    Text(isSavingName ? "Saving..." : "Rename")
+                                        .font(.system(size: 15, weight: .medium, design: .serif))
+                                        .foregroundColor(AppTheme.bg)
+                                        .frame(minWidth: 108, minHeight: 38)
+                                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(AppTheme.fg))
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .disabled(isSavingName || trimmedDraftName.isEmpty || trimmedDraftName == person.name)
+                                .opacity(isSavingName || trimmedDraftName.isEmpty || trimmedDraftName == person.name ? 0.45 : 1)
+
+                                Text(person.subtitle)
+                                    .font(.system(size: 13, weight: .regular, design: .serif))
+                                    .italic()
+                                    .foregroundColor(AppTheme.dim)
+                                    .lineLimit(2)
+
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+
+                    SettingsSectionHeader(title: "samples", hint: samplesHint)
+                    WwCard(padding: 0) {
+                        VStack(spacing: 0) {
+                            if isLoadingSamples {
+                                SettingsValueRow(icon: "waveform", label: "Loading samples", value: "...")
+                            } else if samples.isEmpty {
+                                SettingsValueRow(
+                                    icon: "waveform",
+                                    label: "No samples yet",
+                                    subtitle: "The next confirmed voice segment will appear here",
+                                    value: "empty"
+                                )
+                            } else {
+                                ForEach(Array(samples.enumerated()), id: \.element.id) { index, sample in
+                                    VoiceProfileSampleRow(
+                                        sample: sample,
+                                        isLoading: playback.loadingSampleID == sample.id,
+                                        isPlaying: playback.playingSampleID == sample.id,
+                                        action: { play(sample) }
+                                    )
+                                    if index < samples.count - 1 {
+                                        DividerLine()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let message = errorMessage ?? playback.errorMessage {
+                        ErrorBanner(message: message)
+                            .padding(.top, 16)
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 4)
+                .padding(.bottom, 32)
+            }
+        }
+        .onAppear {
+            Task { await loadSamples() }
+        }
+        .onDisappear {
+            playback.stop()
+        }
+    }
+
+    private var trimmedDraftName: String {
+        draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var samplesHint: String {
+        if isLoadingSamples { return "loading" }
+        return samples.isEmpty ? "empty" : "\(samples.count)"
+    }
+
+    private func saveName() {
+        guard !isSavingName, !trimmedDraftName.isEmpty, trimmedDraftName != person.name else {
+            return
+        }
+        isSavingName = true
+        errorMessage = nil
+        Task { @MainActor in
+            do {
+                let updated = try await onRename(person, trimmedDraftName)
+                person = person.replacingVoiceProfile(updated)
+                draftName = updated.name
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isSavingName = false
+        }
+    }
+
+    private func loadSamples() async {
+        guard let profile = person.voiceProfile, let service = VoiceProfilesService() else {
+            return
+        }
+        isLoadingSamples = true
+        defer { isLoadingSamples = false }
+        do {
+            samples = try await service.samples(profileId: profile.id)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func play(_ sample: VoiceProfileSample) {
+        guard let profile = person.voiceProfile, let service = VoiceProfilesService() else {
+            return
+        }
+        Task {
+            await playback.toggle(profile: profile, sample: sample, service: service)
+        }
+    }
+}
+
+private struct VoiceProfileSampleRow: View {
+    let sample: VoiceProfileSample
+    let isLoading: Bool
+    let isPlaying: Bool
+    let action: () -> Void
 
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(.system(size: 17, weight: .regular))
-                .foregroundColor(AppTheme.fg)
-                .frame(width: 26)
+            Button(action: action) {
+                Image(systemName: isLoading ? "hourglass" : (isPlaying ? "pause.fill" : "play.fill"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(sample.hasAudio == true ? AppTheme.fg : AppTheme.dim)
+                    .frame(width: 34, height: 34)
+                    .overlay(Circle().stroke(AppTheme.borderStrong, lineWidth: 1))
+            }
+            .buttonStyle(PlainButtonStyle())
+            .disabled(isLoading || sample.hasAudio != true)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(name)
+                Text("Sample")
                     .font(.system(size: 15.5, weight: .medium, design: .serif))
                     .foregroundColor(AppTheme.fg)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.76)
-                Text(subtitle)
+                Text(sampleSubtitle)
                     .font(.system(size: 12, weight: .regular, design: .serif))
                     .italic()
                     .foregroundColor(AppTheme.dim)
                     .lineLimit(2)
             }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+    }
 
-            Spacer(minLength: 8)
+    private var sampleSubtitle: String {
+        var parts: [String] = []
+        if let duration = sample.durationSeconds, duration.isFinite, duration > 0 {
+            parts.append(String(format: "%.0fs voice", duration))
+        }
+        if let speakerLabel = sample.speakerLabel, !speakerLabel.isEmpty {
+            parts.append(speakerLabel)
+        }
+        if sample.hasAudio != true {
+            parts.append("audio unavailable")
+        }
+        return parts.isEmpty ? "voice sample" : parts.joined(separator: " · ")
+    }
+}
+
+@MainActor
+private final class VoiceProfileSamplePlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published private(set) var loadingSampleID: String?
+    @Published private(set) var playingSampleID: String?
+    @Published var errorMessage: String?
+
+    private var player: AVAudioPlayer?
+
+    func toggle(profile: VoiceProfile, sample: VoiceProfileSample, service: VoiceProfilesService) async {
+        if playingSampleID == sample.id {
+            stop()
+            return
+        }
+
+        loadingSampleID = sample.id
+        errorMessage = nil
+        do {
+            let url = try await service.downloadSampleAudio(profileId: profile.id, sampleId: sample.id)
+            stop()
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+            try AVAudioSession.sharedInstance().setActive(true)
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.delegate = self
+            player.prepareToPlay()
+            guard player.play() else {
+                throw MeetingAudioPlaybackError.playbackDidNotStart
+            }
+            self.player = player
+            playingSampleID = sample.id
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        loadingSampleID = nil
+    }
+
+    func stop() {
+        player?.stop()
+        player = nil
+        playingSampleID = nil
+        loadingSampleID = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
+            self.stop()
+        }
+    }
+}
+
+private struct PeopleProfileRow: View {
+    let icon: String
+    let name: String
+    let subtitle: String
+    let badge: String
+    let onSelect: (() -> Void)?
+    let onDelete: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 14) {
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundColor(AppTheme.fg)
+                    .frame(width: 26)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(name)
+                        .font(.system(size: 15.5, weight: .medium, design: .serif))
+                        .foregroundColor(AppTheme.fg)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.76)
+                    Text(subtitle)
+                        .font(.system(size: 12, weight: .regular, design: .serif))
+                        .italic()
+                        .foregroundColor(AppTheme.dim)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 8)
+
+                if onSelect != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(AppTheme.dim)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onSelect?()
+            }
 
             if let onDelete {
                 Button(action: onDelete) {

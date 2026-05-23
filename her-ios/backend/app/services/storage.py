@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,13 +20,16 @@ from app.schemas import (
     TranscriptSegment,
     UserResponse,
     VoiceProfileResponse,
+    VoiceProfileSampleResponse,
 )
 from app.services.meeting_memory import build_meeting_memory_candidates
+from app.services.transcript_format import format_speaker_transcript
 
 
 SUMMARY_ITEM_KINDS = ("decision", "action", "follow_up")
 MEETING_JOB_ACTIVE_STATUSES = ("queued", "processing")
 MEETING_CHAT_RUN_STATUSES = ("running", "completed", "failed")
+SPEAKER_PROFILE_NAME_RE = re.compile(r"^Speaker\s+(\d+)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -753,6 +757,7 @@ class MeetingStore:
             self._ensure_meeting_memory_candidates_table(connection)
             self._ensure_voice_profiles_table(connection)
             self._ensure_voice_profile_samples_table(connection)
+            self._ensure_user_speaker_counters_table(connection)
             self._ensure_meeting_jobs_table(connection)
             self._ensure_meeting_chat_threads_table(connection)
             self._ensure_meeting_chat_runs_table(connection)
@@ -934,6 +939,18 @@ class MeetingStore:
             """
         )
 
+    def _ensure_user_speaker_counters_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_speaker_counters (
+                user_id TEXT PRIMARY KEY,
+                next_index INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+
     def _ensure_meeting_jobs_table(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
@@ -1107,6 +1124,7 @@ class MeetingStore:
                     created_at,
                 ),
             )
+            self._advance_speaker_counter_past_name(connection, user_id, name)
         return VoiceProfileResponse(
             id=profile_id,
             name=name,
@@ -1134,6 +1152,70 @@ class MeetingStore:
                 )
                 for row in rows
             ]
+
+    def next_speaker_profile_name(self, user_id: str) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT next_index FROM user_speaker_counters WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            max_existing = self._max_existing_speaker_profile_index(connection, user_id)
+            next_index = max(int(row["next_index"]) if row else 1, max_existing + 1)
+            now = datetime.now(UTC).isoformat()
+            connection.execute(
+                """
+                INSERT INTO user_speaker_counters (user_id, next_index, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    next_index = excluded.next_index,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, next_index + 1, now),
+            )
+            return f"Speaker {next_index}"
+
+    def _max_existing_speaker_profile_index(
+        self,
+        connection: sqlite3.Connection,
+        user_id: str,
+    ) -> int:
+        rows = connection.execute(
+            "SELECT name FROM voice_profiles WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        max_index = 0
+        for row in rows:
+            match = SPEAKER_PROFILE_NAME_RE.match((row["name"] or "").strip())
+            if match:
+                max_index = max(max_index, int(match.group(1)))
+        return max_index
+
+    def _advance_speaker_counter_past_name(
+        self,
+        connection: sqlite3.Connection,
+        user_id: str,
+        name: str | None,
+    ) -> None:
+        match = SPEAKER_PROFILE_NAME_RE.match((name or "").strip())
+        if not match:
+            return
+        min_next_index = int(match.group(1)) + 1
+        row = connection.execute(
+            "SELECT next_index FROM user_speaker_counters WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        next_index = max(int(row["next_index"]) if row else 1, min_next_index)
+        now = datetime.now(UTC).isoformat()
+        connection.execute(
+            """
+            INSERT INTO user_speaker_counters (user_id, next_index, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                next_index = MAX(user_speaker_counters.next_index, excluded.next_index),
+                updated_at = excluded.updated_at
+            """,
+            (user_id, next_index, now),
+        )
 
     def list_voice_profile_embeddings(
         self, user_id: str
@@ -1198,6 +1280,112 @@ class MeetingStore:
             if profile.name.strip().casefold() == normalized:
                 return profile, embedding
         return None
+
+    def rename_voice_profile(
+        self,
+        user_id: str,
+        profile_id: str,
+        name: str,
+    ) -> VoiceProfileResponse | None:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Voice profile name is required.")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, name, duration_seconds, sample_count, created_at
+                FROM voice_profiles WHERE id = ? AND user_id = ?
+                """,
+                (profile_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+
+            duplicate = connection.execute(
+                """
+                SELECT id FROM voice_profiles
+                WHERE user_id = ? AND lower(name) = lower(?) AND id != ?
+                LIMIT 1
+                """,
+                (user_id, clean_name, profile_id),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("A voice profile with that name already exists.")
+
+            old_name = row["name"]
+            self._advance_speaker_counter_past_name(connection, user_id, old_name)
+            connection.execute(
+                "UPDATE voice_profiles SET name = ? WHERE id = ? AND user_id = ?",
+                (clean_name, profile_id, user_id),
+            )
+            self._advance_speaker_counter_past_name(connection, user_id, clean_name)
+            self._rename_speaker_in_user_meetings(connection, user_id, old_name, clean_name)
+            return VoiceProfileResponse(
+                id=row["id"],
+                name=clean_name,
+                durationSeconds=row["duration_seconds"],
+                sampleCount=row["sample_count"],
+                createdAt=row["created_at"],
+            )
+
+    def list_voice_profile_samples(
+        self,
+        user_id: str,
+        profile_id: str,
+    ) -> list[VoiceProfileSampleResponse]:
+        with self._connect() as connection:
+            if not self._voice_profile_exists_for_user(connection, user_id, profile_id):
+                return []
+            rows = connection.execute(
+                """
+                SELECT samples.id, samples.profile_id, samples.meeting_id,
+                       samples.speaker_label, samples.duration_seconds,
+                       samples.created_at, meetings.audio_path
+                FROM voice_profile_samples samples
+                LEFT JOIN meetings ON meetings.id = samples.meeting_id
+                WHERE samples.user_id = ? AND samples.profile_id = ?
+                ORDER BY samples.created_at DESC
+                """,
+                (user_id, profile_id),
+            ).fetchall()
+            return [
+                VoiceProfileSampleResponse(
+                    id=row["id"],
+                    profileId=row["profile_id"],
+                    meetingId=row["meeting_id"],
+                    speakerLabel=row["speaker_label"],
+                    durationSeconds=row["duration_seconds"],
+                    hasAudio=bool(row["audio_path"]),
+                    createdAt=row["created_at"],
+                )
+                for row in rows
+            ]
+
+    def get_voice_profile_sample_payload(
+        self,
+        user_id: str,
+        profile_id: str,
+        sample_id: str,
+    ) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT samples.id, samples.profile_id, samples.meeting_id,
+                       samples.speaker_label, samples.duration_seconds,
+                       samples.created_at, profiles.name AS profile_name,
+                       meetings.audio_path, meetings.audio_content_type
+                FROM voice_profile_samples samples
+                JOIN voice_profiles profiles
+                  ON profiles.id = samples.profile_id
+                 AND profiles.user_id = samples.user_id
+                LEFT JOIN meetings ON meetings.id = samples.meeting_id
+                WHERE samples.user_id = ?
+                  AND samples.profile_id = ?
+                  AND samples.id = ?
+                """,
+                (user_id, profile_id, sample_id),
+            ).fetchone()
+            return dict(row) if row else None
 
     def add_voice_profile_sample(
         self,
@@ -1267,11 +1455,74 @@ class MeetingStore:
 
     def delete_voice_profile(self, user_id: str, profile_id: str) -> bool:
         with self._connect() as connection:
+            row = connection.execute(
+                "SELECT name FROM voice_profiles WHERE id = ? AND user_id = ?",
+                (profile_id, user_id),
+            ).fetchone()
+            if row is not None:
+                self._advance_speaker_counter_past_name(connection, user_id, row["name"])
             cursor = connection.execute(
                 "DELETE FROM voice_profiles WHERE id = ? AND user_id = ?",
                 (profile_id, user_id),
             )
             return cursor.rowcount > 0
+
+    def _voice_profile_exists_for_user(
+        self,
+        connection: sqlite3.Connection,
+        user_id: str,
+        profile_id: str,
+    ) -> bool:
+        row = connection.execute(
+            "SELECT 1 FROM voice_profiles WHERE id = ? AND user_id = ?",
+            (profile_id, user_id),
+        ).fetchone()
+        return row is not None
+
+    def _rename_speaker_in_user_meetings(
+        self,
+        connection: sqlite3.Connection,
+        user_id: str,
+        old_name: str,
+        new_name: str,
+    ) -> None:
+        if old_name.strip().casefold() == new_name.strip().casefold():
+            return
+        rows = connection.execute(
+            """
+            SELECT id, segments_json FROM meetings
+            WHERE user_id = ? AND segments_json IS NOT NULL
+            """,
+            (user_id,),
+        ).fetchall()
+        for row in rows:
+            segments = self._decode_segments(row["segments_json"])
+            changed = False
+            updated_segments = []
+            for segment in segments:
+                if (segment.speaker or "").strip().casefold() == old_name.strip().casefold():
+                    updated_segments.append(segment.model_copy(update={"speaker": new_name}))
+                    changed = True
+                else:
+                    updated_segments.append(segment)
+            if not changed:
+                continue
+            connection.execute(
+                """
+                UPDATE meetings
+                SET transcript = ?, segments_json = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    format_speaker_transcript(updated_segments),
+                    json.dumps(
+                        [segment.model_dump(mode="json") for segment in updated_segments],
+                        ensure_ascii=False,
+                    ),
+                    row["id"],
+                    user_id,
+                ),
+            )
 
     def _create_tables(self, connection: sqlite3.Connection) -> None:
         connection.execute(
