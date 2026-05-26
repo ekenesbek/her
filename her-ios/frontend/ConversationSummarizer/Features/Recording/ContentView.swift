@@ -442,12 +442,13 @@ struct ContentView: View {
                             selectedMeeting = updated
                             return updated
                         },
-                        onAssignSpeaker: { meeting, speaker, profileId, name in
+                        onAssignSpeaker: { meeting, speaker, profileId, name, segmentIndexes in
                             let result = try await meetingsStore.assignSpeaker(
                                 for: meeting,
                                 speaker: speaker,
                                 profileId: profileId,
-                                name: name
+                                name: name,
+                                segmentIndexes: segmentIndexes
                             )
                             selectedMeeting = result.meeting
                             return result
@@ -1868,7 +1869,7 @@ private struct ExactConversationDetailScreen: View {
     let onBack: () -> Void
     let onGenerateSummary: (StoredMeeting) async -> Void
     let onUpdateTranscript: (StoredMeeting, String, [MeetingTranscriptSegment]) async throws -> StoredMeeting
-    let onAssignSpeaker: (StoredMeeting, String, String?, String) async throws -> SpeakerAssignmentResult
+    let onAssignSpeaker: (StoredMeeting, String, String?, String, [Int]?) async throws -> SpeakerAssignmentResult
     let onRename: (StoredMeeting, String) async -> Void
     let onDelete: (StoredMeeting) async -> Void
     private let tabs = ["contents", "summary", "chat"]
@@ -1912,8 +1913,8 @@ private struct ExactConversationDetailScreen: View {
                                         onUpdateTranscript: { transcript, segments in
                                             try await onUpdateTranscript(meeting, transcript, segments)
                                         },
-                                        onAssignSpeaker: { speaker, profileId, name in
-                                            try await onAssignSpeaker(meeting, speaker, profileId, name)
+                                        onAssignSpeaker: { speaker, profileId, name, segmentIndexes in
+                                            try await onAssignSpeaker(meeting, speaker, profileId, name, segmentIndexes)
                                         }
                                     )
                                 }
@@ -4254,7 +4255,7 @@ private struct ExactSettingsHerScreen: View {
     }
 
     private var speakerVoiceProfiles: [VoiceProfile] {
-        voiceProfiles.filter { !isCurrentUserProfile($0) }
+        VoiceProfileDisplayOrdering.ordered(voiceProfiles.filter { !isCurrentUserProfile($0) })
     }
 
     private var recognizedSpeakers: [RecognizedSpeakerProfile] {
@@ -4278,7 +4279,9 @@ private struct ExactSettingsHerScreen: View {
             knownNames.insert(normalized)
         }
 
-        return people
+        let namedPeople = people.filter { !VoiceProfileDisplayOrdering.isGeneratedSpeakerName($0.name) }
+        let generatedPeople = people.filter { VoiceProfileDisplayOrdering.isGeneratedSpeakerName($0.name) }
+        return namedPeople + generatedPeople
     }
 
     private var transcriptRecognizedSpeakers: [RecognizedSpeakerProfile] {
@@ -4424,7 +4427,7 @@ private struct ExactSettingsHerScreen: View {
         voiceProfilesLoading = true
         defer { voiceProfilesLoading = false }
         do {
-            voiceProfiles = try await service.list()
+            voiceProfiles = VoiceProfileDisplayOrdering.ordered(try await service.list())
         } catch {
             // Soft fail; show empty list.
         }
@@ -4452,8 +4455,42 @@ private struct ExactSettingsHerScreen: View {
         } else {
             voiceProfiles.insert(updated, at: 0)
         }
+        voiceProfiles = VoiceProfileDisplayOrdering.ordered(voiceProfiles)
         await meetingsStore.refresh()
         return updated
+    }
+}
+
+private enum VoiceProfileDisplayOrdering {
+    static func ordered(_ profiles: [VoiceProfile]) -> [VoiceProfile] {
+        profiles.sorted { lhs, rhs in
+            let lhsGenerated = isGeneratedSpeakerName(lhs.name)
+            let rhsGenerated = isGeneratedSpeakerName(rhs.name)
+            if lhsGenerated != rhsGenerated {
+                return !lhsGenerated
+            }
+
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt > rhs.createdAt
+            }
+
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    static func isGeneratedSpeakerName(_ name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.localizedCaseInsensitiveCompare("Speaker") != .orderedSame else {
+            return true
+        }
+
+        let parts = trimmed.split(separator: " ")
+        guard parts.count == 2,
+              parts[0].localizedCaseInsensitiveCompare("Speaker") == .orderedSame
+        else {
+            return false
+        }
+        return Int(parts[1]) != nil
     }
 }
 
@@ -6690,7 +6727,7 @@ private struct ConversationContentsPanel: View {
     let scrollProxy: ScrollViewProxy
     let currentUserName: String
     let onUpdateTranscript: (String, [MeetingTranscriptSegment]) async throws -> StoredMeeting
-    let onAssignSpeaker: (String, String?, String) async throws -> SpeakerAssignmentResult
+    let onAssignSpeaker: (String, String?, String, [Int]?) async throws -> SpeakerAssignmentResult
     @Environment(\.scenePhase) private var scenePhase
     @State private var speakerNames: [String: String] = [:]
     @State private var voiceProfiles: [VoiceProfile] = []
@@ -6706,7 +6743,7 @@ private struct ConversationContentsPanel: View {
         scrollProxy: ScrollViewProxy,
         currentUserName: String,
         onUpdateTranscript: @escaping (String, [MeetingTranscriptSegment]) async throws -> StoredMeeting,
-        onAssignSpeaker: @escaping (String, String?, String) async throws -> SpeakerAssignmentResult
+        onAssignSpeaker: @escaping (String, String?, String, [Int]?) async throws -> SpeakerAssignmentResult
     ) {
         self.meeting = meeting
         self.scrollProxy = scrollProxy
@@ -6862,18 +6899,19 @@ private struct ConversationContentsPanel: View {
         let key = scope == .speaker ? chunk.speakerKey : SpeakerNamePreferences.segmentKey(chunk.id)
         if trimmed.isEmpty {
             speakerNames.removeValue(forKey: key)
+            SpeakerNamePreferences.save(speakerNames, meetingId: meeting.id)
+            return
         } else {
-            speakerNames[key] = trimmed
             SpeakerNamePreferences.rememberRecentName(trimmed)
         }
-        SpeakerNamePreferences.save(speakerNames, meetingId: meeting.id)
 
-        guard scope == .speaker, !trimmed.isEmpty else {
-            return
-        }
+        let segmentIndexes = scope == .segment ? chunk.segmentIndexes : nil
+        let result = try await onAssignSpeaker(chunk.speakerKey, selection.profileId, trimmed, segmentIndexes)
 
-        let result = try await onAssignSpeaker(chunk.speakerKey, selection.profileId, trimmed)
         upsertVoiceProfile(result.profile)
+        speakerNames.removeValue(forKey: key)
+        SpeakerNamePreferences.save(speakerNames, meetingId: meeting.id)
+        refreshContentCache(for: result.meeting)
     }
 
     private func saveTranscriptEdit(_ chunk: TranscriptDisplayChunk, text: String) async throws {
@@ -6969,7 +7007,7 @@ private struct ConversationContentsPanel: View {
         voiceProfilesLoading = true
         defer { voiceProfilesLoading = false }
         do {
-            voiceProfiles = try await service.list()
+            voiceProfiles = VoiceProfileDisplayOrdering.ordered(try await service.list())
         } catch {
             voiceProfiles = []
         }
@@ -6981,6 +7019,7 @@ private struct ConversationContentsPanel: View {
         } else {
             voiceProfiles.insert(profile, at: 0)
         }
+        voiceProfiles = VoiceProfileDisplayOrdering.ordered(voiceProfiles)
     }
 
     private func refreshContentCache(for meeting: StoredMeeting) {
@@ -8510,7 +8549,7 @@ private struct SpeakerRenamePopup: View {
                     draft = userName
                     selectedProfileId = matchingProfile(named: userName)?.id
                 }) {
-                    Text("\(userName)(you)")
+                    Text("\(userName) (you)")
                         .font(.system(size: 15, weight: .regular))
                         .foregroundColor(AppTheme.muted)
                         .padding(.horizontal, 9)
@@ -8530,37 +8569,44 @@ private struct SpeakerRenamePopup: View {
                     .foregroundColor(AppTheme.muted)
                     .padding(.bottom, 8)
 
-                if voiceProfiles.isEmpty {
+                if visibleVoiceProfiles.isEmpty {
                     Text("No saved voices yet")
                         .font(.system(size: 15, weight: .regular))
                         .foregroundColor(AppTheme.dim)
                         .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
                 } else {
-                    ForEach(voiceProfiles.prefix(6)) { profile in
-                        Button(action: { select(profile) }) {
-                            HStack(spacing: 8) {
-                                Text(profile.name)
-                                    .font(.system(size: 17, weight: .regular))
-                                    .foregroundColor(AppTheme.fg)
-                                if let sampleCount = profile.sampleCount, sampleCount > 1 {
-                                    Text("\(sampleCount) samples")
-                                        .font(.system(size: 12, weight: .regular))
-                                        .foregroundColor(AppTheme.dim)
+                    ScrollView(showsIndicators: visibleVoiceProfiles.count > 5) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(visibleVoiceProfiles.enumerated()), id: \.element.id) { index, profile in
+                                Button(action: { select(profile) }) {
+                                    HStack(spacing: 8) {
+                                        Text(profile.name)
+                                            .font(.system(size: 17, weight: .regular))
+                                            .foregroundColor(AppTheme.fg)
+                                        if let sampleCount = profile.sampleCount, sampleCount > 1 {
+                                            Text("\(sampleCount) samples")
+                                                .font(.system(size: 12, weight: .regular))
+                                                .foregroundColor(AppTheme.dim)
+                                        }
+                                        Spacer(minLength: 0)
+                                        if selectedProfileId == profile.id {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundColor(AppTheme.fg)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
                                 }
-                                Spacer(minLength: 0)
-                                if selectedProfileId == profile.id {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundColor(AppTheme.fg)
+                                .buttonStyle(PlainButtonStyle())
+                                .overlay(alignment: .bottom) {
+                                    if index < visibleVoiceProfiles.count - 1 {
+                                        DividerLine()
+                                    }
                                 }
                             }
-                            .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        .overlay(alignment: .bottom) {
-                            DividerLine()
                         }
                     }
+                    .frame(maxHeight: 250)
                 }
             }
 
@@ -8626,16 +8672,42 @@ private struct SpeakerRenamePopup: View {
         return voiceProfiles.first { $0.id == selectedProfileId }
     }
 
+    private var visibleVoiceProfiles: [VoiceProfile] {
+        VoiceProfileDisplayOrdering.ordered(voiceProfiles).filter { !isSelfProfile($0) }
+    }
+
     private func select(_ profile: VoiceProfile) {
         draft = profile.name
         selectedProfileId = profile.id
     }
 
     private func matchingProfile(named name: String) -> VoiceProfile? {
-        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalized = normalizedProfileName(name)
         return voiceProfiles.first { profile in
-            profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
+            normalizedProfileName(profile.name) == normalized
         }
+    }
+
+    private func isSelfProfile(_ profile: VoiceProfile) -> Bool {
+        let profileName = normalizedProfileName(profile.name)
+        guard !profileName.isEmpty else {
+            return false
+        }
+        if profileName == "yerasyl" {
+            return true
+        }
+        guard let selfName else {
+            return false
+        }
+        return profileName == normalizedProfileName(selfName)
+    }
+
+    private func normalizedProfileName(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "(you)", with: "", options: .caseInsensitive)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
     }
 
     private func save() {

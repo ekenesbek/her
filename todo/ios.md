@@ -2,6 +2,142 @@
 
 Active `IOS-N` tasks and iOS-scoped `BUG-N` tasks live here.
 
+# IOS-25: Add macOS Desktop Companion Scaffold
+
+Status: review
+Priority: P1
+Owner: agent
+Stream: ios
+Branch: current worktree
+Created: 2026-05-24
+
+## Goal
+
+Add the first signed macOS desktop companion under the Apple client area so Her can grow beyond the iPhone app while sharing the same account, meeting data, and backend contract.
+
+## Context
+
+The user provided Claude Design handoff bundles for `Meta - Personal AI.html` and screenshots of the current warm-white iOS app. The bundle README says to read the chat transcript and primary HTML file first. The relevant design sections are `Her · macOS app` plus the newer `screens-mac-onboarding.jsx`: warm-white desktop client, onboarding/sign-in-first entry, conversations/detail panes, memory review, and native Settings.
+
+This intentionally stays local-first. It should not introduce cloud-only sync, scheduled agents, or vault-driven background work.
+
+## Scope
+
+In scope:
+- Add a signed macOS desktop app target under `her-ios/macos/`.
+- Keep macOS pointed at the same FastAPI backend and account-scoped meeting APIs used by iOS.
+- Add a shared Apple-platform/backend contract folder so future iOS/macOS sharing has a clear home.
+- Recreate the relevant macOS design DNA with the iOS black/white mark and palette: warm-white editorial typography, onboarding-first entry, conversations/detail, memory, and dashboard surfaces.
+- Add backend loading for account, meetings, subscription, and voice profiles, with an authenticated-backend empty state when the token is unavailable.
+- Remove the persistent left navigation rail and move Settings into native macOS Settings.
+
+Out of scope:
+- Moving the existing iOS app target or breaking current iOS build settings.
+- Full shared Swift module refactor of the production iOS client.
+- Native macOS Apple/Google sign-in, cloud sync, schedules, or credential vault behavior.
+- Commit, push, PR, archive, or marking done before human review.
+
+## Implementation Plan
+
+- [x] Fetch and read the design bundle README, chat intent, `Meta - Personal AI.html`, and macOS design source.
+- [x] Add shared backend/platform docs for Apple clients.
+- [x] Add a standalone macOS SwiftUI app scaffold with backend client and design-matched screens.
+- [x] Run macOS build verification and backend compile smoke.
+- [x] Record result and stop for review.
+
+## Verification
+
+- `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`
+- `python3 -m compileall her-ios/backend/app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- `open ~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`
+
+## Result
+
+Implemented the first macOS desktop companion scaffold as a standalone SwiftPM app under `her-ios/macos/`. The app recreates the relevant `Her · macOS app` design from the handoff bundle: warm-white shell, fake macOS titlebar, onboarding-first entry, Home dashboard, Conversations screen with summary/contents/chat tabs, Memory review surface, and native Settings/account/data surfaces.
+
+Added `her-ios/shared/README.md` to make the backend/data split explicit for Apple clients. The current `her-ios/backend` remains in place but is now documented as the shared local FastAPI backend for iOS and macOS. The macOS scaffold defaults to `http://127.0.0.1:8787`, reads `HER_AUTH_TOKEN` or the existing `app.auth.session` Keychain payload, and loads backend `GET /v1/auth/me`, `GET /v1/meetings`, `GET /v1/subscription`, and `GET /v1/voice-profiles` data.
+
+Follow-up update: aligned the macOS icon and palette with the iOS app's `HerOrb`/`AppTheme` black-white styling, removed the coral accent, removed design sample-data fallback, and replaced hardcoded sample account/conversation/memory/settings content with backend-derived state or explicit auth/empty states.
+
+Second follow-up update: fetched and read the newer Claude Design bundle, including `README.md`, `chat1.md`, `Meta - Personal AI.html`, `tokens.jsx`, `screens-mac-app.jsx`, and `screens-mac-onboarding.jsx`. The macOS app now starts with an explicit `00 · sign in` screen followed by onboarding, removes the left navigation rail from the main window, uses a compact titlebar switcher for Home/Conversations/Memory, moves Settings into the native macOS Settings scene, and applies a smaller proportional desktop typography scale.
+
+Third follow-up update: moved the macOS backend integration closer to the iOS app. The scaffold now has a macOS `HerAuthSession`/Keychain store, process-wide bearer token source, native Apple Sign-In service that posts identity tokens to `POST /v1/auth/apple`, backend-session bootstrap through `HER_AUTH_TOKEN`, per-request auth headers, `GET /v1/auth/me` refresh, and real meeting chat calls through `GET/POST /v1/meetings/{id}/chat`. Google sign-in remains explicit OAuth follow-up work because the macOS target has no Google client configuration yet.
+
+Fourth follow-up update: removed the fake red/yellow/green traffic-light controls from the custom macOS title bar so only the native window controls remain.
+
+Fifth follow-up update: fetched and read the latest Claude Design handoff (`eyCLEaMvZE__vZihEYt6VA`), including `README.md`, `chat1.md`, `Meta - Personal AI.html`, `tokens.jsx`, `screens-mac-app.jsx`, and `screens-mac-onboarding.jsx`. Replaced the old wizard-first launch with a dedicated `00 · sign in` launch state that matches the design split screen: left brand/editorial panel, right Apple/Google auth panel, coral accent, and no setup progress bar before sign-in. Launch routing now behaves like the user requested: no token/session opens sign-in; an existing authenticated account routes straight to the dashboard; a newly-created account routes to setup/onboarding.
+
+Sixth follow-up update: fixed the actual macOS-to-backend runtime connection. The local backend was not running, and the SwiftPM macOS app had no iOS Keychain session or `HER_AUTH_TOKEN`, so it could not obtain a bearer token even though the client code was calling backend APIs. Added loopback-only `POST /v1/auth/desktop` to the FastAPI backend for local macOS development, added macOS client bootstrap against that endpoint, and made launch routing use backend auth automatically: existing backend user opens dashboard; empty backend creates a local backend user and enters setup/onboarding. Started the FastAPI backend with launchctl on port `8787` and relaunched `/tmp/HerMac.app`.
+
+Seventh follow-up update: corrected the default macOS backend target to match the current iOS `BackendAPIURL` from `her-ios/frontend/ConversationSummarizer/Resources/Info.plist`: `http://51.195.200.207:8787`. Local desktop bootstrap is now skipped for non-loopback URLs, so the server backend uses normal Apple/Google auth only. Verified the server backend health endpoint returns `200 OK` with database `/var/lib/meta-ios-backend/meetings.sqlite3`, then rebuilt and relaunched `/tmp/HerMac.app` with the server default.
+
+Eighth follow-up update: diagnosed the `com.apple.AuthenticationServices.AuthorizationError error 1000` shown from the Apple button. The failure happens inside Apple's `AuthenticationServices` before any request reaches the shared backend: the running `/tmp/HerMac.app` is a SwiftPM preview bundle, not a provisioned macOS Xcode app with the Sign in with Apple capability. Added macOS-side error mapping so the UI reports that native Apple auth needs a signed/provisioned macOS target instead of showing the raw system error, documented the limitation, and restored `/tmp/HerMac.app` to a launchable preview bundle without the manually-tested Sign in with Apple entitlement.
+
+Ninth follow-up update: fixed the `00 · sign in` split-screen layout collapse shown in the latest screenshot. The sign-in screen now uses explicit geometry-based panel widths so the left brand/editorial panel cannot compress into a narrow empty strip when the right auth panel has large intrinsic content.
+
+Tenth follow-up update: added a Claude-style account menu from the bottom sidebar username. Clicking the user row opens a compact popover above the row with account identity, Settings, Language, and Log out. Settings opens the native macOS Settings window, Language opens an in-popover language picker persisted with `@AppStorage("her.mac.language")`, and Log out clears the auth session and returns to sign-in.
+
+Eleventh follow-up update: switched the durable macOS runtime instructions from the old SwiftPM preview bundle to the generated signed Xcode app target. `her-ios/macos/README.md`, `her-ios/shared/README.md`, and this task now use `HerMac.xcodeproj` as the primary CLI/Xcode path. Normal CLI flow is `xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, then `open ~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`. If Swift files are added or removed under `Sources/HerMac/`, regenerate the project with `GEM_HOME=$HOME/.gem/ruby/2.6.0 ruby scripts/create_xcodeproj.rb`.
+
+Twelfth follow-up update: polished the bottom sidebar account row. Removed the divider that visually cut through the avatar/text, wrapped the account row in a rounded hoverable container, increased avatar/text sizing slightly, and moved the chevron into the card so the username area reads like a real Claude-style account control.
+
+Thirteenth follow-up update: wired the macOS onboarding profile name into the displayed account identity. The `your name` value now persists with the same local settings keys used by the iOS app pattern, is merged into the `AuthUser` shown by Home, sidebar, Settings, and account menu after backend refreshes, and updates the Keychain session copy so the chosen name survives app relaunches. Completing profile setup also marks the stored session as an existing account so the next launch opens the dashboard instead of repeating onboarding.
+
+Fourteenth follow-up update: kept profile naming intentionally local in `UserDefaults`, matching the iOS current behavior instead of adding a backend profile endpoint. macOS Settings now lets the user edit `your name` and `agent name` inline from the account card; Save writes the same `app.settings.ownerName` and `app.settings.aiName` keys and refreshes the displayed user without sending profile data to the backend.
+
+Fifteenth follow-up update: simplified the macOS sidebar per review. Removed the `Conversations` navigation item from the primary sidebar list and removed the text `Her` next to the top sidebar mark. Conversation detail remains reachable through `see all` and recent conversation rows.
+
+Sixteenth follow-up update: removed the remaining top sidebar brand/status inset. The sidebar no longer shows the standalone Her mark or backend status dot above navigation, so it starts directly with `Start recording`.
+
+Seventeenth follow-up update: cleaned up the conversation detail chrome. Removed the `recording - date/time` eyebrow from the detail header, moved `Share`, `Export`, and the overflow action into the native macOS toolbar, and pinned the sidebar split column to a fixed width so opening a recent conversation does not reflow the left menu.
+
+Eighteenth follow-up update: tightened conversation detail per review. Moved `Share`, `Export`, and overflow into a deterministic top-right window overlay, removed the `<-` row so the title starts higher, removed the `synced` metadata suffix, and added the missing transcript section to the macOS `contents` tab. The transcript issue was UI-only: the shared backend list already returns `transcript` and `segments`, but macOS was rendering only the outline while iOS renders segments with a transcript fallback.
+
+Nineteenth follow-up update: made macOS `contents` playback follow the iOS transcript interaction model. The macOS detail view now shares one playback controller between the audio strip and contents tab, downloads backend audio with the bearer token, plays full audio or individual transcript chunks, groups transcript segments using the same speaker/time rules as iOS, highlights the active chunk, and paints played words in the same iOS playback blue (`#1c5cff`). The `Share`, `Export`, and overflow actions were raised further at the top-right of the window overlay.
+
+Twentieth follow-up update: made backend audio playback less blocking on macOS. The app now preloads all audio-backed meetings returned by the server into a local temp cache after backend refresh, preloads the currently opened meeting before first play, and shares in-flight downloads through an actor so Play does not start a second network fetch. Also moved `Share`, `Export`, and overflow back into the native macOS toolbar row, changed the split view to a mutable `NavigationSplitViewVisibility` binding so the native sidebar toggle can collapse/open the sidebar, and replaced the account popover Settings action with SwiftUI `SettingsLink` so Settings opens reliably.
+
+Twenty-first follow-up update: made macOS Settings rows functional by matching the iOS Settings surface more closely. Settings now opens real detail pages/sheets for Billing, backend/account state, conversations, People, memory candidates, language, saved audio, legal/about/licenses, and Help. Privacy, voice, and notification toggles persist in `UserDefaults`; Export writes a JSON archive through `NSSavePanel`; Sign out clears the session and returns the main window to sign-in. People uses backend voice-profile rename/delete calls through `HerShared`.
+
+Verification:
+- `cd her-ios/macos && swift build`
+- `python3 -m compileall her-ios/backend/app`
+- `git diff --check`
+- `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- Rebuilt and launched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after onboarding/sidebar/settings change: `cd her-ios/macos && swift build`, `python3 -m compileall her-ios/backend/app`, `git diff --check`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`, and relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after restoring distinct `00 · sign in`: `cd her-ios/macos && swift build`, `git diff --check`, and relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after backend/auth/chat parity update: `cd her-ios/macos && swift build`, `python3 -m compileall her-ios/backend/app`, `git diff --check`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`, and relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after removing fake traffic-light controls: `cd her-ios/macos && swift build`, `git diff --check`, and relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after latest sign-in launch redesign: `cd her-ios/macos && swift build`, `python3 -m compileall her-ios/backend/app`, `git diff --check`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`, and relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after backend connection fix: `python3 -m compileall her-ios/backend/app`, `cd her-ios/macos && swift build`, `git diff --check`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`, `curl -sS -i http://127.0.0.1:8787/health`, observed `/v1/auth/desktop`, `/v1/auth/me`, `/v1/meetings`, `/v1/subscription`, and `/v1/voice-profiles` in `/tmp/her-ios-backend.log`, and relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after switching macOS default to iOS server backend: `cd her-ios/macos && swift build`, `python3 -m compileall her-ios/backend/app`, `git diff --check`, `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`, `curl -sS -i http://51.195.200.207:8787/health`, and relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after Apple Sign-In error diagnosis: `cd her-ios/macos && swift build`, `curl -sS -i http://51.195.200.207:8787/health`, and rebuilt/relaunched `/tmp/HerMac.app` as a preview bundle; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after sign-in split layout fix: `cd her-ios/macos && swift build`, `git diff --check`, and rebuilt/relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after account menu update: `cd her-ios/macos && swift build`, `git diff --check`, and rebuilt/relaunched `/tmp/HerMac.app`; running process: `/private/tmp/HerMac.app/Contents/MacOS/HerMac`.
+- Follow-up verification after signed macOS CLI runbook update: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`, and `open ~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`.
+- Follow-up verification after sidebar account-row polish: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`, and relaunched `~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`.
+- Follow-up verification after onboarding display-name persistence: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`.
+- Follow-up verification after removing the top sidebar mark/status: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`, and relaunched `~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`.
+- Follow-up verification after conversation detail chrome cleanup: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`, and relaunched `~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`.
+- Follow-up verification after transcript/detail cleanup: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`, and relaunched `~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`.
+- Follow-up verification after iOS-style contents playback: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `python3 -m compileall her-ios/backend/app`, `git diff --check`, and relaunched `~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`.
+- Follow-up verification after Settings UserDefaults profile edit: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`.
+- Follow-up verification after sidebar simplification: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`.
+- Follow-up verification after audio preload/sidebar/settings toolbar fix: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`, relaunched `~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`, and captured `/tmp/her-mac-verify.png`.
+- Follow-up verification after Settings button wiring: `cd her-ios/macos && xcodebuild -project HerMac.xcodeproj -scheme HerMac -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates build`, `git diff --check`, and relaunched `~/Library/Developer/Xcode/DerivedData/HerMac-*/Build/Products/Debug/Her.app`.
+
+Known risks:
+- The macOS app now has a signed Xcode app target and HerShared dependency, but native Google login, microphone recording, and memory candidate mutations are still follow-up work. Native Apple Sign-In should be tested from the signed `Her.app`, not `/tmp/HerMac.app`.
+- Visual review in a running macOS window still needs human review.
+- Existing unrelated iOS/backend worktree changes in `main.py`, `schemas.py`, `ContentView.swift`, and `MeetingsStore.swift` predated this task and were left intact.
+
+## Next
+
+Needs human review of the macOS scaffold and shared backend split. After approval: commit, push/PR only if requested, then decide whether to promote shared Swift models into a production shared Swift package imported by both iOS and macOS. Next task candidate from `todo/tasks.md`: continue `IOS-21` to add candidate update/list/promote-ready endpoints that both Apple clients can use.
+
 # IOS-20: Add Call-Source Intake For Phone And Meeting Apps
 
 Status: review
@@ -2040,6 +2176,20 @@ Out of scope:
 - 2026-05-21 unknown-speaker persistence follow-up: backend smoke script verified a two-speaker meeting auto-created `Speaker 1` and `Speaker 2`, advanced the next counter, renamed `Speaker 1` to `Samole`, rewrote saved meeting segments, and created a later unknown speaker with the next available number. The ambient Python environment was missing PyJWT, so the smoke used a fake `jwt` module; the existing pyenv `hashlib` blake2 warnings still printed, but assertions completed.
 - 2026-05-21 unknown-speaker persistence follow-up: `git diff --check`
 - 2026-05-21 unknown-speaker persistence follow-up: `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- 2026-05-23 production speaker sync follow-up: copied production SQLite to `/tmp/her-speaker-sync-dryrun-local-20260523083546/meetings.sqlite3` and dry-ran sampled voice-embedding sync for the Apple private-relay account and `erasyl.kengesbek@gmail.com`.
+- 2026-05-23 production speaker sync follow-up: backed up production SQLite at `/home/ubuntu/meta-ios-deploy-backups/meetings-20260523-083838-before-speaker-sync.sqlite3`, applied the same sync to `/var/lib/meta-ios-backend/meetings.sqlite3`, and verified backend `GET /health`.
+- 2026-05-23 production speaker sync follow-up: final SQLite verification showed the Apple private-relay account has zero raw `SPEAKER_*` labels and profiles `Yerasyl`, `Yerulan`, and `Speaker 1` through `Speaker 7`; the Google account has `Yerasyl` plus `Speaker 1` through `Speaker 10`, with one old no-audio meeting still containing `SPEAKER_00` because there is no saved audio to extract a voice embedding safely.
+- 2026-05-23 speaker UI follow-up: `python3 -m compileall her-ios/backend/app`
+- 2026-05-23 speaker UI follow-up: `git diff --check`
+- 2026-05-23 speaker UI follow-up: `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -destination 'generic/platform=iOS' -derivedDataPath her-ios/frontend/DerivedData CODE_SIGNING_ALLOWED=NO build`
+- 2026-05-23 speaker UI follow-up: deployed `app/main.py` and `app/schemas.py` to `51.195.200.207`; previous files were backed up at `/home/ubuntu/meta-ios-deploy-backups/backend-20260523-210455-ios13-speaker-segment-assign.tgz`; remote compile, restart, `GET /health`, OpenAPI check for `SpeakerAssignmentRequest.segmentIndexes`, and direct `_assignment_target_indexes` mapping smoke passed.
+- 2026-05-23 speaker UI follow-up: `xcrun devicectl list devices` showed `iPhone (Yerasyl)` as `unavailable`, so the updated iOS build was not installed on device from this environment.
+- 2026-05-24 speaker UI install follow-up: `xcrun devicectl list devices` showed `iPhone (Yerasyl)` as `available (paired)`.
+- 2026-05-24 speaker UI install follow-up: `xcodebuild -project her-ios/frontend/ConversationSummarizer.xcodeproj -scheme ConversationSummarizer -configuration Debug -destination 'platform=iOS,id=05D2DC76-91CA-5F81-9971-FF0C752D8377' -derivedDataPath her-ios/frontend/DerivedData -allowProvisioningUpdates build`
+- 2026-05-24 speaker UI install follow-up: `codesign --verify --deep --strict --verbose=2 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- 2026-05-24 speaker UI install follow-up: `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :BackendAPIURL' her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app/Info.plist` verified `com.ekenesbek.her` and `http://51.195.200.207:8787`.
+- 2026-05-24 speaker UI install follow-up: `xcrun devicectl device install app --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 her-ios/frontend/DerivedData/Build/Products/Debug-iphoneos/Her.app`
+- 2026-05-24 speaker UI install follow-up: `xcrun devicectl device process launch --device 05D2DC76-91CA-5F81-9971-FF0C752D8377 com.ekenesbek.her`
 
 Not run:
 - Manual UI smoke for assigning a real speaker on production meeting audio.
@@ -2065,6 +2215,12 @@ Deployment note: the main backend server had a full root disk. Only Docker build
 
 Added profile management endpoints for People settings: `PATCH /v1/voice-profiles/{profile_id}` renames a saved person and rewrites that user's saved meeting segment labels, `GET /v1/voice-profiles/{profile_id}/samples` lists source samples, and `GET /v1/voice-profiles/{profile_id}/samples/{sample_id}/audio` returns an extracted WAV sample for playback. Settings -> People now opens saved profile detail, supports renaming `Speaker 1` to a real name such as `Samole`, and plays available voice samples.
 
+2026-05-23 follow-up: production speaker labels were synced for the ekenesbek Apple private-relay and Google accounts using sampled voice embeddings from saved meeting audio. The sync relabeled 334 existing transcript segments to known or previously created profiles, created 17 stable unknown-speaker profiles, and updated 16 saved meetings. Apple/private-relay is now free of raw `SPEAKER_*` labels. Google has one old raw `SPEAKER_00` label left in a meeting that has no stored audio, so it was intentionally not guessed.
+
+2026-05-23 speaker UI follow-up: the conversation speaker rename popup now sorts saved profiles with real names before generated `Speaker N` profiles, excludes the current user's self profile from the saved-profile list while keeping the `(you)` chip, and shows the full profile list in a scrollable area instead of truncating to six rows, so older profiles such as `Yerulan` remain selectable. Settings -> People now uses the same real-name-first ordering. `Apply to this segment` now sends the selected transcript chunk indexes to the backend assignment endpoint, extracts a voice sample from only that chunk, creates or extends the selected voice profile, rewrites only the selected chunk in the saved meeting, and refreshes the visible transcript cache after save. `Apply to all segments from this speaker` keeps the previous all-label behavior.
+
+2026-05-24 follow-up: the updated Debug iOS build was code-sign verified, installed on `iPhone (Yerasyl)`, and launched through CoreDevice.
+
 ## Next
 
-Result is ready for human review. Review gate: record/process a new multi-speaker meeting, open Settings -> People, and confirm the unknown voices appear as saved `Speaker 1`, `Speaker 2`, etc. Open one profile, play a sample, rename it to a real name such as `Samole`, then reopen the meeting and confirm the transcript uses the renamed person while later unknown speakers continue with the next number. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment remains the next blocker, or `IOS-21` if the call-memory bridge is the next priority.
+Result is ready for human review on the installed iPhone build. Review gate: open Settings -> People and confirm real named profiles such as `Diar` / `Yerulan` appear before generated `Speaker N` profiles, then open an old recording and confirm the speaker rename popup shows the same full ordered profile list. Assign one selected segment to an existing profile and confirm only that chunk changes; assign all segments from a generated speaker and confirm the whole speaker label changes. After approval: commit, push/PR only if requested, then archive/update task state. Next task candidate from `todo/tasks.md`: continue `IOS-4` if guided owner voice enrollment remains the next blocker, or `IOS-21` if the call-memory bridge is the next priority.

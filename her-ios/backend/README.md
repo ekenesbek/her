@@ -1,6 +1,6 @@
 # Her iOS Backend
 
-Local API for the iOS app. It receives meeting audio, transcribes it with local Whisper, summarizes the transcript with an OpenAI-compatible chat endpoint when an OpenAI/Alem key is configured, and persists meetings in SQLite.
+Shared local API for Her Apple clients. It receives meeting audio from iOS, serves account-scoped meeting data to iOS and macOS, transcribes audio with local Whisper, summarizes transcripts with an OpenAI-compatible chat endpoint when an OpenAI/Alem key is configured, and persists meetings in SQLite.
 
 ## Run
 
@@ -17,6 +17,13 @@ For a physical iPhone, keep the phone and Mac on the same network and set the iO
 
 ```text
 http://Yerasyls-MacBook-Pro.local:8787
+```
+
+For the macOS scaffold, keep the same backend running locally and pass the shared backend URL plus a local bearer token through environment variables:
+
+```bash
+HER_BACKEND_URL=http://127.0.0.1:8787
+HER_AUTH_TOKEN=<local auth token>
 ```
 
 The default summary/chat model is `gpt-oss`. Set `ALEM_OSS_API_KEY` for the platform-managed Alem OSS provider, or set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_SUMMARY_MODEL` in `.env` to use another OpenAI-compatible provider.
@@ -65,6 +72,12 @@ The transcription backend is selected with `TRANSCRIPTION_PROVIDER`:
 - `PATCH /v1/voice-profiles/{profile_id}` with JSON `{ "name": "..." }`
 - `GET /v1/voice-profiles/{profile_id}/samples`
 - `GET /v1/voice-profiles/{profile_id}/samples/{sample_id}/audio`
+
+Local macOS development bootstrap:
+
+- `POST /v1/auth/desktop` is loopback-only and controlled by `LOCAL_DESKTOP_AUTH_ENABLED`.
+- With `createIfMissing=false`, it returns a normal JWT for the first existing local backend user.
+- With `createIfMissing=true`, it creates a local desktop user when the SQLite store has no user yet, then returns the same `AuthResponse` shape as Apple/Google auth.
 
 ## Database
 

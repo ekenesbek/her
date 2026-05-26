@@ -8,13 +8,14 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.schemas import (
     AppleSubscriptionTransactionRequest,
     AuthAppleRequest,
+    AuthDesktopRequest,
     AuthGoogleRequest,
     AuthResponse,
     HealthResponse,
@@ -178,6 +179,14 @@ def chat_prompt_metrics(prompt_messages: list[dict[str, str]]) -> tuple[int, int
 def chat_run_error_message(exc: Exception) -> str:
     return str(exc).replace("\n", " ").strip()[:500] or exc.__class__.__name__
 
+
+def require_loopback_request(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+    if host in loopback_hosts or host.startswith("::ffff:127."):
+        return
+    raise HTTPException(status_code=403, detail="Desktop bootstrap auth is loopback-only.")
+
 app = FastAPI(title="Her iOS Backend", version="0.2.0")
 
 app.add_middleware(
@@ -209,8 +218,14 @@ def health() -> HealthResponse:
 
 @app.post("/v1/auth/apple", response_model=AuthResponse)
 def auth_apple(payload: AuthAppleRequest) -> AuthResponse:
+    audiences = settings.apple_client_id_list
+    if not audiences:
+        raise HTTPException(
+            status_code=503,
+            detail="Apple sign-in is not configured (APPLE_CLIENT_IDS unset).",
+        )
     try:
-        claims = verify_apple_id_token(payload.identityToken, settings.apple_client_id)
+        claims = verify_apple_id_token(payload.identityToken, audiences)
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
 
@@ -248,6 +263,28 @@ def auth_google(payload: AuthGoogleRequest) -> AuthResponse:
         email=email,
         name=name,
     )
+    token, expires_at = create_session_token(user.id, settings.auth_jwt_secret)
+    return AuthResponse(token=token, expiresAt=expires_at, user=user, isNewUser=is_new_user)
+
+
+@app.post("/v1/auth/desktop", response_model=AuthResponse)
+def auth_desktop(payload: AuthDesktopRequest, request: Request) -> AuthResponse:
+    if not settings.local_desktop_auth_enabled:
+        raise HTTPException(status_code=403, detail="Local desktop auth is disabled.")
+    require_loopback_request(request)
+
+    user = store.get_first_user()
+    is_new_user = False
+    if user is None:
+        if not payload.createIfMissing:
+            raise HTTPException(status_code=404, detail="No local backend account exists.")
+        user, is_new_user = store.find_or_create_user_with_status(
+            provider="local",
+            provider_user_id="desktop",
+            email=payload.email,
+            name=payload.name,
+        )
+
     token, expires_at = create_session_token(user.id, settings.auth_jwt_secret)
     return AuthResponse(token=token, expiresAt=expires_at, user=user, isNewUser=is_new_user)
 
@@ -666,8 +703,12 @@ def assign_meeting_speaker(
     if not meeting.segments:
         raise HTTPException(status_code=422, detail="Meeting has no speaker segments.")
 
+    target_indexes = _assignment_target_indexes(meeting.segments, payload.segmentIndexes)
     matching_segments = [
-        segment for segment in meeting.segments if _same_speaker(segment.speaker, speaker_label)
+        segment
+        for index, segment in enumerate(meeting.segments)
+        if _same_speaker(segment.speaker, speaker_label)
+        and (target_indexes is None or index in target_indexes)
     ]
     if not matching_segments:
         raise HTTPException(status_code=404, detail="Speaker was not found in this meeting.")
@@ -719,8 +760,9 @@ def assign_meeting_speaker(
     updated_segments = [
         segment.model_copy(update={"speaker": profile.name})
         if _same_speaker(segment.speaker, speaker_label)
+        and (target_indexes is None or index in target_indexes)
         else segment
-        for segment in meeting.segments
+        for index, segment in enumerate(meeting.segments)
     ]
     updated_transcript = _format_transcript(updated_segments)
     updated_meeting = store.update_meeting_transcript(
@@ -742,6 +784,29 @@ def assign_meeting_speaker(
 
 def _same_speaker(left: str | None, right: str | None) -> bool:
     return (left or "").strip() == (right or "").strip()
+
+
+def _assignment_target_indexes(
+    segments: list,
+    display_indexes: list[int] | None,
+) -> set[int] | None:
+    if display_indexes is None:
+        return None
+    if not display_indexes:
+        raise HTTPException(status_code=422, detail="segmentIndexes cannot be empty.")
+
+    display_to_raw: list[int] = []
+    for raw_index, segment in enumerate(segments):
+        text = getattr(segment, "text", "") or ""
+        if text.strip():
+            display_to_raw.append(raw_index)
+
+    raw_indexes: set[int] = set()
+    for display_index in display_indexes:
+        if display_index < 0 or display_index >= len(display_to_raw):
+            raise HTTPException(status_code=422, detail="segmentIndexes contains an invalid index.")
+        raw_indexes.add(display_to_raw[display_index])
+    return raw_indexes
 
 
 def _segments_duration_seconds(segments: list) -> float | None:

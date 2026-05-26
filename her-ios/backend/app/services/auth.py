@@ -21,14 +21,16 @@ class AuthError(Exception):
     pass
 
 
-def verify_apple_id_token(token: str, audience: str) -> dict:
+def verify_apple_id_token(token: str, audiences: list[str]) -> dict:
+    if not audiences:
+        raise AuthError("Apple audience list is empty; cannot verify identity token.")
     try:
         signing_key = _apple_jwks.get_signing_key_from_jwt(token)
         return jwt.decode(
             token,
             signing_key.key,
             algorithms=["RS256"],
-            audience=audience,
+            audience=audiences,
             issuer=APPLE_ISSUER,
             options={"require": ["sub", "aud", "iss", "exp"]},
         )

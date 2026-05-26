@@ -5,7 +5,9 @@ This folder is split into the mobile frontend and the local backend for the Her 
 ```text
 her-ios/
   frontend/   iOS app
-  backend/    FastAPI, local Whisper, OpenAI summaries
+  macos/      macOS desktop companion scaffold
+  backend/    Shared local FastAPI backend for Apple clients
+  shared/     Apple-platform backend/data contract notes
   docs/       wearable audio notes and consent notes
 ```
 
@@ -36,6 +38,8 @@ The target is `ConversationSummarizer`, deployment target is iOS 15.2, bundle id
 
 ## Backend
 
+The backend is shared by the iOS app and the macOS companion. It remains local-first for the current stage: both clients point at the same FastAPI server, authenticated user, SQLite meeting store, subscription state, speaker profiles, and reviewable memory candidates.
+
 Run the backend from the repo root:
 
 ```bash
@@ -61,6 +65,8 @@ Content-Type: multipart/form-data
 
 audio=<meeting.m4a>
 ```
+
+The macOS scaffold uses the same `GET /v1/meetings`, `GET /v1/subscription`, and account-scoped bearer token pattern. See `shared/README.md` and `macos/README.md`.
 
 ## Local verification
 
