@@ -141,7 +141,8 @@ final class MeetingsStore: ObservableObject {
         for meeting: StoredMeeting,
         speaker: String,
         profileId: String?,
-        name: String
+        name: String,
+        segmentIndexes: [Int]? = nil
     ) async throws -> SpeakerAssignmentResult {
         guard let service else {
             throw MeetingsServiceError.backendFailed
@@ -150,7 +151,8 @@ final class MeetingsStore: ObservableObject {
             meetingId: meeting.id,
             speaker: speaker,
             profileId: profileId,
-            name: name
+            name: name,
+            segmentIndexes: segmentIndexes
         )
         if let index = meetings.firstIndex(where: { $0.id == result.meeting.id }) {
             meetings[index] = result.meeting
@@ -186,7 +188,13 @@ protocol MeetingsService {
     func renameMeeting(meetingId: String, title: String) async throws -> StoredMeeting
     func deleteMeeting(meetingId: String) async throws
     func updateTranscript(meetingId: String, transcript: String, segments: [MeetingTranscriptSegment]) async throws -> StoredMeeting
-    func assignSpeaker(meetingId: String, speaker: String, profileId: String?, name: String) async throws -> SpeakerAssignmentResult
+    func assignSpeaker(
+        meetingId: String,
+        speaker: String,
+        profileId: String?,
+        name: String,
+        segmentIndexes: [Int]?
+    ) async throws -> SpeakerAssignmentResult
 }
 
 protocol MeetingAudioDownloadService {
@@ -323,7 +331,8 @@ struct BackendMeetingsService: MeetingsService {
         meetingId: String,
         speaker: String,
         profileId: String?,
-        name: String
+        name: String,
+        segmentIndexes: [Int]?
     ) async throws -> SpeakerAssignmentResult {
         var request = URLRequest(
             url: endpoint
@@ -338,7 +347,12 @@ struct BackendMeetingsService: MeetingsService {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         request.httpBody = try JSONEncoder().encode(
-            BackendSpeakerAssignmentBody(speaker: speaker, profileId: profileId, name: name)
+            BackendSpeakerAssignmentBody(
+                speaker: speaker,
+                profileId: profileId,
+                name: name,
+                segmentIndexes: segmentIndexes
+            )
         )
 
         let (data, response) = try await session.data(for: request)
@@ -462,6 +476,7 @@ private struct BackendSpeakerAssignmentBody: Encodable {
     let speaker: String
     let profileId: String?
     let name: String
+    let segmentIndexes: [Int]?
 }
 
 private struct BackendSpeakerAssignmentResponse: Decodable {

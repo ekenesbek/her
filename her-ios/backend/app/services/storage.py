@@ -535,6 +535,13 @@ class MeetingStore:
             ).fetchone()
             return self._user_from_row(row) if row else None
 
+    def get_first_user(self) -> UserResponse | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+            return self._user_from_row(row) if row else None
+
     def get_user_subscription_plan(self, user_id: str) -> str:
         with self._connect() as connection:
             active_apple = self._active_apple_subscription_with_connection(

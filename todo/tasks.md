@@ -46,6 +46,7 @@ Canonical index for durable work. Active stream details live in `todo/ios.md`, `
 | IOS-22 | review | P1 | ios | current worktree | Add iOS call memory review UI | `todo/ios.md` |
 | IOS-23 | planned | P1 | ios | current worktree | Make Memory home action-first | `todo/ios.md` |
 | IOS-24 | planned | P1 | ios | current worktree | Add AI chat over user memory | `todo/ios.md` |
+| IOS-25 | review | P1 | ios | current worktree | Add macOS desktop companion scaffold | `todo/ios.md` |
 
 ## DOC-1: Set Up Task-First Agent Workflow
 

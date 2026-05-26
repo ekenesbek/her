@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     meeting_job_workers: int = 1
 
     auth_jwt_secret: str = "dev-secret-change-me-in-production"
-    apple_client_id: str = "com.ekenesbek.her"
+    apple_client_ids: str = "com.ekenesbek.her,com.ekenesbek.her.mac"
     google_client_ids: str = ""
     apple_subscription_product_id: str = "com.ekenesbek.her.plus.monthly"
     app_store_bundle_id: str = "com.ekenesbek.her"
@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     app_store_root_certificates_dir: Path | None = None
     app_store_enable_online_checks: bool = True
     local_subscription_overrides_enabled: bool = False
+    local_desktop_auth_enabled: bool = True
 
     huggingface_token: str | None = None
     diarization_enabled: bool = True
@@ -89,6 +90,10 @@ class Settings(BaseSettings):
     @property
     def google_client_id_list(self) -> list[str]:
         return [c.strip() for c in self.google_client_ids.split(",") if c.strip()]
+
+    @property
+    def apple_client_id_list(self) -> list[str]:
+        return [c.strip() for c in self.apple_client_ids.split(",") if c.strip()]
 
     @property
     def llm_api_key(self) -> str | None:

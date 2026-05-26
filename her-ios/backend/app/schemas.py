@@ -97,6 +97,7 @@ class SpeakerAssignmentRequest(BaseModel):
     speaker: str = Field(min_length=1)
     profileId: str | None = None
     name: str | None = None
+    segmentIndexes: list[int] | None = None
 
 
 class SpeakerAssignmentResponse(BaseModel):
@@ -278,7 +279,7 @@ class MeetingJobResponse(BaseModel):
 
 class UserResponse(BaseModel):
     id: str
-    provider: Literal["apple", "google"]
+    provider: Literal["apple", "google", "local"]
     email: str | None = None
     name: str | None = None
     createdAt: datetime
@@ -292,6 +293,12 @@ class AuthAppleRequest(BaseModel):
 
 class AuthGoogleRequest(BaseModel):
     idToken: str = Field(min_length=1)
+
+
+class AuthDesktopRequest(BaseModel):
+    createIfMissing: bool = False
+    email: str | None = None
+    name: str | None = None
 
 
 class AuthResponse(BaseModel):
